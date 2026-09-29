@@ -1,4 +1,4 @@
-﻿"""微信解密工具的FastAPI Web服务器"""
+"""微信解密工具的FastAPI Web服务器"""
 
 import mimetypes
 import os
@@ -8,8 +8,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
+
+from .wechat_ui_bridge import WeChatBridgeError
 
 from .logging_config import setup_logging, get_logger, install_sensitive_query_log_filter
 
@@ -158,6 +160,16 @@ app.include_router(_favorites_router)
 app.include_router(_record_export_router)
 app.include_router(_system_router)
 app.include_router(_cdn_router)
+from .routers import chat_send as _chat_send_router
+app.include_router(_chat_send_router.router, prefix="/api", tags=["chat_send"])
+
+
+@app.exception_handler(WeChatBridgeError)
+async def wechat_bridge_error_handler(request: Request, exc: WeChatBridgeError):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"code": exc.code, "detail": exc.detail},
+    )
 
 
 # Python's MIME database inherits Windows registry overrides.  Keep the

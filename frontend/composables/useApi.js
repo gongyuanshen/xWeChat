@@ -31,6 +31,9 @@ export const useApi = () => {
     if (detail && typeof detail === 'object') {
       return String(detail.message || detail.detail || detail.code || '').trim() || fallback
     }
+    if (response?._data?.message) {
+      return String(response._data.message).trim() || fallback
+    }
     return fallback
   }
 
@@ -43,6 +46,8 @@ export const useApi = () => {
     error.detail = detail
     if (detail && typeof detail === 'object' && detail.code) {
       error.code = String(detail.code).trim()
+    } else if (response?._data?.code) {
+      error.code = String(response._data.code).trim()
     }
     return error
   }
@@ -254,6 +259,34 @@ export const useApi = () => {
     if (params && params.message_id) query.set('message_id', params.message_id)
     const url = '/chat/messages/raw' + (query.toString() ? `?${query.toString()}` : '')
     return await request(url)
+  }
+
+  const sendChatMessage = async (data = {}) => {
+    return await request('/chat/send', {
+      method: 'POST',
+      body: {
+        account: data.account,
+        username: data.username,
+        display_name: data.display_name ?? null,
+        content: data.content
+      }
+    })
+  }
+
+  const getAiSuggestedReply = async (data = {}) => {
+    return await request('/chat/suggest_reply', {
+      method: 'POST',
+      body: {
+        account: data.account,
+        username: data.username,
+        display_name: data.display_name ?? null,
+        count: data.count ?? 10
+      }
+    })
+  }
+
+  const getChatSendStatus = async () => {
+    return await request('/chat/send/status')
   }
 
   const getChatRealtimeStatus = async (params = {}) => {
@@ -1212,6 +1245,9 @@ export const useApi = () => {
     listChatSessions,
     listChatMessages,
     getChatMessageRaw,
+    sendChatMessage,
+    getAiSuggestedReply,
+    getChatSendStatus,
     getChatRealtimeStatus,
     syncChatRealtimeMessages,
     syncChatRealtimeAll,

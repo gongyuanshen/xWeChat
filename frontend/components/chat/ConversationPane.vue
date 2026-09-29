@@ -142,11 +142,12 @@
 
       <MessageList :state="state" />
 
+      <MessageInputWorkspace :state="state" />
 
       <button
         v-if="showJumpToBottom"
         type="button"
-        class="jump-to-bottom-btn absolute bottom-6 right-6 z-20 w-10 h-10 rounded-full border shadow flex items-center justify-center"
+        class="jump-to-bottom-btn absolute bottom-44 right-6 z-20 w-10 h-10 rounded-full border shadow flex items-center justify-center"
         title="回到最新"
         @click="scrollToBottom"
       >
@@ -192,10 +193,11 @@
 <script>
 import { defineComponent } from 'vue'
 import MessageList from '~/components/chat/MessageList.vue'
+import MessageInputWorkspace from '~/components/chat/MessageInputWorkspace.vue'
 
 export default defineComponent({
   name: 'ConversationPane',
-  components: { MessageList },
+  components: { MessageList, MessageInputWorkspace },
   props: {
     state: { type: Object, required: true }
   },
