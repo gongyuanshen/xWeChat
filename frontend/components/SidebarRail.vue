@@ -79,22 +79,6 @@
       </div>
 
 
-      <!-- 套餐与额度（WxCDN 原图通道） -->
-      <button
-        type="button"
-        class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-        title="套餐与额度"
-        aria-label="套餐与额度"
-        @click="openPlanWindow('manual')"
-      >
-        <span class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <svg class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': planWindowOpen }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <rect x="3" y="4" width="18" height="16" rx="2" />
-            <circle cx="8.5" cy="9" r="1.5" />
-            <path d="m4.5 17 4.5-4.5 3.5 3 2.5-2.5 4.5 4" />
-          </svg>
-        </span>
-      </button>
 
       <!-- Favorites -->
       <div
@@ -518,7 +502,6 @@ const themeToggleTitle = computed(() => {
 })
 
 const { open: settingsDialogOpen, openDialog: openSettingsDialog } = useSettingsDialog()
-const { open: planWindowOpen, openPlanWindow } = usePlanWindow()
 const { getChatAccountInfo, deleteChatAccount } = useApi()
 
 const showGlobalExportEntry = true

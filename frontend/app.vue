@@ -17,7 +17,6 @@
     />
 
     <ClientOnly v-if="route.path !== '/agreement'">
-      <PlanWindow />
     </ClientOnly>
 
     <GuideDialog

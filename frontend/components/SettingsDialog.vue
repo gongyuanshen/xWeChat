@@ -633,7 +633,7 @@
                 <div class="flex items-center justify-between gap-3">
                   <div class="min-w-0 flex-1">
                     <div class="text-[13px] font-medium text-[#222]">自动获取原图</div>
-                    <div class="mt-0.5 text-[11px] text-[#909090]">本地缺原图时自动联网拉取原图，按套餐额度计费。关闭后仅显示本地已有图片。</div>
+                    <div class="mt-0.5 text-[11px] text-[#909090]">本地缺原图时自动联网拉取原图，受服务额度限制。关闭后仅显示本地已有图片。</div>
                   </div>
                   <button
                     type="button"
@@ -647,21 +647,7 @@
                   </button>
                 </div>
               </div>
-              <div class="px-3.5 py-3">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0 flex-1">
-                    <div class="text-[13px] font-medium text-[#222]">套餐与额度</div>
-                    <div class="mt-0.5 text-[11px] text-[#909090]">查看当前版本、剩余额度与重置时间，输入兑换码激活。</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="shrink-0 rounded-[6px] border border-[#e2e2e2] bg-[#fafafa] px-2.5 py-1 text-[12px] text-[#222] transition hover:bg-[#f0f0f0]"
-                    @click="openPlanWindow('manual')"
-                  >
-                    打开套餐
-                  </button>
-                </div>
-              </div>
+              <MediaDownloadSettings :account="keySelectedAccount" />
             </div>
           </section>
 
@@ -748,7 +734,6 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 const api = useApi()
-const { openPlanWindow } = usePlanWindow()
 
 const settingNavItems = [
   { key: 'desktop', label: '桌面行为', hint: '启动 / 关闭 / 端口' },
