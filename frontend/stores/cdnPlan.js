@@ -8,6 +8,10 @@ export const useCdnPlanStore = defineStore('cdnPlan', () => {
   const error = ref(null)
   const fetchedAt = ref(0)
   const account = ref('')
+  // A redemption outlives the settings view. Never release its submission lock
+  // merely because a user closes the dialog or changes the selected account.
+  const pendingRedemptions = ref(new Set())
+  const redeeming = computed(() => pendingRedemptions.value.has(account.value))
   let revision = 0
 
   const connected = computed(() => !!snapshot.value?.connected && !!snapshot.value?.account)
@@ -33,10 +37,11 @@ export const useCdnPlanStore = defineStore('cdnPlan', () => {
     const selected = String(value || '').trim()
     if (!selected) throw new Error('请先选择账号')
     if (selected !== account.value) selectAccount(selected)
-    if (loading.value) throw new Error('媒体服务正在处理请求')
+    if (loading.value || pendingRedemptions.value.has(selected)) throw new Error('媒体服务正在处理请求')
     const current = ++revision
     loading.value = true
     error.value = null
+    if (action === 'redeem') pendingRedemptions.value.add(selected)
     const api = useApi()
     try {
       let result
@@ -49,7 +54,7 @@ export const useCdnPlanStore = defineStore('cdnPlan', () => {
       }
       if (current === revision) {
         snapshot.value = next
-        error.value = next.error || null
+        error.value = next.error || next.lastError || null
         fetchedAt.value = Date.now()
       }
       return result
@@ -64,6 +69,7 @@ export const useCdnPlanStore = defineStore('cdnPlan', () => {
       }
       throw failure
     } finally {
+      if (action === 'redeem') pendingRedemptions.value.delete(selected)
       if (current === revision) loading.value = false
     }
   }
@@ -72,5 +78,5 @@ export const useCdnPlanStore = defineStore('cdnPlan', () => {
   const connect = (value) => request('connect', value)
   const redeem = (value, code) => request('redeem', value, code)
 
-  return { snapshot, loading, error, fetchedAt, account, connected, frozen, lockedUntil, exhausted, selectAccount, refresh, connect, redeem }
+  return { snapshot, loading, redeeming, error, fetchedAt, account, connected, frozen, lockedUntil, exhausted, selectAccount, refresh, connect, redeem }
 })

@@ -16,14 +16,14 @@
       <p v-if="locked" class="mt-1 text-amber-700">兑换已锁定至 {{ dateTime(store.lockedUntil) }}，不影响已有下载能力。</p>
     </template>
     <div class="mt-3 flex flex-wrap gap-2">
-      <button type="button" class="media-service-button" :disabled="!account || store.loading" @click="run('refresh')">刷新状态</button>
-      <button type="button" class="media-service-button" :disabled="!account || store.loading" @click="run('connect')">{{ store.connected ? '重新连接' : '连接' }}</button>
+      <button type="button" class="media-service-button" :disabled="!account || busy" @click="run('refresh')">刷新状态</button>
+      <button type="button" class="media-service-button" :disabled="!account || busy" @click="run('connect')">{{ store.connected ? '重新连接' : '连接' }}</button>
     </div>
     <form class="mt-3" @submit.prevent="submitCode">
       <label for="media-redeem-code" class="block">兑换已有兑换码</label>
       <div class="mt-1 flex flex-wrap gap-2">
         <input id="media-redeem-code" v-model="codeInput" type="text" autocomplete="off" spellcheck="false"
-          aria-describedby="media-redeem-hint" :disabled="!account || store.loading || locked"
+          aria-describedby="media-redeem-hint" :disabled="!account || busy || locked"
           class="min-w-0 flex-1 rounded border border-[#ddd] bg-white px-2 py-1.5 font-mono"
           placeholder="wx-XXXX-XXXX-XXXX-XXXX-XXXX">
         <button type="submit" class="media-service-button" :disabled="!canRedeem">兑换</button>
@@ -41,6 +41,7 @@ import { fmtB, normalizeRedeemCode } from '~/lib/media-service-format.js'
 
 const props = defineProps({ account: { type: String, required: true } })
 const store = useCdnPlanStore()
+const busy = computed(() => store.loading || store.redeeming)
 const codeInput = ref('')
 const notice = ref('')
 const now = ref(Date.now() / 1000)
@@ -49,8 +50,8 @@ let timer
 onMounted(() => { timer = setInterval(() => { now.value = Date.now() / 1000 }, 1000) })
 const locked = computed(() => store.lockedUntil > now.value)
 const normalizedCode = computed(() => normalizeRedeemCode(codeInput.value).code)
-const canRedeem = computed(() => !!props.account && !store.loading && !locked.value && normalizedCode.value.length === 20)
-const connectionText = computed(() => store.loading ? '正在读取…' : store.error ? '状态查询失败' : store.frozen ? '已冻结' : store.connected ? '已连接' : '未连接')
+const canRedeem = computed(() => !!props.account && !busy.value && !locked.value && normalizedCode.value.length === 20)
+const connectionText = computed(() => busy.value ? '正在处理…' : store.error ? '状态查询失败' : store.frozen ? '已冻结' : store.connected ? '已连接' : '未连接')
 const remainingText = computed(() => {
   const quota = store.snapshot?.quota
   if (quota?.remainingBytes != null) return fmtB(quota.remainingBytes)
@@ -65,7 +66,7 @@ const resetText = computed(() => {
 })
 
 const run = async (action, refresh = true) => {
-  if (!props.account || store.loading) return
+  if (!props.account || busy.value) return
   const current = viewRevision
   notice.value = ''
   try {
@@ -92,8 +93,11 @@ watch(() => props.account, account => {
   codeInput.value = ''
   notice.value = ''
   store.selectAccount(account)
-  if (account) void run('refresh', false)
+  if (account && !busy.value) void run('refresh', false)
 }, { immediate: true })
+watch(() => store.redeeming, (pending, wasPending) => {
+  if (wasPending && !pending && props.account && !store.snapshot) void run('refresh', false)
+})
 onUnmounted(() => {
   clearInterval(timer)
   viewRevision += 1

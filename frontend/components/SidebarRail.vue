@@ -857,4 +857,12 @@ const deleteCurrentAccountData = async () => {
 .sidebar-rail-action:hover .sidebar-rail-plate {
   background-color: var(--sidebar-rail-hover);
 }
+.sidebar-rail-icon {
+  color: var(--sidebar-rail-icon-color);
+  transition: color 0.15s ease;
+}
+
+.sidebar-rail-icon-active {
+  color: var(--sidebar-rail-icon-active-color);
+}
 </style>

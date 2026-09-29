@@ -63,6 +63,13 @@ it('传输失败必须向调用者抛出，同时展示错误', async () => {
   expect(store.loading).toBe(false)
 })
 
+it('未产生新请求错误时仍显示服务端记录的媒体错误', async () => {
+  api.getCdnPlan.mockResolvedValue({ ...snapshot(), lastError: { code: 'quota_exceeded', message: '额度不足' } })
+  const store = useCdnPlanStore()
+  await store.refresh('a')
+  expect(store.error?.code).toBe('quota_exceeded')
+})
+
 it('兑换提交期间拒绝重复请求，成功应用服务端快照', async () => {
   const task = deferred()
   api.redeemCdnCode.mockReturnValue(task.promise)
@@ -82,6 +89,23 @@ it('兑换失败不自动重试且保留锁定时间', async () => {
   await expect(store.redeem('a', 'INVALID')).rejects.toBe(failure)
   expect(store.lockedUntil).toBe(2000000000)
   expect(api.redeemCdnCode).toHaveBeenCalledTimes(1)
+})
+
+it('关闭设置或切回账号不能绕过仍在途的兑换保护', async () => {
+  const task = deferred()
+  api.redeemCdnCode.mockReturnValue(task.promise)
+  const store = useCdnPlanStore()
+  const first = store.redeem('a', 'VALID')
+  store.selectAccount('')
+  store.selectAccount('a')
+  expect(store.redeeming).toBe(true)
+  await expect(store.redeem('a', 'VALID')).rejects.toThrow('正在处理')
+  store.selectAccount('b')
+  store.selectAccount('a')
+  await expect(store.redeem('a', 'VALID')).rejects.toThrow('正在处理')
+  expect(api.redeemCdnCode).toHaveBeenCalledTimes(1)
+  task.resolve({ snapshot: snapshot() }); await first
+  expect(store.redeeming).toBe(false)
 })
 
 it('旧账号失败不会污染新账号，连接成功使用真实快照', async () => {

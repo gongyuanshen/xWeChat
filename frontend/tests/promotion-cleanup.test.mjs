@@ -23,3 +23,9 @@ test('媒体设置挂载于设置页，保留原图开关和真实接口', () =>
   const api = readFileSync(new URL('composables/useApi.js', root), 'utf8')
   for (const route of ['/cdn/plan', '/cdn/connect', '/cdn/redeem']) assert.ok(api.includes(route))
 })
+
+test('清理演示样式后保留公共导航图标及选中态', () => {
+  const sidebar = readFileSync(new URL('components/SidebarRail.vue', root), 'utf8')
+  assert.match(sidebar, /\.sidebar-rail-icon\s*\{[^}]*var\(--sidebar-rail-icon-color\)/)
+  assert.match(sidebar, /\.sidebar-rail-icon-active\s*\{[^}]*var\(--sidebar-rail-icon-active-color\)/)
+})
