@@ -20,6 +20,10 @@ if (
 ) {
   try {
     app.disableHardwareAcceleration();
+    app.commandLine.appendSwitch("disable-gpu");
+    app.commandLine.appendSwitch("disable-gpu-compositing");
+    app.commandLine.appendSwitch("in-process-gpu");
+    app.commandLine.appendSwitch("disable-gpu-sandbox");
   } catch {}
 }
 let autoUpdater = null;

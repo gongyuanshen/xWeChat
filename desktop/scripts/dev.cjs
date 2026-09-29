@@ -145,6 +145,7 @@ async function main() {
     NUXT_PORT: String(frontendPort),
     WECHAT_TOOL_PORT: String(backendPort),
     ELECTRON_START_URL: startUrl,
+    ELECTRON_DISABLE_GPU: process.env.ELECTRON_ENABLE_GPU === "1" ? "0" : "1",
   };
   if (sourceNativeCore.nativeDir) {
     applySourceRuntimeEnvironment(sharedEnv, sourceNativeCore);
@@ -179,7 +180,14 @@ async function main() {
   log("frontend is ready, starting Electron");
 
   const electronArgs = [
-    ...(process.env.ELECTRON_ENABLE_GPU === "1" ? [] : ["--disable-gpu"]),
+    ...(process.env.ELECTRON_ENABLE_GPU === "1"
+      ? []
+      : [
+          "--disable-gpu",
+          "--disable-gpu-compositing",
+          "--in-process-gpu",
+          "--disable-gpu-sandbox",
+        ]),
     ".",
   ];
   const electron = spawnLogged(
