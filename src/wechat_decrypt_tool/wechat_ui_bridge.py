@@ -465,16 +465,54 @@ class WeChatBridge:
             self.win32gui.ShowWindow(hwnd, win32con.SW_RESTORE if self.win32con else 9)
             time.sleep(0.05)
 
+        # 1. AttachThreadInput to bypass Windows foreground lock
+        if self.win32process and self.win32api and self.win32gui:
+            try:
+                fg = self.win32gui.GetForegroundWindow()
+                fore_thread = self.win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+                app_thread = self.win32api.GetCurrentThreadId()
+                if fore_thread and fore_thread != app_thread:
+                    self.win32process.AttachThreadInput(app_thread, fore_thread, True)
+                    try:
+                        self.win32gui.BringWindowToTop(hwnd)
+                        self.win32gui.SetForegroundWindow(hwnd)
+                    finally:
+                        self.win32process.AttachThreadInput(app_thread, fore_thread, False)
+            except Exception as exc:
+                logger.debug("AttachThreadInput activate attempt: %s", exc)
+
+        # 2. Direct SetForegroundWindow & SwitchToThisWindow fallback
         try:
             self.win32gui.SetForegroundWindow(hwnd)
         except Exception as exc:
             logger.warning("SetForegroundWindow failed for hwnd=%s: %s", hwnd, exc)
-        time.sleep(0.05)
+            if sys.platform == "win32":
+                try:
+                    ctypes.windll.user32.SwitchToThisWindow(hwnd, True)
+                except Exception:
+                    pass
 
-        fg_hwnd = self.win32gui.GetForegroundWindow()
-        if fg_hwnd != hwnd:
+        # 4. Verification with short polling (up to 200ms) to allow DWM transition
+        # Handles transient GetForegroundWindow() == 0 during animation
+        activated = False
+        last_fg = 0
+        for _ in range(5):
+            fg_hwnd = self.win32gui.GetForegroundWindow()
+            last_fg = fg_hwnd
+            if fg_hwnd == hwnd:
+                activated = True
+                break
+            try:
+                if self.win32con and self.win32gui.GetAncestor(fg_hwnd, getattr(self.win32con, "GA_ROOT", 2)) == hwnd:
+                    activated = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.04)
+
+        if not activated:
             raise WeChatBridgeError(
-                f"无法将微信窗口(hwnd={hwnd})激活至前台(当前前台hwnd={fg_hwnd})，消息发送中止",
+                f"无法将微信窗口(hwnd={hwnd})激活至前台(当前前台hwnd={last_fg})，消息发送中止",
                 code="ACTIVATION_FAILED",
                 status_code=500,
             )
