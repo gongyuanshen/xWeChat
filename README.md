@@ -54,7 +54,7 @@
     <td align="center" colspan="2"><b>修改消息</b>（本地修改，支持恢复）</td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="frontend/public/edit.gif" alt="修改消息" width="800"/></td>
+    <td colspan="2" align="center"><img src="docs/upstream-assets/edit.gif" alt="修改消息" width="800"/></td>
   </tr>
   <tr>
     <td align="center" colspan="2"><b>实时消息同步</b>（点击侧边栏闪电图标后，消息会自动刷新）</td>
@@ -159,7 +159,7 @@
 
 <p align="center">
     <a href="https://qm.qq.com/q/2IB0gvYpYA">
-        <img src="frontend/public/QQImage_1770190010691_1103312318341691201.jpg" alt="WeChatDataAnalysis 加群二维码" width="360" />
+        <img src="docs/upstream-assets/QQImage_1770190010691_1103312318341691201.jpg" alt="WeChatDataAnalysis 加群二维码" width="360" />
     </a>
 </p>
 
@@ -329,3 +329,4 @@ npm run dist:mac
 ## 贡献
 
 欢迎提交Issue和Pull Request来改进这个项目。
+

@@ -37,7 +37,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useCdnPlanStore } from '~/stores/cdnPlan'
-import { fmtB, normalizeRedeemCode } from '~/lib/wxcdn-card/format.js'
+import { fmtB, normalizeRedeemCode } from '~/lib/media-service-format.js'
 
 const props = defineProps({ account: { type: String, required: true } })
 const store = useCdnPlanStore()
