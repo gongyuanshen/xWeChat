@@ -181,6 +181,7 @@ async function main() {
   log("frontend is ready, starting Electron");
 
   const electronArgs = [
+    "--no-sandbox",
     ...(process.env.ELECTRON_ENABLE_GPU === "1"
       ? []
       : [
