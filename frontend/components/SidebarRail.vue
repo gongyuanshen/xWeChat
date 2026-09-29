@@ -78,17 +78,6 @@
         </div>
       </div>
 
-      <button
-        type="button"
-        class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-        title="高级功能演示"
-        aria-label="高级功能演示"
-        @click="openAdvancedFeaturesDialog"
-      >
-        <span class="sidebar-rail-plate advanced-features-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center">
-          <i class="fa-solid fa-toolbox advanced-features-icon" aria-hidden="true"></i>
-        </span>
-      </button>
 
       <!-- 套餐与额度（WxCDN 原图通道） -->
       <button
@@ -494,7 +483,6 @@
 
   <GlobalExportDialog v-if="showGlobalExportEntry" :open="exportDialogOpen" @close="closeExportDialog" />
 
-  <AdvancedFeaturesDialog :open="advancedFeaturesDialogOpen" @close="closeAdvancedFeaturesDialog" />
 </template>
 
 <script setup>
@@ -545,10 +533,6 @@ const accountInfoApiUnsupported = ref(false)
 const deleteAccountApiUnsupported = ref(false)
 const brokenAvatarUrls = ref({})
 const isMacosDesktop = ref(false)
-const advancedFeaturesDialogOpen = ref(false)
-
-const openAdvancedFeaturesDialog = () => { advancedFeaturesDialogOpen.value = true }
-const closeAdvancedFeaturesDialog = () => { advancedFeaturesDialogOpen.value = false }
 
 const normalizeAccountName = (value) => String(value || '').trim()
 
@@ -890,43 +874,4 @@ const deleteCurrentAccountData = async () => {
 .sidebar-rail-action:hover .sidebar-rail-plate {
   background-color: var(--sidebar-rail-hover);
 }
-
-.advanced-features-plate {
-  --advanced-features-bg: var(--sidebar-rail-bg);
-  border: 1px solid transparent;
-  background:
-    linear-gradient(var(--advanced-features-bg), var(--advanced-features-bg)) padding-box,
-    linear-gradient(110deg, rgba(7, 183, 91, 0.16) 42%, #07b75b 47%, #b9f6d3 50%, #07b75b 53%, rgba(7, 183, 91, 0.16) 58%) border-box;
-  background-repeat: no-repeat;
-  background-size: 100% 100%, 300% 100%;
-  animation: advanced-features-border-flow 2.4s linear infinite;
-}
-
-.sidebar-rail-action:hover .advanced-features-plate {
-  --advanced-features-bg: var(--sidebar-rail-hover);
-}
-
-.advanced-features-icon {
-  color: var(--sidebar-rail-icon-color);
-  font-size: 17px;
-}
-
-@keyframes advanced-features-border-flow {
-  from { background-position: 0 0, 100% 0; }
-  to { background-position: 0 0, 0 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .advanced-features-plate { animation: none; }
-}
-
-.sidebar-rail-icon {
-  color: var(--sidebar-rail-icon-color);
-  transition: color 0.15s ease;
-}
-
-.sidebar-rail-icon-active {
-  color: var(--sidebar-rail-icon-active-color);
-}
-
 </style>

@@ -542,8 +542,7 @@ const editingState = useChatEditing({
 
 const {
   contextMenu,
-  closeContextMenu,
-  closeModifyTextUnavailableDialog
+  closeContextMenu
 } = editingState
 
 const {
@@ -837,7 +836,6 @@ const resetAccountScopedState = () => {
   resetMessageState()
   searchState.resetSearchState()
   closeContextMenu()
-  closeModifyTextUnavailableDialog()
   clearContactProfileHoverHideTimer()
   closeContactProfileCard()
   resetVoiceBatchState()

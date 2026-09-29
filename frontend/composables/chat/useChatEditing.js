@@ -1,9 +1,7 @@
 import { nextTick, ref, toRaw } from 'vue'
 import { showErrorAlert } from '~/composables/useErrorNotice'
-import { FEATURE_UNAVAILABLE_MESSAGE, openDeveloperContact } from '~/lib/developer-support'
 
 const CONTEXT_MENU_MARGIN = 8
-const MODIFY_TEXT_UNAVAILABLE_MESSAGE = FEATURE_UNAVAILABLE_MESSAGE
 
 const initialContextMenu = () => ({
   visible: false,
@@ -22,15 +20,11 @@ export const useChatEditing = ({
 }) => {
   const contextMenu = ref(initialContextMenu())
   const contextMenuElement = ref(null)
-  const modifyTextUnavailableDialogOpen = ref(false)
 
   const closeContextMenu = () => {
     contextMenu.value = initialContextMenu()
   }
 
-  const openFeatureUnavailableDialog = () => {
-    modifyTextUnavailableDialogOpen.value = true
-  }
 
   const repositionContextMenu = () => {
     if (!process.client || !contextMenu.value.visible) return
@@ -106,13 +100,6 @@ export const useChatEditing = ({
     scheduleContextMenuReposition()
   }
 
-  const isLikelyTextMessage = (message) => {
-    if (!message) return false
-    const renderType = String(message?.renderType || '').trim()
-    if (renderType && renderType !== 'text') return false
-    if (message?.imageUrl || message?.emojiUrl || message?.videoUrl || message?.voiceUrl) return false
-    return true
-  }
 
   const copyTextToClipboard = async (text) => {
     if (!process.client) return false
@@ -219,22 +206,6 @@ export const useChatEditing = ({
     }
   }
 
-  const onEditMessageClick = () => {
-    const message = contextMenu.value.message
-    closeContextMenu()
-    if (!isLikelyTextMessage(message)) return
-    openFeatureUnavailableDialog()
-  }
-
-  const closeModifyTextUnavailableDialog = () => {
-    modifyTextUnavailableDialogOpen.value = false
-  }
-
-  const contactDeveloper = () => {
-    closeModifyTextUnavailableDialog()
-    void openDeveloperContact()
-  }
-
   const onLocateQuotedMessageClick = async () => {
     const message = contextMenu.value.message
     if (!message?.quoteServerId) return
@@ -248,19 +219,12 @@ export const useChatEditing = ({
   return {
     contextMenu,
     contextMenuElement,
-    modifyTextUnavailableDialogOpen,
-    modifyTextUnavailableMessage: MODIFY_TEXT_UNAVAILABLE_MESSAGE,
     closeContextMenu,
-    openFeatureUnavailableDialog,
-    closeModifyTextUnavailableDialog,
-    contactDeveloper,
     openMediaContextMenu,
-    isLikelyTextMessage,
     copyTextToClipboard,
     onCopyMessageTextClick,
     onCopyMessageJsonClick,
     onOpenFolderClick,
-    onEditMessageClick,
     onLocateQuotedMessageClick
   }
 }

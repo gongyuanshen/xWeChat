@@ -998,32 +998,8 @@
         打开文件夹
       </button>
 
-      <template v-if="isLikelyTextMessage(contextMenu.message)">
-        <div class="border-t border-gray-200"></div>
-        <button
-          class="chat-context-menu__item block w-full text-left px-3 py-2"
-          type="button"
-          @click="onEditMessageClick"
-        >
-          修改文字
-        </button>
-      </template>
     </div>
 
-    <GuideDialog
-      :open="modifyTextUnavailableDialogOpen"
-      export-style
-      eyebrow="功能暂未开放"
-      :title="developerContactTitle"
-      badge="暂时不可用"
-      :description="modifyTextUnavailableMessage"
-      :primary-label="developerContactLabel"
-      secondary-label="关闭"
-      tone="warning"
-      @primary="contactDeveloper"
-      @secondary="closeModifyTextUnavailableDialog"
-      @close="closeModifyTextUnavailableDialog"
-    />
 
     <!-- 导出弹窗 -->
     <ChatExportDialog v-if="exportModalOpen" :state="state" />
@@ -1033,8 +1009,6 @@
 import { computed, defineComponent, ref, watch } from 'vue'
 import ChatExportDialog from '~/components/chat/ChatExportDialog.vue'
 import ChatHistoryFloatingWindows from '~/components/chat/ChatHistoryFloatingWindows.vue'
-import GuideDialog from '~/components/GuideDialog.vue'
-import { DEVELOPER_CONTACT_LABEL, DEVELOPER_CONTACT_TITLE } from '~/lib/developer-support'
 
 const PREVIEW_IMAGE_MIN_SCALE = 0.2
 const PREVIEW_IMAGE_MAX_SCALE = 8
@@ -1053,7 +1027,7 @@ const readMaybeRef = (value) => {
 
 export default defineComponent({
   name: 'ChatOverlays',
-  components: { ChatExportDialog, ChatHistoryFloatingWindows, GuideDialog },
+  components: { ChatExportDialog, ChatHistoryFloatingWindows },
   props: {
     state: { type: Object, required: true }
   },
@@ -1151,8 +1125,6 @@ export default defineComponent({
 
     return {
       ...props.state,
-      developerContactTitle: DEVELOPER_CONTACT_TITLE,
-      developerContactLabel: DEVELOPER_CONTACT_LABEL,
       previewImageScale,
       previewImageRotation,
       previewImageTransformStyle,
