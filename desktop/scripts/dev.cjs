@@ -146,6 +146,7 @@ async function main() {
     WECHAT_TOOL_PORT: String(backendPort),
     ELECTRON_START_URL: startUrl,
     ELECTRON_DISABLE_GPU: process.env.ELECTRON_ENABLE_GPU === "1" ? "0" : "1",
+    WECHAT_TOOL_BACKEND_STARTUP_TIMEOUT_MS: process.env.WECHAT_TOOL_BACKEND_STARTUP_TIMEOUT_MS || "120000",
   };
   if (sourceNativeCore.nativeDir) {
     applySourceRuntimeEnvironment(sharedEnv, sourceNativeCore);
