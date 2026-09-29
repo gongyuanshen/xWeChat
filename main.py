@@ -10,7 +10,13 @@
 
 import multiprocessing
 import os
+import sys
 from pathlib import Path
+
+# Source launches must use this checkout after a non-editable uv install.
+# Frozen builds resolve their bundled package without a source directory.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 # Keep standalone/frozen launches safe when scanner code uses multiprocessing.
 if __name__ == "__main__":
@@ -31,6 +37,8 @@ from wechat_decrypt_tool.runtime_settings import (
 
 def main():
     """启动微信解密工具API服务"""
+    import wechat_decrypt_tool
+    print(f"Backend source: {wechat_decrypt_tool.__file__}", flush=True)
     start_desktop_parent_watchdog_from_env()
     configure_native_core_entrypoint()
     host, host_source = read_effective_backend_host(default="127.0.0.1")
