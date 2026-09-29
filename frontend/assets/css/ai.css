@@ -1,0 +1,24 @@
+.ai-ui { color: #25352d; font-size: 13px; line-height: 1.65; }
+.ai-ui label { display: flex; flex-direction: column; gap: 5px; min-width: 0; flex: 1; margin-bottom: 10px; }
+.ai-ui input:not([type=checkbox]), .ai-ui select, .ai-ui textarea { width: 100%; min-width: 0; border: 1px solid #dce4df; border-radius: 7px; padding: 7px 9px; background: #fff; color: #25352d; }
+.ai-ui input[type=checkbox] { accent-color: #07a956; }
+.ai-ui button { border: 1px solid #dce4df; border-radius: 7px; padding: 6px 10px; background: #fff; cursor: pointer; }
+.ai-ui button:hover { background: #f0f7f3; }
+.ai-ui button:disabled { opacity: .45; cursor: default; }
+.ai-ui button:focus-visible, .ai-ui input:focus-visible, .ai-ui select:focus-visible, .ai-ui textarea:focus-visible { outline: 2px solid #07a956; outline-offset: 2px; }
+.ai-ui .ai-primary, .ai-ui .ai-selected { color: #fff; background: #079c50; border-color: #079c50; }
+.ai-ui .ai-row { display: flex; align-items: center; gap: 9px; margin: 10px 0; }
+.ai-ui .ai-wrap { flex-wrap: wrap; }
+.ai-ui .ai-check { flex-direction: row; align-items: center; }
+.ai-ui .ai-card { padding: 13px; border: 1px solid #e0e8e3; border-radius: 10px; margin: 12px 0; background: #fff; }
+.ai-ui .ai-muted { color: #718077; font-size: 12px; }
+.ai-ui .ai-error { padding: 8px; border-radius: 6px; background: #fff1f0; color: #ac3030; white-space: pre-wrap; }
+.ai-ui .ai-success { color: #087641; }
+.ai-ui .ai-source { color: #087641; padding: 1px 5px; margin: 2px; font-size: 11px; }
+.ai-ui .ai-prose { white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-ui .ai-title { font-size: 15px; font-weight: 650; margin-bottom: 8px; }
+.ai-ui .ai-section-title { font-weight: 600; margin: 12px 0 5px; }
+.ai-ui progress { width: 100%; accent-color: #07a956; }
+.dark .ai-ui { color: #dce7e0; }
+.dark .ai-ui .ai-card, .dark .ai-ui input:not([type=checkbox]), .dark .ai-ui select, .dark .ai-ui textarea, .dark .ai-ui button { background: #242e28; color: #dce7e0; border-color: #435248; }
+.dark .ai-ui .ai-selected, .dark .ai-ui .ai-primary { background: #087c44; }

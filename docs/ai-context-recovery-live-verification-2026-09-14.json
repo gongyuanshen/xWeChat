@@ -1,0 +1,41 @@
+{
+  "id": "8fbda9940a8f4587b3380a36262a4c10",
+  "status": "completed",
+  "error": "",
+  "read_count": 2209,
+  "used": {
+    "tools": 93,
+    "models": 51,
+    "media": 0
+  },
+  "stage": "正在回答",
+  "finished_at": 1789358208.5420885,
+  "context_budget": {
+    "run_id": "8fbda9940a8f4587b3380a36262a4c10",
+    "version": 1,
+    "used": 138270,
+    "input_capacity": 991296,
+    "model_window": 1000000,
+    "output_reserve": 8192,
+    "safety_reserve": 512,
+    "percent": 13.9,
+    "measurement": "conservative_estimate",
+    "unit": "budget_units",
+    "description": "文本按 UTF-8 字节作保守上界估算，包含工具与请求封装；不是实测 Token。",
+    "model_id": "deepseek-flash",
+    "profile_id": "f0003c514c8b41e5be0a67c50beeea5f",
+    "reasoning_effort": null,
+    "updated_at": 1789358079.2401712,
+    "conservative_units": 138270
+  },
+  "answer_chars": 2420,
+  "new_usage_calls": 22,
+  "new_usage_purposes": {
+    "deepagents_agent": 22
+  },
+  "new_usage_statuses": {
+    "success": 22
+  },
+  "input_tokens": 809424,
+  "output_tokens": 28960
+}

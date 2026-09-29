@@ -1,0 +1,20 @@
+{
+  "scenario": "同一条构造证据、同一条局部发现、单页分支；含完整工具定义输入",
+  "measurement": "cl100k_base 文本估算，非实际服务商 Token 或账单；未运行真实模型",
+  "legacy": {
+    "model_calls": 3,
+    "input_tokens_cl100k_estimate": 23355,
+    "input_utf8_bytes": 79273,
+    "evidence_input_occurrences": 2,
+    "repeated_evidence_tokens_cl100k_estimate": 31,
+    "effective_findings": 1
+  },
+  "planned": {
+    "model_calls": 1,
+    "input_tokens_cl100k_estimate": 3346,
+    "input_utf8_bytes": 10888,
+    "evidence_input_occurrences": 1,
+    "repeated_evidence_tokens_cl100k_estimate": 0,
+    "effective_findings": 1
+  }
+}

@@ -1,0 +1,188 @@
+{
+  "captured_local": "2026-09-14T11:24:34.320332",
+  "scope": "AI 助手现行执行链与指定失败任务；不含密钥和聊天正文",
+  "runtime_dependencies": {
+    "deepagents": "0.7.13",
+    "langchain": "1.4.0",
+    "langchain-core": "1.6.2",
+    "langgraph": "1.2.11",
+    "langgraph-checkpoint-sqlite": "3.1.1"
+  },
+  "run": {
+    "id": "8fbda9940a8f4587b3380a36262a4c10",
+    "engine_version": 3,
+    "status": "failed",
+    "error": "上下文摘要整理失败：摘要仍过长（13010 字节，上限 8192 字节）；已尝试 3 次，原文和原检查点已保留。",
+    "version": 1,
+    "read_count": 2146,
+    "used": {
+      "tools": 20,
+      "models": 28,
+      "media": 0
+    },
+    "cutoff": 1789354431
+  },
+  "context_budget": {
+    "used": 21815,
+    "input_capacity": 615488,
+    "model_window": 1000000,
+    "output_reserve": 384000,
+    "safety_reserve": 512,
+    "percent": 3.5,
+    "measurement": "conservative_estimate",
+    "unit": "budget_units",
+    "conservative_units": 21815
+  },
+  "coverage": [
+    {
+      "read": 2000,
+      "analyzed": 0,
+      "read_complete": false,
+      "complete": false,
+      "warning": ""
+    }
+  ],
+  "scopes": [
+    {
+      "start": 0,
+      "end": 1789354431,
+      "mode": "search",
+      "complete_required": false,
+      "message_count": null,
+      "read_complete": false,
+      "pages": 12,
+      "committed_pages": 12,
+      "pending_page": ""
+    }
+  ],
+  "saved_piece_kinds": {
+    "deep_directory": 1,
+    "deep_file": 1,
+    "deep_live_cursor": 8,
+    "deep_page": 12,
+    "deep_scope": 1,
+    "read_cursor": 12,
+    "timeline": 35
+  },
+  "post_restart_summary_calls": [
+    {
+      "id": "fe4f44b59fd54ec3b7cd55e55bdb8ccc",
+      "purpose": "deepagents_summary",
+      "status": "success",
+      "model": "deepseek-flash",
+      "usage": {
+        "input_tokens": 25075,
+        "output_tokens": 3322,
+        "total_tokens": 28397,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "finish_reason": "stop",
+      "duration_ms": 53520,
+      "truncated": null,
+      "started_local": "2026-09-14T11:06:56.995796"
+    },
+    {
+      "id": "fe9c094f2b794a3f9122240fe5be746d",
+      "purpose": "deepagents_summary",
+      "status": "success",
+      "model": "deepseek-flash",
+      "usage": {
+        "input_tokens": 3443,
+        "output_tokens": 2471,
+        "total_tokens": 5914,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "finish_reason": "stop",
+      "duration_ms": 40339,
+      "truncated": null,
+      "started_local": "2026-09-14T11:07:50.624364"
+    },
+    {
+      "id": "26b6e3d913744a058352415fd6fe296f",
+      "purpose": "deepagents_summary",
+      "status": "success",
+      "model": "deepseek-flash",
+      "usage": {
+        "input_tokens": 25186,
+        "output_tokens": 5156,
+        "total_tokens": 30342,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "finish_reason": "stop",
+      "duration_ms": 78946,
+      "truncated": null,
+      "started_local": "2026-09-14T11:08:31.084826"
+    },
+    {
+      "id": "235bca25e320459bb6df8dd745caf6d5",
+      "purpose": "deepagents_summary",
+      "status": "success",
+      "model": "deepseek-flash",
+      "usage": {
+        "input_tokens": 7748,
+        "output_tokens": 4868,
+        "total_tokens": 12616,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "finish_reason": "stop",
+      "duration_ms": 82776,
+      "truncated": null,
+      "started_local": "2026-09-14T11:09:50.124173"
+    },
+    {
+      "id": "9d11f458ccc141edb6962d479b40af05",
+      "purpose": "deepagents_summary",
+      "status": "success",
+      "model": "deepseek-flash",
+      "usage": {
+        "input_tokens": 7459,
+        "output_tokens": 4868,
+        "total_tokens": 12327,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "finish_reason": "stop",
+      "duration_ms": 83843,
+      "truncated": null,
+      "started_local": "2026-09-14T11:11:13.006333"
+    }
+  ],
+  "totals": {
+    "calls": 5,
+    "input_tokens": 68911,
+    "output_tokens": 20685,
+    "duration_ms": 339424
+  },
+  "source_sha256": {
+    "src/wechat_decrypt_tool/ai/deep_runtime.py": "d432e4262c15faa7b3cda1a1062ecef77ab9d95aff9988dcb3f4b5666c0383ad",
+    "src/wechat_decrypt_tool/ai/deep_context.py": "68a72967e3a1ba5df2e57a7a213299de609cc308e4a7aea78ef515d0ee36f942",
+    "src/wechat_decrypt_tool/ai/deep_model.py": "9398a18fc5d58694287f085e19dc1669adac37bfbf6b8023303276039e202c5a",
+    "src/wechat_decrypt_tool/ai/deep_tools.py": "251a08c24dc38b8dc78c0f7ff3ebe8f6dec58bf022092bfbbf367c2b633f0607",
+    "src/wechat_decrypt_tool/ai/agent_budget.py": "28dfd7e70181314aa711f3dd1669920e238a583a420f66301637260379b9e91b",
+    "src/wechat_decrypt_tool/ai/context_meter.py": "1c6aef0de99142d740506f3480fb22c1b3a616bd255ca9879d9bc962815e1d69",
+    "src/wechat_decrypt_tool/ai/compaction_policy.py": "40c47947ad51980df246c3d7a1e62b3ead16c95ee1b7f32d0f5be5d54b7262e9",
+    "src/wechat_decrypt_tool/ai/deep_projection.py": "9fe5730554024d550dfd026d5e3da968de4a738263bed0cfcb1be286b4e032b5",
+    "src/wechat_decrypt_tool/ai/agent_service.py": "475efd1b3fd9038ca767f2a7bd8a8a3f836361e575a98d417d0e494a642c1439",
+    "src/wechat_decrypt_tool/ai/agent_workspace.py": "b8b22c19f92353a0d9fbac1a81b07c90962c4f1d802872187be357c5454da383",
+    "src/wechat_decrypt_tool/ai/deep_backend.py": "3c7ee3dcfa1f665a9d3edf20e7a13c9bca0898f564e2e11b654e98b4ae8612e0",
+    "src/wechat_decrypt_tool/ai/deep_checkpoints.py": "c764a9bc3d4797d6162059afbefba202974901f94608e963e5fd1a366dc957f7",
+    "frontend/components/chat/AgentRun.vue": "6654eef4c90eed2a0a8cd683d1e24abb60cd6beb2946d1a596518b8aa9540087",
+    "frontend/components/chat/ChatAgentPanel.vue": "791ebf358a6e040362a3f543791db96e9996d5d1bc428a9fb02cd058c8b0724f"
+  },
+  "current_scope_saved_original_count_verified": 2146,
+  "coverage_snapshot_note": "搜索登记更新总读取数但未刷新 coverage；持久化 read=2000，当前范围原文实际2146。"
+}

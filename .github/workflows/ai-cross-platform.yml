@@ -1,0 +1,93 @@
+name: AI Cross-Platform Checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/ai-cross-platform.yml'
+      - 'src/wechat_decrypt_tool/ai/**'
+      - 'src/wechat_decrypt_tool/local_search/**'
+      - 'src/wechat_decrypt_tool/routers/ai*.py'
+      - 'src/wechat_decrypt_tool/routers/local_search.py'
+      - 'src/wechat_decrypt_tool/resources/local_search*.json'
+      - 'desktop/scripts/ai-packaging.cjs'
+      - 'desktop/scripts/build-backend.cjs'
+      - 'desktop/src/ai-notifications.cjs'
+      - 'desktop/src/renderer-startup.cjs'
+      - 'desktop/src/main.cjs'
+      - 'desktop/tests/ai-*.test.cjs'
+      - 'desktop/tests/renderer-startup.test.cjs'
+      - 'tools/verify_ai_runtime.py'
+      - 'tools/build_ai_smoke.cjs'
+      - 'frontend/components/**'
+      - 'frontend/composables/useAiApi.js'
+      - 'frontend/composables/useApi.js'
+      - 'frontend/composables/chat/useChatSearch.js'
+      - 'frontend/tests/chat-calendar.test.js'
+      - 'src/wechat_decrypt_tool/chat_realtime_reader.py'
+      - 'src/wechat_decrypt_tool/routers/chat.py'
+      - 'tests/test_chat_calendar_queries.py'
+      - 'tests/test_chat_message_calendar_heatmap.py'
+      - 'tests/test_ai*.py'
+      - 'tests/test_local_search*.py'
+      - 'pyproject.toml'
+      - 'uv.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  ai:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14]
+    runs-on: ${{ matrix.os }}
+    # Windows 的真实 SQLite 持久化测试耗时波动较大，为后续构建预留时间。
+    timeout-minutes: 60
+    env:
+      # macOS setup-python builds may lack SQLite loadable-extension support.
+      # Use uv-managed CPython for both source checks and the frozen runtime.
+      UV_MANAGED_PYTHON: 'true'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - run: python -m pip install uv
+      # macOS 的部分 Python 构建不支持 SQLite 扩展；统一使用 uv 托管解释器。
+      - name: Install Python with SQLite extension support
+        run: uv python install 3.11
+      - run: uv sync --locked --extra build --python 3.11 --managed-python
+      - name: AI runtime and media (synthetic, no API calls)
+        run: uv run python tools/verify_ai_runtime.py
+      - name: AI and local search regression
+        shell: bash
+        # 首次失败立即输出具体断言，避免超时取消后只留下进度标记。
+        # 由 Python 展开 glob，避免 Windows 默认 PowerShell 将通配符原样传给 pytest。
+        run: >-
+          uv run python -c
+          "import glob, pytest; raise SystemExit(pytest.main(['-x', '-vv', '--tb=short', '--durations=15',
+          *sorted(glob.glob('tests/test_ai*.py') + glob.glob('tests/test_local_search*.py'))]))"
+      - name: Chat calendar and date navigation regression
+        run: >-
+          uv run pytest -q
+          tests/test_chat_calendar_queries.py
+          tests/test_chat_message_calendar_heatmap.py
+          tests/test_native_core_realtime.py
+          tests/test_chat_export_targets.py
+          tests/test_chat_source_auto.py
+          tests/test_chat_request_perf.py
+      - run: npm ci
+        working-directory: frontend
+      - run: npx vitest run
+        working-directory: frontend
+      - run: npm run generate
+        working-directory: frontend
+      - name: Desktop notification and packaging contracts
+        run: node --test desktop/tests/ai-notifications.test.cjs desktop/tests/ai-packaging.test.cjs desktop/tests/renderer-startup.test.cjs
+      - name: Frozen AI runtime (no account or API credentials)
+        run: node tools/build_ai_smoke.cjs

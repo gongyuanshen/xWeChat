@@ -1,0 +1,60 @@
+{
+  "id": "cuda12.8-ort1.26.0-cudnn9.8.0.87",
+  "platform": "win32",
+  "cuda": "12.8",
+  "cudnn": "9.8.0.87",
+  "runtime": "1.26.0",
+  "minimum_windows_driver": "572.61",
+  "target_families": [
+    "Ampere (RTX 30)",
+    "Ada (RTX 40)",
+    "Blackwell (RTX 50)"
+  ],
+  "validated_devices": [
+    "RTX 4070 SUPER / driver 596.49 / Windows x64 / CPython 3.11"
+  ],
+  "files": [
+    {
+      "name": "onnxruntime_gpu-1.26.0-cp311-cp311-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/ef/26/a417b7a1cdbbf56a389bfcd399255be23f30e5721e3e519472fe8dde9c99/onnxruntime_gpu-1.26.0-cp311-cp311-win_amd64.whl",
+      "size": 226539455,
+      "sha256": "cc5329aad02d9745cc3ae9cdb185bfa1aad242a7bf89b8c471280002ec40f98a"
+    },
+    {
+      "name": "onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl",
+      "size": 226548963,
+      "sha256": "5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491"
+    },
+    {
+      "name": "onnxruntime_gpu-1.26.0-cp313-cp313-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/67/3f/59f1777a394625ecc9a85636de57dc47c25dbb5f888da050f1463955a0ce/onnxruntime_gpu-1.26.0-cp313-cp313-win_amd64.whl",
+      "size": 226548083,
+      "sha256": "6ab9f9c741d2e239b2e321ab0d389c04329d4ab7f11e3b92dd3aa7db1c59dee4"
+    },
+    {
+      "name": "nvidia_cuda_runtime_cu12-12.8.90-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/30/a5/a515b7600ad361ea14bfa13fb4d6687abf500adc270f19e89849c0590492/nvidia_cuda_runtime_cu12-12.8.90-py3-none-win_amd64.whl",
+      "size": 944318,
+      "sha256": "c0c6027f01505bfed6c3b21ec546f69c687689aad5f1a377554bc6ca4aa993a8"
+    },
+    {
+      "name": "nvidia_cublas_cu12-12.8.4.1-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/70/61/7d7b3c70186fb651d0fbd35b01dbfc8e755f69fd58f817f3d0f642df20c3/nvidia_cublas_cu12-12.8.4.1-py3-none-win_amd64.whl",
+      "size": 567544208,
+      "sha256": "47e9b82132fa8d2b4944e708049229601448aaad7e6f296f630f2d1a32de35af"
+    },
+    {
+      "name": "nvidia_cudnn_cu12-9.8.0.87-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/39/6a/5e9910b2b2c9dcddee9aaef372b3db0f08b9f7eaf1d462f859461a79caf9/nvidia_cudnn_cu12-9.8.0.87-py3-none-win_amd64.whl",
+      "size": 684630375,
+      "sha256": "b4b5cfddc32aa4180f9d390ee99e9a9f55a89e7087329b41aba4319327e22466"
+    },
+    {
+      "name": "nvidia_cufft_cu12-11.3.3.83-py3-none-win_amd64.whl",
+      "url": "https://files.pythonhosted.org/packages/7d/ec/ce1629f1e478bb5ccd208986b5f9e0316a78538dd6ab1d0484f012f8e2a1/nvidia_cufft_cu12-11.3.3.83-py3-none-win_amd64.whl",
+      "size": 192216559,
+      "sha256": "7a64a98ef2a7c47f905aaf8931b69a3a43f27c55530c698bb2ed7c75c0b42cb7"
+    }
+  ]
+}
