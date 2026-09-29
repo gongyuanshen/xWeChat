@@ -11,6 +11,17 @@ const {
   shell,
   session,
 } = require("electron");
+
+if (
+  process.env.ELECTRON_ENABLE_GPU !== "1" &&
+  (process.env.ELECTRON_DISABLE_GPU === "1" ||
+    process.argv.includes("--disable-gpu") ||
+    process.platform === "win32")
+) {
+  try {
+    app.disableHardwareAcceleration();
+  } catch {}
+}
 let autoUpdater = null;
 let autoUpdaterLoadError = null;
 try {

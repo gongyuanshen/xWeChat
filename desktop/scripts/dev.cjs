@@ -178,9 +178,13 @@ async function main() {
   await waitForUrl(startUrl, frontend, 60_000);
   log("frontend is ready, starting Electron");
 
+  const electronArgs = [
+    ...(process.env.ELECTRON_ENABLE_GPU === "1" ? [] : ["--disable-gpu"]),
+    ".",
+  ];
   const electron = spawnLogged(
     electronCommand,
-    ["."],
+    electronArgs,
     {
       cwd: desktopDir,
       env: sharedEnv,
