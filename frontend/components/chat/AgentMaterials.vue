@@ -10,11 +10,16 @@
     <p v-if="loading" role="status">正在读取…</p>
     <template v-else>
       <p v-if="kind === 'statistics'">已读取 {{ page.total_messages || 0 }} 条消息的精确计数{{ run.analysis?.complete ? '' : '（范围尚未读完）' }}</p>
-      <p v-else-if="page.total != null">共 {{ page.total }} 条{{ kind === 'findings' ? '分析结果' : '来源' }}</p>
+      <p v-else-if="page.total != null">共 {{ page.total }} 条{{ kind === 'findings' ? '分析结果' : kind === 'notes' ? '阶段笔记' : '来源' }}</p>
       <p v-if="!items.length">当前没有结果。</p>
-      <article v-for="(item, index) in items" :key="item.id || item.source || index">
+      <article v-for="(item, index) in items" :key="item.id || item.source || item.path || index">
         <template v-if="kind === 'sources'"><small>{{ item.name || item.username }} · {{ date(item.time) }} · {{ item.sender }}</small><p>{{ item.text }}</p><button type="button" @click="$emit('locate', item)">查看原消息</button></template>
         <template v-else-if="kind === 'findings'"><p v-if="item.needs_check" class="agent-coverage">需要核对前后文</p><AgentAnswer :text="findingText(item)" :citations="item.citations || []" :references="item.references || []" @locate="$emit('locate', $event)" /></template>
+        <template v-else-if="kind === 'notes'">
+          <p><strong>分批笔记 #{{ item.batch_index }}</strong> · 覆盖 {{ item.messages_count }} 条消息 · 记录 {{ item.facts_count }} 条事实</p>
+          <small v-if="item.committed_at">{{ item.committed_at }}</small>
+          <button v-if="item.start_source" type="button" @click="$emit('locate', { source: item.start_source })">定位首条消息</button>
+        </template>
         <template v-else><p>{{ statisticKind === 'daily' ? item.day : statisticKind === 'sender' ? `${offset + index + 1}. ${item.sender || item.sender_id || '未知发言人'}` : `${item.day} · ${nameFor(item.username)} · ${item.sender || item.sender_id || '未知发言人'}` }}</p><strong>{{ item.count }} 条消息</strong></template>
       </article>
     </template>
@@ -29,7 +34,7 @@ import AgentAnswer from './AgentAnswer.vue'
 const props = defineProps({ run: { type: Object, required: true }, nameFor: { type: Function, default: value => value } })
 defineEmits(['locate', 'close'])
 const api = useAiApi()
-const kinds = [{ value: 'sources', label: '已读原文' }, { value: 'findings', label: '分段发现' }, { value: 'statistics', label: '消息统计' }]
+const kinds = [{ value: 'sources', label: '已读原文' }, { value: 'findings', label: '分段发现' }, { value: 'notes', label: '阶段笔记' }, { value: 'statistics', label: '消息统计' }]
 const kind = ref(props.run.intent?.mode === 'statistics' ? 'statistics' : 'findings'), query = ref(''), offset = ref(0), page = ref({ items: [] }), loading = ref(false), error = ref('')
 const statisticKind = ref('daily_sender')
 const items = computed(() => (kind.value === 'statistics' && statisticKind.value === 'daily' ? page.value.daily_totals : kind.value === 'statistics' && statisticKind.value === 'sender' ? page.value.sender_ranking : page.value.items) || [])

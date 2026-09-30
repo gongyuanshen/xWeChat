@@ -435,10 +435,16 @@ const connect = () => {
     cancelRefreshRetry()
     // 首次页面加载已有独立快照；只有自动重连才补一次断线期间的最终状态。
     if (reconnected) { void refresh(); void loadHistory({silent:true}) }
-  }, () => {
+  }, (status = {}) => {
     if (disposed || account !== props.account) return
     streamConnected.value = false
-    streamWarning.value = '实时进度连接已中断，正在自动重连。后台任务不受影响，请勿重复提交。'
+    if (status?.permanent) {
+      streamWarning.value = '实时连接多次失败，已转入后台轮询同步。后台任务不受影响，请勿重复提交。'
+    } else if ((status?.attempt || 0) > 2) {
+      streamWarning.value = `实时连接已中断，正在尝试第 ${status.attempt} 次重连... 后台任务不受影响。`
+    } else {
+      streamWarning.value = '实时进度连接已中断，正在自动重连。后台任务不受影响，请勿重复提交。'
+    }
     if (running.value) void refresh()
   })
 }
@@ -478,8 +484,12 @@ onMounted(() => {
   resizeDraft()
   connect(); void guardAction(loadSelection); void loadProfiles(); timer = setInterval(() => {
     now.value = Date.now()
-    // SSE 正常时不发任何周期快照请求；断线后才启用保底轮询。
-    if (running.value && !streamConnected.value && !refreshRetryTimer) void refresh()
+    // 当 SSE 断开且任务仍在执行时，启动 1s 保底 HTTP 轮询同步权威快照。
+    // 遵从 RULE[user_global]：显式记录 Warn 日志与诊断事件，绝不静默回退。
+    if (running.value && !streamConnected.value && !refreshRetryTimer) {
+      api.diagnostic?.('sse.fallback_polling', { run_id: run.value?.id, component: 'agent' })
+      void refresh()
+    }
     if (!streamConnected.value && !historyPending && Date.now() - lastHistorySync >= 5000 && (navigationOpen.value || runningThreadIds.value.length)) void loadHistory({silent:true})
   }, 1000) })
 onUnmounted(() => { rememberView(); panelObserver?.disconnect(); document.removeEventListener('pointerdown', onOutside); closeInspector(); disposed = true; ++version; clearInterval(timer); cancelRefreshRetry(); events?.(); emit('expanded', false) })

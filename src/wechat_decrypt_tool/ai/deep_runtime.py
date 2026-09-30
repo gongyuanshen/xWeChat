@@ -50,8 +50,8 @@ select_chat_scope 成功后必须使用 read_messages、search_messages 或 coun
 明确全量分析直接逐页 read_messages、commit_findings，不先穷举关键词。普通问题一次关键词搜索足够定位时回查原文；连续无结果时读取范围原文，不扩展成数十次同义词搜索。
 task 角色：range-analyst完整分析，fact-checker定向核查，retrieval-analyst独立检索。完整范围一次委派，由程序分片；独立目标可同时委派。汇总使用全部分片，关联须有来源支持；具体疑点最多核查两轮，仍不确定如实说明。子任务继承范围，不自行扩大或递归。
 证据充分后用简短结论和必要原文回答，不添加用户没有要求的话题。通知/报告时间只说明当时已知的状态，不能当作精确发生时间，也不能据此计算提前或延迟；原文明确给出事件时间才可这样表述。
-默认用自然、连贯的中文转述和归纳，先说明发生了什么，再补充关键细节。同一事项中的连续短消息合并概括，不把聊天逐句摘抄、串成引文清单。转述仍须保留支持结论的真实消息来源编号，标注来源不等于必须摘录原句。
-仅在原话措辞、语气或歧义对理解有帮助，或用户明确要求原文、逐条摘录时保留必要引文；直接引语默认使用中文双引号“”。不鼓励频繁使用「」或『』，也不要给普通词语、人名、话题和概括性表述习惯性加引号。原文本身有意义的引号、用户指定的格式可以保留，不把这条偏好当作禁用规则。
+默认用自然、连贯的中文转述和归纳，先说明发生了什么，再补充关键细节。转述归纳与总结【绝对严禁使用任何双引号（“”或""）】。
+仅在原话措辞对理解有帮助，或用户明确要求原文时保留必要引文；直接引语默认使用中文双引号“”，且引号内字符必须与对应 [[source_id]] 的消息原文 100% 逐字逐字符完全一致，严禁任何改写或同义替换。若无法确保逐字完全一致，必须去掉引号改用纯文字转述。不鼓励频繁使用「」或『』，也不要给普通词语、人名、话题和概括性表述习惯性加引号。原文本身有意义的引号、用户指定的格式可以保留，不把这条偏好当作禁用规则。
 严格区分状态转变：提交申请、提出请求、确定计划与真正执行完成是不同事实；存在尚待满足的前提条件时，不得在总结中把意向或申请升级为结果已生效。
 某类事项没有记录就说明未发现，不用其他类别凑数；原始消息总数使用程序统计，不自行扣除所谓无效消息。覆盖范围沿用程序查询边界，不把单个会话最后一条消息的时间当成全部会话的截止时间。
 日期按任务本地时区，截止时刻不含在范围内。不要自行推算缺少的星期；消息时间不等于活动时间。邀约、报名和安排不能证明实际举行，保留取消、变化及不确定性。
@@ -560,6 +560,94 @@ class DeepAgentRuntime(ParallelAnalysis):
         if not current or current.done():
             self.index_workers[run['account']] = asyncio.create_task(self.prepare_global_index(run['account'], id))
 
+    def restore_notes(self, run):
+        """恢复并汇总当前任务版本已持久化的微批次事实笔记 (/notes/batch_*.json)。
+
+        从 SQLite agent_piece 中读取所有已提交批次，验证其完整性并提取统计指标，
+        确保断点续跑时已有事实 100% 保留，避免重复提取或丢失已提交批次。
+        """
+        run_id = run['id']
+        version = run.get('version', 1)
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT id, body FROM agent_piece "
+                "WHERE run_id=? AND version=? AND kind='deep_file' AND id LIKE 'file:/notes/%' "
+                "ORDER BY id",
+                (run_id, version)
+            ).fetchall()
+
+        restored = []
+        covered_sources = set()
+        total_messages = 0
+        total_facts = 0
+
+        for piece_id, body_raw in rows:
+            path = piece_id.removeprefix('file:')
+            if path in ('/notes/aggregated.json', '/notes/final_report.md'):
+                continue
+            try:
+                payload = json.loads(body_raw)
+                content = payload.get('content', '')
+                note_dict = json.loads(content) if isinstance(content, str) else content
+                if not isinstance(note_dict, dict):
+                    continue
+
+                batch_index = note_dict.get('batch_index', 0)
+                msg_count = note_dict.get('messages_count', len(note_dict.get('sources', [])))
+                facts = note_dict.get('facts', [])
+                sources = note_dict.get('sources', [])
+                cursor = note_dict.get('cursor', '')
+                committed_at = note_dict.get('committed_at', '')
+
+                total_messages += msg_count
+                total_facts += len(facts)
+                covered_sources.update(sources)
+
+                restored.append({
+                    'path': path,
+                    'batch_index': batch_index,
+                    'scope_handle': note_dict.get('scope_handle', ''),
+                    'cursor': cursor,
+                    'messages_count': msg_count,
+                    'facts_count': len(facts),
+                    'facts': facts,
+                    'sources': sources,
+                    'committed_at': committed_at
+                })
+            except Exception:
+                continue
+
+        return {
+            'run_id': run_id,
+            'version': version,
+            'total_notes': len(restored),
+            'total_messages': total_messages,
+            'total_facts': total_facts,
+            'covered_sources_count': len(covered_sources),
+            'notes': restored
+        }
+
+    async def restore_checkpoints(self, run, saver):
+        """恢复并校验 SQLite 检查点状态及分页游标。"""
+        version = run['version']
+        config = {'configurable': {'thread_id': self.checkpoint_id(run, version)}, 'recursion_limit': 100000,
+                  'callbacks': []}
+        agent, gateway = self.graph(run, saver)
+        snapshot = await agent.aget_state(config)
+        scopes = gateway.scopes()
+        pending_scopes = [s for s in scopes if s.get('pending_page')]
+        committed_scopes = [s for s in scopes if not s.get('pending_page') and s.get('cursor')]
+        return {
+            'config': config,
+            'agent': agent,
+            'gateway': gateway,
+            'snapshot': snapshot,
+            'has_next': bool(snapshot.next),
+            'values': snapshot.values or {},
+            'pending_scopes': pending_scopes,
+            'committed_scopes': committed_scopes
+        }
+
     async def resume(self, id, account):
         run = self.run(id, account)
         if run.get('engine_version') != 3:
@@ -567,7 +655,7 @@ class DeepAgentRuntime(ParallelAnalysis):
         async with self.locks.setdefault(run['thread_id'], asyncio.Lock()):
             if self.thread(run['thread_id'], account)['latest_run'] != id or run['status'] == 'completed':
                 raise ValueError('只能恢复最新未完成任务')
-            if run['status'] in ('running', 'queued'):
+            if run['status'] in ('running', 'queued') and (worker := self.workers.get(id)) and not worker.done():
                 return run
             if run.get('subtask_plan_version', 0) < REVISION:
                 # 旧批量任务主动继续时换执行版本；只复用原文，不重放旧委派和发现。
@@ -576,7 +664,8 @@ class DeepAgentRuntime(ParallelAnalysis):
                 self.update(id, version=run['version'] + 1, subtask_plan_version=REVISION, scope_handle='',
                     query_scope=[], query_filters=None, analysis={}, subtasks={}, required_conversations=[],
                     answer='', partial_answer='', needs_continuation=False, context_input=run['input_digest'] + '\n重新检查已有原文并规划；旧批量委派已停用。')
-            self.update(id, status='queued', error='', finished_at=None, segment_started=time.time())
+            self.restore_notes(run)
+            self.update(id, status='queued', error='', finished_at=None, segment_started=time.time(), needs_continuation=True)
             self.refresh_source_gaps(id)
             self.launch(id)
             return self.run(id)
@@ -746,6 +835,24 @@ class DeepAgentRuntime(ParallelAnalysis):
         if run.get('restart_filters'):
             context['restart_query'] = {k: v for k, v in run['restart_filters'].items() if k != 'conversations'}
             context['restart_conversation_count'] = len(run['restart_filters'].get('conversations', []))
+        tr = run.get('time_range') or {}
+        start_ts, end_ts = tr.get('start'), tr.get('end')
+        if start_ts and end_ts:
+            zone = timezone(timedelta(seconds=run.get('timezone_offset', 28800)))
+            curr = datetime.fromtimestamp(start_ts, zone).date()
+            end_d = datetime.fromtimestamp(end_ts - 1, zone).date()
+            cal_map = {}
+            while curr <= end_d and len(cal_map) < 60:
+                cal_map[curr.isoformat()] = '星期' + '一二三四五六日'[curr.weekday()]
+                curr += timedelta(days=1)
+            if cal_map:
+                context['calendar_reference'] = cal_map
+
+        agg_file = backend.read('/notes/aggregated.json')
+        if not agg_file.error and agg_file.file_data:
+            context['aggregated_notes_path'] = '/notes/aggregated.json'
+            current += '\n阶段事实笔记已完整汇聚至 /notes/aggregated.json。请通读汇聚笔记统揽全局事实撰写结构化长报告。转述概括严禁加引号；仅当 100% 逐字引用消息原话时才允许使用中文双引号“”，且必须与原消息正文完全一致。'
+
         messages.append(HumanMessage(content=current + '\n\n当前环境（非聊天资料）：' + json.dumps(context, ensure_ascii=False)))
         if run.get('parent_run_id') and run.get('subtask_plan_version') == REVISION:
             initial = self.workspace.get(run['id'], run['version'], 'work:initial_material')
@@ -769,16 +876,22 @@ class DeepAgentRuntime(ParallelAnalysis):
             from .deep_checkpoints import checkpoint_session
             async with checkpoint_session(self) as saver:
                 await inherit_context(self, self.run(id), saver)
-                agent, gateway = self.graph(self.run(id), saver)
-                config = {'configurable': {'thread_id': self.checkpoint_id(run, version)}, 'recursion_limit': 100000,
-                    'callbacks': []}
-                snapshot = await agent.aget_state(config)
+                checkpoint_state = await self.restore_checkpoints(self.run(id), saver)
+                agent, gateway = checkpoint_state['agent'], checkpoint_state['gateway']
+                config, snapshot = checkpoint_state['config'], checkpoint_state['snapshot']
                 inputs = None if snapshot.next else self.graph_input(self.run(id))
                 if snapshot.values and not snapshot.next:
                     # 图已提交最后一次回答、应用尚未提交完成状态时直接恢复最终结果。
                     inputs = None
                 if self.run(id).get('needs_continuation') and not snapshot.next:
-                    inputs = {'messages': [HumanMessage(content='继续完成尚未完成的范围，先调用 read_messages 或查看子任务结果。不要重复已提交批次。所有要求范围完成后再回答。')]}
+                    restored = self.restore_notes(self.run(id))
+                    if restored['total_notes'] > 0:
+                        prompt = ('继续完成尚未完成的范围，先调用 read_messages 继续读取未完成游标，或查看子任务结果。'
+                                  f'已有 {restored["total_notes"]} 个微批次笔记（覆盖 {restored["total_messages"]} 条消息）已提交保存，'
+                                  '绝不要重复已提交批次。所有要求范围完成后再回答。')
+                    else:
+                        prompt = '继续完成尚未完成的范围，先调用 read_messages 或查看子任务结果。不要重复已提交批次。所有要求范围完成后再回答。'
+                    inputs = {'messages': [HumanMessage(content=prompt)]}
                     self.update(id, needs_continuation=False)
                 last_emit, partial, message_id = 0, '', None
                 with tracing_context(enabled=False):
@@ -835,6 +948,8 @@ class DeepAgentRuntime(ParallelAnalysis):
                         self.finish(id, 'interrupted', '要求的完整范围尚未处理完成，已保存阶段结果。')
                     return
                 # 正文生成后直接交付，不再追加引用修复、证据复核或遗漏核查的模型调用。
+                from .agent_notes import normalize_date_headings, answer_year
+                text = normalize_date_headings(text, default_year=answer_year(self.run(id)))
                 self.update(id, answer=text)
                 self.timeline_item(id, 'answer', text, item_id='answer:' + id)
                 self.finish(id, 'completed')

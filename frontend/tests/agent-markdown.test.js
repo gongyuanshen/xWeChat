@@ -31,4 +31,10 @@ describe('流式来源标记', () => {
     expect(code).not.toContain('agent-ref')
     expect(code).toContain('<code>')
   })
+  it('citations 包含 null 或 undefined 元素时能安全渲染而不抛出异常', () => {
+    const mixedCitations = [null, undefined, { source: id }, null]
+    const html = renderAgentMarkdown(`核对 [[${id}]] 来源`, mixedCitations)
+    expect(html).toContain('class="agent-ref"')
+    expect(html).toContain('查看来源 1')
+  })
 })

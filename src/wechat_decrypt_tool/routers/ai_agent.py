@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
@@ -118,6 +119,20 @@ async def restart_run(id: str, account: str, body: RestartInput):
         raise HTTPException(409, str(exc)) from None
 
 
+@router.post('/runs/{id}/resume')
+async def resume_run(id: str, account: str):
+    service = get_agent_service()
+    try:
+        account = account_name(account)
+        if service.run(id, account).get('engine_version') != 3:
+            raise HTTPException(409, {'code': 'legacy_restart_required', 'message': '旧任务不能继续，请使用新引擎重新运行。',
+                'restart_url': f'/api/ai/agent/runs/{id}/restart'})
+        await service.resume(id, account)
+        return service.public_run(id, account)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
 @router.post('/runs/{id}/{action}')
 async def run_action(id: str, action: str, account: str):
     service = get_agent_service()
@@ -126,7 +141,7 @@ async def run_action(id: str, action: str, account: str):
         service.run(id, account)
         if action == 'stop':
             await service.stop_run(id, account)
-        elif action == 'continue':
+        elif action in ('continue', 'resume'):
             if service.run(id, account).get('engine_version') != 3:
                 raise HTTPException(409, {'code': 'legacy_restart_required', 'message': '旧任务不能继续，请使用新引擎重新运行。',
                     'restart_url': f'/api/ai/agent/runs/{id}/restart'})
@@ -139,7 +154,7 @@ async def run_action(id: str, action: str, account: str):
 
 
 @router.get('/runs/{id}/materials')
-def materials(id: str, account: str, kind: str = Query('sources', pattern='^(sources|findings|statistics)$'),
+def materials(id: str, account: str, kind: str = Query('sources', pattern='^(sources|findings|statistics|notes)$'),
               offset: int = Query(0,ge=0), limit: int = Query(20,ge=1,le=100),
               query: str = Query('',max_length=500), version: int | None = None):
     try:
@@ -202,27 +217,75 @@ def subtask_result(id: str, task_id: str, account: str, version: int,
         raise HTTPException(409, str(exc)) from None
 
 
-@router.get('/runs/{id}/materials/{source}')
-def material(id: str, source: str, account: str, offset: int = Query(0,ge=0), version: int | None = None):
-    service=get_agent_service()
+@router.get('/runs/{id}/materials/{source:path}')
+def material(id: str, source: str, account: str, offset: int = Query(0, ge=0), version: int | None = None):
+    service = get_agent_service()
+    offset = offset if isinstance(offset, int) else (int(getattr(offset, 'default', 0)) if hasattr(offset, 'default') else 0)
+    version = version if isinstance(version, int) else (getattr(version, 'default', None) if hasattr(version, 'default') else None)
     try:
-        run=service.authorize_material(id,account_name(account),version)
-        value=run['evidence'].get(source)
-        if not value: raise ValueError('来源不存在或已不在读取范围。')
-        text=value['text'][offset:offset+6000]
-        return service.public_source(value, run['account']) | {'text':text,'offset':offset,'next_offset':offset+len(text) if offset+len(text)<len(value['text']) else None}
+        run = service.authorize_material(id, account_name(account), version)
+        value = run['evidence'].get(source)
+        if value:
+            text = value['text'][offset:offset + 6000]
+            return service.public_source(value, run['account']) | {
+                'text': text,
+                'offset': offset,
+                'next_offset': offset + len(text) if offset + len(text) < len(value['text']) else None,
+            }
+        # Check virtual filesystem /notes/
+        norm_path = source if source.startswith('/') else '/' + source
+        file_piece = service.workspace.get(id, run['version'], 'file:' + norm_path)
+        if file_piece:
+            content = file_piece.get('content', '')
+            chunk = content[offset:offset + 6000]
+            return {
+                'source': norm_path,
+                'name': PurePosixPath(norm_path).name,
+                'text': chunk,
+                'offset': offset,
+                'next_offset': offset + len(chunk) if offset + len(chunk) < len(content) else None,
+                'is_file': True,
+            }
+        raise ValueError('来源不存在或已不在读取范围。')
     except ValueError as exc:
-        raise HTTPException(404,str(exc)) from None
+        raise HTTPException(404, str(exc)) from None
 
 
 @router.get('/events')
-async def events(request: Request, account: str, after: int | None = None):
+async def events(
+    request: Request,
+    account: str,
+    after: int | None = None,
+    last_event_id: int | None = Query(None, alias='last-event-id'),
+    last_event_id_alt: int | None = Query(None, alias='last_event_id'),
+):
     account = account_name(account)
     store = get_agent_service().store
-    try:
-        cursor = max(after or 0, int(request.headers.get('last-event-id', str(store.latest_event_id() if after is None else after))))
-    except ValueError:
-        cursor = max(0, after or 0)
+    header_val = request.headers.get('last-event-id')
+
+    def _to_int(val):
+        if val is None or hasattr(val, 'default'):
+            return None
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return None
+
+    explicit_cursor = _to_int(after)
+    if explicit_cursor is None:
+        explicit_cursor = _to_int(last_event_id)
+    if explicit_cursor is None:
+        explicit_cursor = _to_int(last_event_id_alt)
+    header_cursor = _to_int(header_val)
+
+    if explicit_cursor is not None and header_cursor is not None:
+        cursor = max(explicit_cursor, header_cursor)
+    elif explicit_cursor is not None:
+        cursor = max(0, explicit_cursor)
+    elif header_cursor is not None:
+        cursor = max(0, header_cursor)
+    else:
+        cursor = store.latest_event_id()
     async def stream():
         nonlocal cursor
         # 首次业务事件前也固定重连起点；仅 id 的块不触发前端 onmessage。

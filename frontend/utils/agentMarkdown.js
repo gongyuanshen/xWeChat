@@ -8,9 +8,9 @@ md.renderer.rules.link_close = () => '</span>'
 const citation = /\[\[(?:(person|image|source):)?([a-f0-9]{24})\]\]|\(\s*source\s*:\s*([a-f0-9]{24})\s*\)|（\s*source\s*[:：]\s*([a-f0-9]{24})\s*）|\[source\s*:\s*([a-f0-9]{24})\]/gi
 const groupedCitation = /\[\[\s*(?:source\s*:\s*)?[a-f0-9]{24}\s*(?:\]\s*[,，]\s*\[\s*(?:source\s*:\s*)?[a-f0-9]{24}\s*)+\]\]/gi
 const unfinished = /(?:\[\[(?:(?:p|pe|per|pers|perso|person|i|im|ima|imag|image|s|so|sou|sour|sourc|source):?)?[a-f0-9]{0,24}\]?|[（(]\s*(?:s|so|sou|sour|sourc|source)(?:\s*[:：]\s*[a-f0-9]{0,24})?)$/i
-const normalizeGroupedCitations = (content, citations) => content.replace(groupedCitation, value => {
+const normalizeGroupedCitations = (content, citations = []) => content.replace(groupedCitation, value => {
   const ids = [...value.matchAll(/[a-f0-9]{24}/gi)].map(match => match[0].toLowerCase())
-  return ids.every(id => citations.some(item => item.source === id)) ? ids.map(id => `[[${id}]]`).join(' ') : value
+  return ids.every(id => (citations || []).some(item => item?.source === id)) ? ids.map(id => `[[${id}]]`).join(' ') : value
 })
 // 胶囊已显示姓名，紧接着重复的同一姓名仅在显示与复制时合并，不重写历史回答。
 function afterRepeatedPersonName(content, offset, reference) {
@@ -28,9 +28,9 @@ const personButton = (reference, id, apiBase) => {
   return `<button type="button" class="agent-person" data-person="${id}" aria-haspopup="dialog" aria-label="查看人物 ${md.utils.escapeHtml(reference.name)}">${avatar ? `<img src="${md.utils.escapeHtml(avatar)}" alt="" loading="lazy" />` : ''}<span>${md.utils.escapeHtml(reference.name)}</span></button>`
 }
 
-const personNames = references => {
+const personNames = (references = []) => {
   const matches = new Map()
-  for (const reference of references) {
+  for (const reference of (references || [])) {
     if (reference?.kind !== 'person' || !reference.id || !reference.name) continue
     for (const raw of [reference.name, ...(reference.aliases || [])]) {
       const name = String(raw || '').trim()
@@ -102,11 +102,11 @@ md.core.ruler.after('inline', 'agent_citation', state => {
           ref.content = personButton(reference, id, state.env.apiBase)
         } else if (kind === 'image' && reference) {
           ref.content = `<button type="button" class="agent-image-ref" data-image="${id}" aria-haspopup="dialog"><span aria-hidden="true">▧</span> ${md.utils.escapeHtml(reference.label || '图片')}</button>`
-        } else if (kind === 'source' && state.env.citations.some(item => item.source === id)) {
+        } else if (kind === 'source' && state.env.citations.some(item => item?.source === id)) {
           if (!state.env.ids.includes(id)) state.env.ids.push(id)
           const number = state.env.ids.indexOf(id) + 1
-          const source = state.env.citations.find(item => item.source === id)
-          const avatar = referenceUrl(source.sender_avatar_path, state.env.apiBase)
+          const source = state.env.citations.find(item => item?.source === id)
+          const avatar = referenceUrl(source?.sender_avatar_path, state.env.apiBase)
           ref.content = `<button type="button" class="agent-ref" data-source="${id}" aria-haspopup="dialog" aria-expanded="false" aria-label="查看来源 ${number}">${avatar ? `<img src="${md.utils.escapeHtml(avatar)}" alt="" loading="lazy" />` : ''}<span>${number}</span></button>`
         } else ref.content = '<span class="agent-ref-unresolved">[来源待核实]</span>'
         parts.push(ref)
@@ -125,10 +125,14 @@ export function referenceUrl(path, apiBase = '/api') {
   return typeof path === 'string' && /^\/chat\/(?:avatar|media\/image)\?/.test(path) ? `${apiBase}${path}` : ''
 }
 export function renderAgentMarkdown(text, citations = [], streaming = false, references = [], apiBase = '/api') {
-  return md.render(text || '', { citations, streaming, references, apiBase, ids: [], personNames: personNames(references) })
+  const safeCitations = citations || []
+  const safeReferences = references || []
+  return md.render(text || '', { citations: safeCitations, streaming, references: safeReferences, apiBase, ids: [], personNames: personNames(safeReferences) })
 }
 export function copyAgentText(text, citations = [], references = []) {
-  let content = normalizeGroupedCitations(text || '', citations)
+  const safeCitations = citations || []
+  const safeReferences = references || []
+  let content = normalizeGroupedCitations(text || '', safeCitations)
   // 仅清理普通 Markdown 正文末尾，代码块里的字面协议示例保持原样。
   const last = md.parse(content, { citations: [], references: [], ids: [] }).filter(token => token.nesting !== -1).at(-1)
   if (last?.type === 'inline') content = content.replace(unfinished, '')
@@ -139,11 +143,11 @@ export function copyAgentText(text, citations = [], references = []) {
     parts.push(content.slice(offset, match.index))
     offset = match.index + match[0].length
     if (kind && kind.toLowerCase() !== 'source') {
-      const ref = references.find(r => r.id === id.toLowerCase() && r.kind === kind.toLowerCase())
+      const ref = safeReferences.find(r => r.id === id.toLowerCase() && r.kind === kind.toLowerCase())
       parts.push(ref?.name || ref?.label || '[引用待核实]')
       if (kind.toLowerCase() === 'person') offset = afterRepeatedPersonName(content, offset, ref)
     } else {
-      const source = citations.find(c => c.source === id.toLowerCase())
+      const source = safeCitations.find(c => c.source === id.toLowerCase())
       parts.push(source ? `〔${source.name || source.username} · ${source.sender || ''}〕` : '[来源待核实]')
     }
   }

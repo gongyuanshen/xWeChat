@@ -1,10 +1,10 @@
-const events = new Set('request.failed sse.open sse.disconnected sse.recovered sse.invalid response.stale source.ready source.failed navigation.started navigation.finished navigation.failed notification.requested notification.shown notification.failed notification.clicked notification.ack notification.ack_failed notification.duplicate notification.unsupported transport.dropped transport.offline'.split(' '))
+const events = new Set('request.failed sse.open sse.disconnected sse.recovered sse.invalid sse.max_retries sse.fallback_polling response.stale source.ready source.failed navigation.started navigation.finished navigation.failed notification.requested notification.shown notification.failed notification.clicked notification.ack notification.ack_failed notification.duplicate notification.unsupported transport.dropped transport.offline'.split(' '))
 const ids = new Set('trace_id operation_id diagnostic_id task_id run_id thread_id'.split(' '))
-const counts = new Set('http_status duration_ms count dropped_count queued event_id version after attempt'.split(' '))
+const counts = new Set('http_status duration_ms count dropped_count queued event_id version after attempt max_retries attempts'.split(' '))
 const labels = {
   origin: ['frontend', 'desktop'], phase: ['request', 'stream', 'source', 'navigation', 'notification', 'transport'],
   status: ['success', 'failed', 'pending', 'closed', 'missing', 'stale', 'ready'],
-  reason_code: ['network', 'http', 'parse', 'timeout', 'unsupported', 'overflow', 'offline', 'missing', 'stale', 'rejected'],
+  reason_code: ['network', 'http', 'parse', 'timeout', 'unsupported', 'overflow', 'offline', 'missing', 'stale', 'rejected', 'max_retries_exceeded'],
   method: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'], component: ['ai', 'agent', 'search', 'notification', 'source'],
 }
 
@@ -13,6 +13,7 @@ export function safeDiagnostic(event, metadata = {}) {
   const safe = {}
   for (const [key, value] of Object.entries(metadata)) {
     if (key === 'source_id' && typeof value === 'string' && /^[a-f0-9]{24,32}$/i.test(value)) safe[key] = value
+    else if (key === 'last_event_id' && (typeof value === 'string' || typeof value === 'number')) safe[key] = String(value)
     else if (ids.has(key) && typeof value === 'string' && /^[a-f0-9-]{32,36}$/i.test(value)) safe[key] = value
     else if (counts.has(key) && typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1e12) safe[key] = value
     else if (labels[key]?.includes(value)) safe[key] = value

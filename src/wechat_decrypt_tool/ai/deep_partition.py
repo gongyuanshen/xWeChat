@@ -6,6 +6,12 @@ import re
 import time
 
 from .agent_budget import input_limit, message_payload, size
+from .model_execution import (
+    MICRO_BATCH_MIN_BYTES,
+    MICRO_BATCH_MAX_BYTES,
+    MICRO_BATCH_MAX_MESSAGES,
+    STEP_HARD_TIMEOUT_SECONDS,
+)
 
 PLAN_VERSION = 1
 QUEUE_LIMIT = 8
@@ -17,7 +23,14 @@ def fingerprint(value):
 
 
 def capacity(service, run):
-    return max(1024, min(48 * 1024, input_limit(service.profile(run)) // 3))
+    raw = run.get('material_batch_bytes') or run.get('capacity')
+    if raw is None:
+        try:
+            profile = service.profile(run)
+            raw = input_limit(profile) // 3
+        except (KeyError, AttributeError, TypeError, Exception):
+            raw = MICRO_BATCH_MAX_BYTES
+    return max(MICRO_BATCH_MIN_BYTES, min(MICRO_BATCH_MAX_BYTES, raw))
 
 
 def fragment(message):
@@ -49,6 +62,10 @@ class AnalysisPlans:
         self.locks = {}
         self.slots = {}
         self.events = {}
+
+    def capacity(self, service, run) -> int:
+        """Returns batch budget strictly bounded between 12 KiB and 16 KiB."""
+        return capacity(service, run)
 
     def gateway(self, run):
         from .deep_tools import ChatGateway
@@ -276,7 +293,7 @@ class AnalysisPlans:
     def jobs(self, parent, plan_id, statuses=None):
         self.guard(parent)
         with self.service.store.connection() as db:
-            query = 'SELECT body FROM agent_subtask WHERE parent_id=? AND version=? AND json_extract(body,\'$.plan_id\')=?'
+            query = "SELECT body FROM agent_subtask WHERE parent_id=? AND version=? AND (json_extract(body,'$.plan_id')=? OR json_extract(body,'$.plan_id') IS NULL)"
             args = [parent['id'], parent['version'], plan_id]
             if statuses:
                 query += ' AND status IN (' + ','.join('?' for _ in statuses) + ')'
@@ -299,10 +316,11 @@ class AnalysisPlans:
         return job
 
     def enqueue(self, parent, plan, *, whole=False, persist=True):
-        target = 2 * plan['capacity']
+        raw_cap = plan.get('capacity', MICRO_BATCH_MAX_BYTES)
+        target = max(MICRO_BATCH_MIN_BYTES, min(MICRO_BATCH_MAX_BYTES, raw_cap))
         used, stop, cuts = 0, 0, []
         for index, ref in enumerate(plan['buffer']):
-            if stop and used + ref['weight'] > target:
+            if stop and (used + ref['weight'] > target or stop >= MICRO_BATCH_MAX_MESSAGES):
                 break
             used += ref['weight']
             stop = index + 1
@@ -319,28 +337,34 @@ class AnalysisPlans:
             return None
         remaining = plan['buffer'][stop:]
         context, context_size = [], 0
-        candidates = ([r for r in plan['previous'] if r['username'] == core[0]['username']][-10:]
+        candidates = ([r for r in plan.get('previous', []) if r['username'] == core[0]['username']][-10:]
             + [r for r in remaining if r['username'] == core[-1]['username']][:10])
         for ref in candidates:
-            if ref['source'] not in {r['source'] for r in core} and context_size + ref['weight'] <= plan['capacity'] * .1:
+            if ref['source'] not in {r['source'] for r in core} and context_size + ref['weight'] <= target * .1:
                 context.append({**ref, 'context_only': True})
                 context_size += ref['weight']
-        signature = fingerprint([parent['id'], parent['version'], PLAN_VERSION, plan['objective'], plan['role'], core])
+        signature = fingerprint([parent['id'], parent.get('version', 1), PLAN_VERSION, plan.get('objective', ''), plan.get('role', 'range-analyst'), core])
         manifest = {'id': 'manifest:' + signature, 'plan_id': plan['id'], 'core': core, 'context': context,
-            'scope_handle': plan['scope_handle'], 'scan_cursor': plan['scan'], 'warnings': list(plan['warnings'])}
-        scope = self.gateway(parent).scope(plan['scope_handle'])
+            'scope_handle': plan.get('scope_handle', ''), 'scan_cursor': plan.get('scan', {}), 'warnings': list(plan.get('warnings', []))}
+        scope = {}
+        if plan.get('scope_handle'):
+            try:
+                scope = self.gateway(parent).scope(plan['scope_handle'])
+            except Exception:
+                scope = {}
         users = list(dict.fromkeys(r['username'] for r in core))
-        job = {'id': signature, 'parent_id': parent['id'], 'version': parent['version'], 'account': parent['account'],
+        next_ord = plan.get('next_ordinal', 0)
+        job = {'id': signature, 'parent_id': parent['id'], 'version': parent.get('version', 1), 'account': parent.get('account', ''),
             'plan_id': plan['id'], 'plan_version': PLAN_VERSION, 'manifest_id': manifest['id'],
-            'child_run_id': 'deep-child:' + signature, 'role': plan['role'], 'objective': plan['objective'],
-            'name': '、'.join(scope.get('names', {}).get(u, u) for u in users[:3]) + f" · 分片 {plan['next_ordinal'] + 1}",
+            'child_run_id': 'deep-child:' + signature, 'role': plan.get('role', 'range-analyst'), 'objective': plan.get('objective', ''),
+            'name': '、'.join(scope.get('names', {}).get(u, u) for u in users[:3]) + f" · 分片 {next_ord + 1}",
             'time_range': {'start': min(r['time'] for r in core), 'end': max(r['time'] for r in core) + 1},
             'scope': users, 'status': 'queued', 'stage': '等待执行槽位', 'created': time.time(),
             'coverage': {'read': len({r['source'] for r in core}), 'analyzed': 0, 'complete': False},
-            'result_handle': '', 'warnings': list(plan['warnings'])}
+            'result_handle': '', 'warnings': list(plan.get('warnings', []))}
         plan['buffer'] = remaining
-        plan['previous'] = (plan['previous'] + core)[-10:]
-        plan['next_ordinal'] += 1
+        plan['previous'] = (plan.get('previous', []) + core)[-10:]
+        plan['next_ordinal'] = next_ord + 1
         if not persist:
             return job, manifest
         self.save(parent, plan, [(manifest['id'], 'analysis_manifest', manifest)], job)
@@ -360,7 +384,7 @@ class AnalysisPlans:
             for ref in manifest['core']:
                 read.setdefault(ref['source'], []).append((ref['start'], ref['end']))
             with self.service.store.connection() as db:
-                for row in db.execute("SELECT body FROM agent_piece WHERE run_id=? AND version=1 AND kind='stage_note'", (job['child_run_id'],)):
+                for row in db.execute("SELECT body FROM agent_piece WHERE run_id=? AND kind='stage_note'", (job['child_run_id'],)):
                     for ref in json.loads(row[0]).get('covered', []):
                         analyzed.setdefault(ref['source'], []).append((ref['start'], ref['end']))
         def length(values):
@@ -379,16 +403,34 @@ class AnalysisPlans:
             'wall_seconds': max(0, time.time() - plan['created']), 'reused_partitions': plan.get('reused', 0)}
 
     def split_failed(self, parent, plan):
-        """仅重分上下文失败的未提交正文，完成区间仍由原子任务的笔记证明。"""
+        """仅重分上下文超限、超时或上游错误的未提交正文，完成区间仍由原子任务的笔记证明。"""
         changed = False
+        plan.setdefault('mode', 'parallel')
+        split_pattern = re.compile(
+            r'(?:'
+            r'上下文|窗口|context.{0,25}(?:length|window|overflow)|'
+            r'timeout|timed?\s*out|超时|'
+            r'(?:http\s*)?(?:500|502|503|504)\b|'
+            r'gateway\s*timeout|internal\s*server\s*error|'
+            r'上游连接中断或超时'
+            r')',
+            re.I
+        )
         for job in self.jobs(parent, plan['id'], ['failed']):
             if self.queued_count(parent) > QUEUE_LIMIT - 2:
                 break
-            if not re.search(r'上下文|窗口|context.{0,20}(?:length|window|overflow)', job.get('error', ''), re.I):
+            error_msg = job.get('error', '')
+            child = self.service.store.get('agent_run', job.get('child_run_id', ''))
+            if child and child.get('error'):
+                error_msg = f"{error_msg} {child['error']}"
+            if not split_pattern.search(error_msg):
                 continue
             manifest = self.get(parent, job['manifest_id'])
             with self.service.store.connection() as db:
-                notes = [json.loads(r[0]) for r in db.execute("SELECT body FROM agent_piece WHERE run_id=? AND version=1 AND kind='stage_note'", (job['child_run_id'],))]
+                notes = [json.loads(r[0]) for r in db.execute(
+                    "SELECT body FROM agent_piece WHERE run_id=? AND kind='stage_note'",
+                    (job['child_run_id'],)
+                )]
             covered = {}
             for note in notes:
                 for ref in note.get('covered', []):
@@ -409,12 +451,12 @@ class AnalysisPlans:
                 remaining = [{**ref, 'end': middle, 'weight': max(1, ref['weight'] // 2)},
                     {**ref, 'start': middle, 'weight': max(1, ref['weight'] // 2)}]
             middle = max(1, len(remaining) // 2)
-            original_buffer, previous = plan['buffer'], plan['previous']
+            original_buffer, previous = plan.get('buffer', []), plan.get('previous', [])
             replacements, pieces = [], []
             for half in (remaining[:middle], remaining[middle:]):
                 plan.update(buffer=half, previous=[])
                 replacement, new_manifest = self.enqueue(parent, plan, whole=True, persist=False)
-                replacement['replacement_reason'] = '原分片上下文超限，仅重分尚未提交的正文。'
+                replacement['replacement_reason'] = '原分片执行异常（超限/超时/上游错误），仅重分尚未提交的正文。'
                 replacement['replaces'] = job['id']
                 replacements.append(replacement)
                 pieces.append((new_manifest['id'], 'analysis_manifest', new_manifest))

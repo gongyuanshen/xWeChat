@@ -78,8 +78,38 @@ def validate(profile, effort=None, mode=None, budget=None):
     return {**profile, 'reasoning_effort': effort, 'thinking_mode': mode, 'thinking_budget': budget}
 
 
+def constrain_reasoning_profile(profile, metadata=None):
+    """在事实提取阶段收敛思考深度：
+    - 若模型方言支持显式关闭思考，直接关闭思考；
+    - 若模型支持原生推理等级，将 reasoning_effort 设为 'low'；
+    - 若模型支持思考预算，将 thinking_budget 钳制为 min(budget or 1024, 1024)。
+    """
+    from .model_catalog import documented_metadata
+    meta = metadata if metadata is not None else (profile.get('model_metadata') or documented_metadata(profile, profile.get('model', '')))
+    capability = controls(profile, meta)
+    wire = dialect(profile)
+
+    if wire in ('thinking', 'enable_thinking') or (wire == 'openrouter' and capability.get('toggle')):
+        return {**profile, 'thinking_mode': 'disabled', 'reasoning_effort': None, 'thinking_budget': None}
+
+    if 'low' in capability.get('efforts', []) or profile.get('reasoning_effort') is not None:
+        return {**profile, 'reasoning_effort': 'low', 'thinking_mode': None, 'thinking_budget': None}
+
+    budget = profile.get('thinking_budget')
+    if budget is not None or capability.get('budget'):
+        target_budget = min(budget or 1024, 1024)
+        if capability.get('budget') and 'min' in capability['budget']:
+            target_budget = max(capability['budget']['min'], target_budget)
+        return {**profile, 'thinking_budget': target_budget, 'thinking_mode': 'enabled', 'reasoning_effort': None}
+
+    return profile
+
+
 def request_options(profile):
     """返回客户端参数；供应商扩展统一放入 extra_body，恢复默认时不发覆盖项。"""
+    from .model_execution import call_policy
+    if call_policy.get().constrain_thinking:
+        profile = constrain_reasoning_profile(profile)
     effort, mode, budget = (profile.get(key) for key in ('reasoning_effort', 'thinking_mode', 'thinking_budget'))
     wire = dialect(profile)
     if wire == 'anthropic':

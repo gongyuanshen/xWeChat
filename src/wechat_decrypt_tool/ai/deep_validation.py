@@ -34,8 +34,29 @@ def requires_complete_analysis(text):
 
 
 def calendar_issues(text, run):
-    zone = timezone(timedelta(seconds=run['timezone_offset']))
-    year = datetime.fromtimestamp(run['cutoff'], zone).year
+    if not isinstance(run, dict):
+        raise ValueError('run missing cutoff or time_range for calendar validation')
+    zone = timezone(timedelta(seconds=run.get('timezone_offset', 28800)))
+    cutoff = run.get('cutoff')
+    if cutoff is None:
+        tr = run.get('time_range') or {}
+        cutoff = tr.get('end')
+    if cutoff is None:
+        evidence = run.get('evidence') or run.get('originals') or run.get('sources') or run.get('source_mappings')
+        candidate_times = []
+        if isinstance(evidence, dict):
+            for v in evidence.values():
+                if isinstance(v, dict) and v.get('time'):
+                    candidate_times.append(v['time'])
+        elif isinstance(evidence, list):
+            for v in evidence:
+                if isinstance(v, dict) and v.get('time'):
+                    candidate_times.append(v['time'])
+        if candidate_times:
+            cutoff = max(candidate_times)
+    if cutoff is None:
+        raise ValueError('run missing cutoff or time_range for calendar validation')
+    year = datetime.fromtimestamp(cutoff, zone).year
     issues = []
     # 仅检查显式绑定在一起的月日和星期，不把聊天中的“周三”强配到消息日期。
     pattern = r'(?:(\d{4})年)?(\d{1,2})(?:月|/)(\d{1,2})日?\s*[（(]\s*(?:周|星期)([一二三四五六日天])\s*[）)]'

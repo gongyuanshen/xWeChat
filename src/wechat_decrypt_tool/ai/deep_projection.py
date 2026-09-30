@@ -1,7 +1,10 @@
 """历史数据兼容投影及微信读取复用；不含旧模型调度或主循环。"""
 import json
+import logging
 import hashlib
 import time
+
+logger = logging.getLogger(__name__)
 from .diagnostics import observed
 from .providers import ProviderFailure
 from .agent_budget import input_limit, model_output_limit, active_budget
@@ -34,6 +37,20 @@ class DeepProjection:
             rows=list(run['evidence'].rows(offset=offset,limit=limit+1,query=query))
             return {'items':[self.public_source(x, account) for x in rows[:limit]],'total':len(run['evidence']) if not query else None,
                 'has_more':len(rows)>limit,'offset':offset}
+        if kind=='notes':
+            summary = self.stage_notes_summary(run)
+            items = summary['covered_ranges']
+            if query:
+                q = query.lower()
+                items = [
+                    item for item in items
+                    if q in str(item.get('batch_index', '')).lower()
+                    or q in str(item.get('path', '')).lower()
+                    or any(q in json.dumps(f, ensure_ascii=False).lower() for f in item.get('facts', []))
+                ]
+            paged = items[offset:offset + limit]
+            return {'items': paged, 'total': len(items), 'total_facts': summary['total_facts'],
+                    'has_more': offset + len(paged) < len(items), 'offset': offset}
         result=self.workspace.page(id,run['version'],'finding',offset,limit,query)
         from .agent_references import cited_references
         for item in result['items']:
@@ -41,15 +58,102 @@ class DeepProjection:
             item['references'] = cited_references(item.get('text', ''), run.get('references', {}))
         return result
 
+    def stage_notes_summary(self, run_or_id, version=None):
+        """Aggregate summary statistics from committed /notes/batch_*.json files in agent_piece."""
+        if isinstance(run_or_id, dict):
+            run_id = run_or_id['id']
+            version = run_or_id.get('version', 1)
+        else:
+            run_id = run_or_id
+            version = version or 1
+
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT id, body FROM agent_piece WHERE run_id=? AND version=? AND kind='deep_file' AND id LIKE 'file:/notes/batch_%.json' ORDER BY id",
+                (run_id, version)
+            ).fetchall()
+        if not rows:
+            with self.store.connection() as db:
+                stage_rows = db.execute(
+                    "SELECT id, body FROM agent_piece WHERE run_id=? AND version=? AND kind='stage_note' ORDER BY id",
+                    (run_id, version)
+                ).fetchall()
+            if not stage_rows:
+                return {'count': 0, 'total_facts': 0, 'covered_ranges': [], 'latest_cursor': ''}
+            covered_ranges = []
+            total_facts = 0
+            latest_cursor = ''
+            for idx, (piece_id, piece_body) in enumerate(stage_rows, 1):
+                try:
+                    body = json.loads(piece_body)
+                    items = body.get('items', [])
+                    covered = body.get('covered', [])
+                    total_facts += len(items)
+                    sources = [c.get('source') for c in covered if isinstance(c, dict) and c.get('source')]
+                    cursor = body.get('cursor', '')
+                    if cursor:
+                        latest_cursor = cursor
+                    covered_ranges.append({
+                        'path': piece_id.removeprefix('file:') if piece_id.startswith('file:') else piece_id,
+                        'batch_index': idx,
+                        'cursor': cursor,
+                        'messages_count': len(covered),
+                        'facts_count': len(items),
+                        'facts': items,
+                        'sources': sources,
+                        'start_source': sources[0] if sources else None,
+                        'end_source': sources[-1] if sources else None,
+                        'committed_at': '',
+                    })
+                except Exception as exc:
+                    logger.warning("解析 stage_note 行失败 [piece_id=%s]: %s", piece_id, exc)
+                    continue
+            return {'count': len(stage_rows), 'total_facts': total_facts, 'covered_ranges': covered_ranges, 'latest_cursor': latest_cursor}
+
+        batch_notes = []
+        total_facts = 0
+        covered_ranges = []
+        for piece_id, piece_body in rows:
+            try:
+                wrapper = json.loads(piece_body)
+                raw_content = wrapper.get('content', piece_body)
+                note = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+                batch_notes.append(note)
+                facts = note.get('facts', [])
+                sources = note.get('sources', [])
+                total_facts += len(facts)
+                covered_ranges.append({
+                    'path': piece_id.removeprefix('file:'),
+                    'batch_index': note.get('batch_index', len(batch_notes)),
+                    'cursor': note.get('cursor', ''),
+                    'messages_count': note.get('messages_count', len(sources)),
+                    'facts_count': len(facts),
+                    'facts': facts,
+                    'sources': sources,
+                    'start_source': note.get('start_source') or (sources[0] if sources else None),
+                    'end_source': note.get('end_source') or (sources[-1] if sources else None),
+                    'committed_at': note.get('committed_at', ''),
+                })
+            except Exception as exc:
+                logger.warning("解析 batch_note 行失败 [piece_id=%s]: %s", piece_id, exc)
+                continue
+
+        latest_cursor = batch_notes[-1].get('cursor', '') if batch_notes else ''
+        return {'count': len(batch_notes), 'total_facts': total_facts, 'covered_ranges': covered_ranges, 'latest_cursor': latest_cursor}
+
     def public_analysis(self,run):
         state=run.get('analysis',{})
         segments=state.get('segments',0)
+        notes=self.stage_notes_summary(run)
         if run.get('engine_version') == 2 and run.get('intent',{}).get('mode') != 'statistics':
             segments=self.workspace.page(run['id'],run['version'],'stage_note',limit=0)['total']
+        elif run.get('engine_version') == 3 and not segments:
+            segments=notes['count']
         return {'coverage':state.get('coverage',[]),'segments':segments, 'tracked': state.get('tracked', True),
             'complete':state.get('complete',False),'known':bool(state),'mode':run.get('intent',{}).get('mode','search'),
             'findings':self.workspace.page(run['id'],run['version'],'finding',limit=0)['total'],
-            'analyzed':sum(x.get('analyzed',0) for x in state.get('coverage',[]))}
+            'analyzed':sum(x.get('analyzed',0) for x in state.get('coverage',[])),
+            'stage_notes':notes}
 
     @staticmethod
     def public_source(value, account=''):

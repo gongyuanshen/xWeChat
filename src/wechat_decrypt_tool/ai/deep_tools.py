@@ -19,6 +19,19 @@ from .deep_synchronization import serialized
 from .deep_validation import requires_complete_analysis, requires_findings
 from .deep_calculation import CalculationTerm, calculate
 from .deep_planning import REVISION, MainWork, BranchWork
+from .model_execution import MICRO_BATCH_MIN_BYTES, MICRO_BATCH_MAX_BYTES
+
+
+def capacity(service, run) -> int:
+    """Enforce micro-batch budget strictly bounded between 12 KiB and 16 KiB."""
+    raw = run.get('material_batch_bytes') or run.get('capacity')
+    if raw is None:
+        try:
+            profile = service.profile(run)
+            raw = input_limit(profile) // 3
+        except (KeyError, AttributeError, TypeError, Exception):
+            raw = MICRO_BATCH_MAX_BYTES
+    return max(MICRO_BATCH_MIN_BYTES, min(MICRO_BATCH_MAX_BYTES, raw))
 
 
 class ScopeError(ValueError):
@@ -376,7 +389,10 @@ class ChatGateway:
     async def read_next(self, handle):
         async with self.lock:
             state = self.scope(handle)
-            if state['pending_page']:
+            if state.get('pending_page'):
+                pending = self.get(state['pending_page'])
+                if pending and isinstance(pending, dict) and 'result' in pending:
+                    return pending['result']
                 return self.get(state['pending_page'])['result']
             if state['read_complete']:
                 return {'complete': True, 'requires_commit': False, 'messages': [], 'scope_handle': handle,
@@ -391,13 +407,13 @@ class ChatGateway:
                 if plan and plan['mode'] == 'parallel':
                     raise ScopeError('parallel_required', '范围已准备并行分析，请调用 task，subagent_type=range-analyst，scope_handle=' + handle)
             username = state['conversations'][state['conversation_index']]
-            capacity = max(1024, min(48 * 1024, input_limit(self.service.profile(run)) // 3))
+            batch_capacity = capacity(self.service, run)
             cached = self.get(f"prefetch:{handle}:{state.get('prefetch_index', 0)}")
             if cached:
                 result, following = cached['result'], cached['next']
                 following = {**following, 'prefetch_index': state.get('prefetch_index', 0) + 1}
             else:
-                result, following = await self.fetch_page(state, capacity)
+                result, following = await self.fetch_page(state, batch_capacity)
             if state.get('message_count'):
                 username = None
             self.guard()
@@ -410,13 +426,13 @@ class ChatGateway:
             next_state = {**state, **{k: following[k] for k in ('cursor', 'conversation_index', 'read_complete', 'prefetch_index') if k in following}, 'pages': state['pages'] + 1,
                 'warnings': list(dict.fromkeys([*state.get('warnings', []), *([result['warning']] if result.get('warning') else [])]))}
             page_id = f'page:{handle}:{state["pages"]:08d}'
-            out = {'page_id': page_id, 'scope_handle': handle, 'messages': payload, 'has_more': not next_state['read_complete'],
+            out = {'page_id': page_id, 'scope_handle': handle, 'cursor': next_state.get('cursor', ''), 'messages': payload, 'has_more': not next_state['read_complete'],
                 'requires_commit': state['complete_required'] and state['mode'] != 'statistics', 'warning': result.get('warning', '')}
             if out['requires_commit']:
                 next_state['pending_page'] = page_id
             else:
                 next_state['committed_pages'] += 1
-            self.service.workspace.put_pieces(self.id, self.version, [(page_id, 'deep_page', {'result': out,
+            self.service.workspace.put_pieces(self.id, self.version, [(page_id, 'deep_page', {'result': out, 'cursor': next_state.get('cursor', ''),
                 'covered': [{'source': m['source'], 'start': m.get('text_offset', 0),
                     'end': m.get('text_offset', 0) + len(m.get('text', ''))} for m in payload]}),
                 ('scope:' + handle, 'deep_scope', next_state)])
@@ -460,13 +476,68 @@ class ChatGateway:
             # 一次指出错误位置，避免整批盲重试或试交一条就把整页标成已分析。
             raise ValueError('；'.join(errors[:12]) + '。本次未保存任何发现。请按本页原文修正上述项，'
                 '跨页事实留在对应页，不要猜来源；重新一次性提交本页全部发现，不要用单条试提交代替完整分析。')
-        page.update(committed=True)
-        state.update(pending_page='', committed_pages=state['committed_pages'] + 1)
-        pieces.extend([(page_id, 'deep_page', page), ('scope:' + handle, 'deep_scope', state),
-            ('note:' + page_id, 'stage_note', {'covered': page['covered'], 'items': saved_findings})])
-        self.service.workspace.put_pieces(self.id, self.version, pieces)
+        batch_index = state['committed_pages'] + 1
+        note_path = f'/notes/batch_{batch_index:05d}.json'
+        page.update(committed=True, batch_index=batch_index, note_path=note_path)
+        state.update(pending_page='', committed_pages=batch_index)
+
+        # Build structured batch stage note
+        messages = page.get('result', {}).get('messages', [])
+        sources = [m['source'] for m in messages if isinstance(m, dict) and 'source' in m]
+        run = self.guard()
+        tz_offset = run.get('timezone_offset', 0) if isinstance(run, dict) else 0
+        message_mappings = {}
+        for m in messages:
+            if not isinstance(m, dict) or 'source' not in m:
+                continue
+            sent_at = m.get('sent_at')
+            if not sent_at and m.get('time'):
+                try:
+                    sent_at = datetime.fromtimestamp(m['time'], timezone(timedelta(seconds=tz_offset))).isoformat(timespec='seconds')
+                except (KeyError, TypeError, ValueError, OverflowError, OSError):
+                    sent_at = None
+            message_mappings[m['source']] = {
+                'sender': m.get('sender'),
+                'sent_at': sent_at,
+                'time': m.get('time'),
+                'text': m.get('text', ''),
+            }
+        cursor_val = str(page.get('cursor') or (page.get('result') or {}).get('cursor') or state.get('cursor', ''))
+        note_dict = {
+            'batch_index': batch_index,
+            'scope_handle': handle,
+            'cursor': cursor_val,
+            'messages_count': len(sources),
+            'sources': sources,
+            'message_mappings': message_mappings,
+            'facts': saved_findings,
+            'committed_at': datetime.now(timezone.utc).isoformat(),
+        }
+        note_json = json.dumps(note_dict, ensure_ascii=False, indent=2)
+
+        pieces.extend([
+            (page_id, 'deep_page', page),
+            ('scope:' + handle, 'deep_scope', state),
+            ('note:' + page_id, 'stage_note', {
+                'covered': page['covered'],
+                'items': saved_findings,
+                'batch_index': batch_index,
+                'note_path': note_path,
+            }),
+        ])
+        from .deep_backend import TaskBackend
+        backend = TaskBackend(self.service, self.id, self.version)
+        write_res = backend.write(note_path, note_json, pieces=pieces)
+        if write_res.error:
+            raise ValueError(f'保存阶段笔记失败: {write_res.error}')
         self.coverage()
-        result = {'saved': True, 'findings': len(saved_findings), 'has_more': not state['read_complete']}
+        result = {
+            'saved': True,
+            'findings': len(saved_findings),
+            'has_more': not state['read_complete'],
+            'batch_index': batch_index,
+            'note_path': note_path,
+        }
         if dropped_quotes:
             result.update(dropped_quote_count=len(dropped_quotes),
                 note=f'已移除 {len(dropped_quotes)} 处未与原文逐字一致的附加引文；分析结果及来源已保存。后续请以对应消息原文为准。')

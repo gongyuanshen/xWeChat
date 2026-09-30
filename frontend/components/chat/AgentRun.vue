@@ -13,7 +13,7 @@
       <template v-for="item in groupedRecords" :key="item.id">
         <AgentSubtasks v-if="(run.subtasks?.total || run.subtasks?.scanning || run.subtasks?.planned) && item.id === firstTaskRecord" :run="run" :now="now" @locate="$emit('locate', $event)" />
         <AgentToolCall v-else-if="item.kind === 'tool' && !(item.action === 'task' && run.subtasks?.total)" :items="item.calls" :now="now" :name-for="nameFor" :view-state="viewState" />
-        <div v-else-if="item.kind === 'progress'" class="agent-progress-note" :class="{'is-superseded':item.status === 'superseded'}" role="group" aria-label="阶段性回复"><AgentAnswer :text="item.text" :citations="run.citations" :references="run.references" :streaming="item.status === 'running'" @locate="$emit('locate', $event)" /><small v-if="item.status === 'superseded'">已根据补充要求调整</small></div>
+        <div v-else-if="item.kind === 'progress'" class="agent-progress-note" :class="{'is-superseded':item.status === 'superseded'}" role="group" aria-label="阶段性回复"><AgentAnswer :text="item.text" :citations="run.citations || []" :references="run.references || []" :streaming="item.status === 'running'" @locate="$emit('locate', $event)" /><small v-if="item.status === 'superseded'">已根据补充要求调整</small></div>
         <div v-else-if="item.kind === 'supplement'" class="agent-supplement"><p>{{ item.text }}</p><small>{{ item.status === 'applied' ? '补充要求已应用' : '已收到补充要求' }}</small></div>
         <template v-else-if="isCompaction(item)"><AgentContextCompaction v-if="open" :item="item" :run="run" :view-state="viewState" /></template>
         <p v-else-if="item.kind === 'notice'" class="agent-process-notice" role="status">{{ item.text }}<small v-if="item.attempt"> · 第 {{ item.attempt }} 次尝试</small></p>
@@ -21,8 +21,8 @@
         <div v-else-if="item.kind === 'status'" class="agent-stage-row" :class="`is-${item.status}`">
           <Check v-if="item.status === 'completed'" :size="16" :stroke-width="1.8" aria-hidden="true" />
           <CirclePause v-else-if="item.status !== 'running'" :size="16" :stroke-width="1.8" aria-hidden="true" />
-          <span :class="{ 'agent-shimmer': item.status === 'running' }">{{ item.text.replace(/^正在/, '') }}</span>
-          <small><span class="sr-only">{{ stageOutcome(item.status) }} · </span>{{ duration((item.finished_at ?? now / 1000) - item.started_at) }}</small>
+          <span :class="{ 'agent-shimmer': item.status === 'running' }">{{ String(item?.text || '').replace(/^正在/, '') }}</span>
+          <small><span class="sr-only">{{ stageOutcome(item.status) }} · </span>{{ duration((item.finished_at ?? currentNow / 1000) - item.started_at) }}</small>
         </div>
       </template>
     </div>
@@ -33,12 +33,12 @@
     </div>
     </ChainOfThought>
     <div v-if="run.error" class="agent-error" role="alert">{{ run.error }}<details v-if="run.error_info?.diagnostic_id"><summary>诊断信息</summary><small>{{ run.error_info.category }} · {{ run.error_info.diagnostic_id }}</small></details></div>
-    <div v-if="run.answer" class="agent-final-answer"><h3 v-if="run.status !== 'completed'" class="agent-answer-heading">{{ running ? '正在回答' : '未完成的回答' }}</h3><AgentAnswer :text="run.answer" :citations="run.citations" :references="run.references" :streaming="running" @locate="$emit('locate', $event)" /></div>
+    <div v-if="run.answer" class="agent-final-answer"><h3 v-if="run.status !== 'completed'" class="agent-answer-heading">{{ running ? '正在回答' : '未完成的回答' }}</h3><AgentAnswer :text="run.answer" :citations="run.citations || []" :references="run.references || []" :streaming="running" @locate="$emit('locate', $event)" /></div>
 
     <div v-if="run.choices?.length" class="agent-choices"><button v-for="choice in run.choices" :key="choice.username" type="button" @click="$emit('choose', choice)">{{ choice.name }}<small>{{ choice.username }}</small></button></div>
     <div v-if="!running" class="agent-result-actions">
       <div v-if="run.answer" class="agent-answer-footer">
-        <AgentCopyAction :text="run.answer" :citations="run.citations" :references="run.references" />
+        <AgentCopyAction :text="run.answer" :citations="run.citations || []" :references="run.references || []" />
         <span v-if="finalSummary" class="agent-final-summary" :title="finalSummaryTitle">{{ finalSummary }}</span>
       </div>
       <button v-if="!running && latest && run.error_info?.action === 'settings'" type="button" @click="$emit('settings')">检查 AI 服务</button>
@@ -79,6 +79,9 @@ const summaryText = formatCount => {
     parts.push(`已读取 ${run.read_count} 条`)
     if (run.analysis?.tracked === false) parts.push('按需检索')
   }
+  if (run.stage_notes?.count) {
+    parts.push(`阶段笔记 ${run.stage_notes.count} 份 (${run.stage_notes.total_facts || 0} 条事实)`)
+  }
   if (run.usage) parts.push(`输入 ${formatCount(run.usage.input_tokens)} · 输出 ${formatCount(run.usage.output_tokens)} Token`)
   return parts.join(' · ')
 }
@@ -93,8 +96,9 @@ const isCompaction = item => item.kind === 'notice' && item.context_job?.id && N
 const compactions = computed(() => records.value.filter(isCompaction))
 const compacting = computed(() => compactions.value.some(item => item.context_job.status === 'running' && (item.input_version ?? props.run.version) === props.run.version))
 const firstTaskRecord = computed(() => groupedRecords.value.find(item => item.kind === 'tool' && item.action === 'task')?.id)
-const elapsed = computed(() => (props.run.elapsed_seconds || 0) + (running.value ? Math.max(0,props.now / 1000 - props.run.segment_started) : 0))
-const stageElapsed = computed(() => Math.max(0,props.now / 1000 - (props.run.stage_started_at ?? props.run.segment_started ?? props.now / 1000)))
+const currentNow = computed(() => props.now || Date.now())
+const elapsed = computed(() => (props.run.elapsed_seconds || 0) + (running.value ? Math.max(0, currentNow.value / 1000 - (props.run.segment_started ?? currentNow.value / 1000)) : 0))
+const stageElapsed = computed(() => Math.max(0, currentNow.value / 1000 - (props.run.stage_started_at ?? props.run.segment_started ?? currentNow.value / 1000)))
 const duration = value => { const n=Math.max(0,Math.floor(value || 0)); return n>=60 ? `${Math.floor(n/60)}分${n%60}秒` : `${n}秒` }
 const stageOutcome = status => ({running:'进行中',completed:'已完成',failed:'未完成',superseded:'已调整',cancelled:'已停止',paused:'已暂停',incomplete:'未完成'}[status] || '已结束')
 const toggle = () => { open.value = !open.value }

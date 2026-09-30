@@ -88,7 +88,7 @@ class TaskBackend(BackendProtocol):
             end_line=end, total_lines=len(lines), next_offset=end if end < len(lines) else None)
 
     @serialized
-    def write(self, file_path, content):
+    def write(self, file_path, content, *, pieces=None):
         try:
             self.guard()
             path = self.path(file_path)
@@ -99,7 +99,10 @@ class TaskBackend(BackendProtocol):
                 return WriteResult(error='继承的历史资料只读，请使用新的文件路径')
             if len(content.encode('utf-8')) > 8 * 1024 * 1024:
                 return WriteResult(error='单份内部文件过大，请拆分保存')
-            self.service.workspace.put(self.run_id, self.version, 'file:' + path, 'deep_file', self.file_data(content))
+            all_pieces = [('file:' + path, 'deep_file', self.file_data(content))]
+            if pieces:
+                all_pieces.extend(pieces)
+            self.service.workspace.put_pieces(self.run_id, self.version, all_pieces)
             return WriteResult(path=path)
         except ValueError as exc:
             return WriteResult(error=str(exc))

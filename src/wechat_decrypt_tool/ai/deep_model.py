@@ -21,7 +21,7 @@ from .model_scheduler import scheduler, subtask_id
 from .providers import ProviderFailure
 from .model_execution import model_policy
 
-MODEL_ATTEMPT_SECONDS = 240
+MODEL_ATTEMPT_SECONDS = 120
 MODEL_TOTAL_SECONDS = 600
 
 

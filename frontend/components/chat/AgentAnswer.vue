@@ -2,7 +2,7 @@
   <div ref="answer" class="agent-answer">
     <div class="agent-markdown" v-html="rendered" @error.capture="hideMissingAvatar" @click="onReference" @pointerover="hoverReference" @pointerout="leaveReference" @focusin="hoverReference" @focusout="leaveReference" />
     <div v-if="selected" :key="selected.source" :id="previewId" ref="preview" popover="manual" class="agent-citation-preview" role="dialog" aria-label="消息来源预览" @pointerenter="cancelClose" @pointerleave="leaveReference" @keydown.esc.stop.prevent="closePreview(true)">
-      <header><AgentAvatar :path="selected.sender_avatar_path" :name="selected.sender" /><div><strong>{{ selected.sender }}</strong><small>{{ selected.name || selected.username }} · {{ new Date(selected.time * 1000).toLocaleString() }}</small></div><button type="button" aria-label="关闭来源预览" @click="closePreview(true)"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
+      <header><AgentAvatar :path="selected.sender_avatar_path" :name="selected.sender" /><div><strong>{{ selected.sender }}</strong><small>{{ selected.name || selected.username }} · {{ selected.time ? new Date(selected.time * 1000).toLocaleString() : '未知时间' }}</small></div><button type="button" aria-label="关闭来源预览" @click="closePreview(true)"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
       <p class="agent-citation-text">{{ selected.text }}</p><small v-if="selected.excerpt">此处为原文节选，可定位查看完整消息。</small>
       <p v-if="locateError" class="agent-citation-error" role="alert">{{ locateError }}</p>
       <button type="button" class="agent-citation-locate" :disabled="locating" :aria-busy="locating" :aria-label="locating ? '正在定位原消息' : locateError ? '重试定位原消息' : '定位原消息'" @click="locateSelected">
@@ -35,9 +35,9 @@ const profileState = inject('chatContactProfileState', null)
 const componentId = useId()
 const personCardPrefix = `mention:${componentId}:`
 const answerReferences = computed(() => {
-  const references = props.references.map(item => ({ ...item }))
+  const references = (props.references || []).map(item => ({ ...item }))
   const people = new Map(references.filter(item => item.kind === 'person' && item.username).map(item => [item.username, item]))
-  for (const source of props.citations) {
+  for (const source of (props.citations || [])) {
     const username = String(source?.sender_id || '').trim()
     const name = String(source?.sender || '').trim()
     const id = String(source?.source || '').toLowerCase()
@@ -58,7 +58,7 @@ const answerReferences = computed(() => {
 // 缺少头像时保留人名和编号，避免将浏览器破图图标显示为人物头像。
 const hideMissingAvatar = event => { if (event.target?.tagName === 'IMG') event.target.style.display = 'none' }
 const locatingImage = ref(false), imageLocateError = ref('')
-const answerImages = computed(() => [...new Set([...props.text.matchAll(/\[\[image:([a-f0-9]{24})\]\]/gi)].map(m => m[1].toLowerCase()))].map(id => props.references.find(r => r.kind === 'image' && r.id === id)).filter(Boolean))
+const answerImages = computed(() => [...new Set([...props.text.matchAll(/\[\[image:([a-f0-9]{24})\]\]/gi)].map(m => m[1].toLowerCase()))].map(id => (props.references || []).find(r => r.kind === 'image' && r.id === id)).filter(Boolean))
 const locateImage = async source => {
   if (locatingImage.value) return
   locatingImage.value = true; imageLocateError.value = ''
@@ -112,7 +112,7 @@ const onReference = event => {
     const cited = [...props.text.matchAll(/\[\[([a-f0-9]{24})\]\]/gi)].map(m => m[1].toLowerCase())
     // 先用这条回答实际引用的证据，避免任务里的无关旧消息抢在当前出处前面。
     const source = [...cited.filter(id => mentioned.includes(id)), ...cited.filter(id => related.includes(id)),
-      ...mentioned, ...related].map(id => props.citations.find(c => c.source === id)).find(Boolean)
+      ...mentioned, ...related].map(id => (props.citations || []).find(c => c.source === id)).find(Boolean)
     if (source) void onCitation({ target: person }, true, source)
     return
   }
@@ -163,7 +163,7 @@ watch(personProfileHost, element => {
 const selectedNumber = ref(0), locating = ref(false), located = ref(false), locateError = ref('')
 let trigger = null, observer = null, revision = 0
 // 原始 HTML、远程图片和自动链接均禁用；只渲染本地已核验的来源按钮。
-const rendered = computed(() => renderAgentMarkdown(props.text, props.citations, props.streaming, answerReferences.value, apiBase))
+const rendered = computed(() => renderAgentMarkdown(props.text, props.citations || [], props.streaming, answerReferences.value, apiBase))
 const closePreview = (restoreFocus = false) => {
   ++revision; cancelClose(); pinned = false
   observer?.disconnect(); observer = null
@@ -201,7 +201,7 @@ const dismissOutside = event => { if (!preview.value?.contains(event.target) && 
 const dismissEscape = event => { if (event.key === 'Escape') { event.preventDefault(); closePreview(true) } }
 const onCitation = async (event, pin = true, personSource = null) => {
   const button = event.target.closest('button[data-source], button[data-person]')
-  const source = personSource || props.citations.find(c => c.source === button?.dataset.source)
+  const source = personSource || (props.citations || []).find(c => c.source === button?.dataset.source)
   if (!source) return
   // 人物文字不是来源序号；按实际渲染的编号查找，未编号的关联原文用 0 表示。
   const numbered = [...new Set([...answer.value.querySelectorAll('button[data-source]')].map(el => el.dataset.source))]

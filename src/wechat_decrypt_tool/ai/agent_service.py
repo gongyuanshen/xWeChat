@@ -23,7 +23,7 @@ STREAM_PATCH_FIELDS = {
     'error', 'error_info', 'used', 'read_count', 'index_status', 'query_scope',
     'query_filters', 'time_range', 'intent', 'coverage_state', 'subtasks', 'choices',
     'answer_context', 'needs_continuation', 'can_resume', 'restart_required',
-    'context_compaction',
+    'context_compaction', 'stage_notes',
 }
 
 from .deep_synchronization import serialized
@@ -232,7 +232,7 @@ class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
             'read_count', 'index_status', 'query_scope', 'query_filters', 'time_range',
             'intent', 'analysis', 'usage', 'source_count', 'coverage_warnings',
             'coverage_state', 'subtasks', 'choices', 'can_resume', 'restart_required',
-            'answer_context', 'needs_continuation',
+            'answer_context', 'needs_continuation', 'stage_notes',
         }
         self.store.event(run['account'], 'agent', {
             'type': 'run_snapshot',
@@ -295,7 +295,24 @@ class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
         warnings.extend(c['warning'] for c in run.get('analysis',{}).get('coverage',[]) if c.get('warning'))
         from .agent_references import cited_references
         refs = cited_references('\n'.join([run.get('answer', '')] + [x.get('text', '') for x in run.get('timeline', [])]), run.get('references', {}))
-        return {k: v for k, v in run.items() if k not in ('evidence', 'profile', 'vision', 'tool_cache', 'pending_actions', 'analysis', 'references', 'active_material', 'pending_material', 'answer_resume')} | {'references': refs} | {'citations': self.citations(run), 'usage': usage, 'timeline': self.public_timeline(run), 'coverage_warnings':list(dict.fromkeys(warnings)), 'analysis': self.public_analysis(run), 'source_count':len(run['evidence'])}
+        subtasks = self.subtasks.summary(run) if hasattr(self, 'subtasks') and self.subtasks else run.get('subtasks')
+        if subtasks is None:
+            subtasks = {}
+        stage_notes = self.stage_notes_summary(run) if hasattr(self, 'stage_notes_summary') else {'count': 0, 'total_facts': 0, 'covered_ranges': []}
+        cursor = stage_notes.get('latest_cursor') or run.get('cursor', '')
+        base_fields = {k: v for k, v in run.items() if k not in ('evidence', 'profile', 'vision', 'tool_cache', 'pending_actions', 'analysis', 'references', 'active_material', 'pending_material', 'answer_resume')}
+        return base_fields | {
+            'cursor': cursor,
+            'references': refs if refs is not None else [],
+            'citations': self.citations(run) or [],
+            'usage': usage,
+            'timeline': self.public_timeline(run) or [],
+            'coverage_warnings': list(dict.fromkeys(warnings)),
+            'analysis': self.public_analysis(run) or {},
+            'source_count': len(run['evidence']),
+            'subtasks': subtasks,
+            'stage_notes': stage_notes,
+        }
 
     @observed('agent.stop', id_field='run_id')
     async def stop(self):

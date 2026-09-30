@@ -194,6 +194,10 @@ class ModelService:
         # 禁止把会话内容交给外部 tracing 回调；密钥不进入工作流状态。
         common = dict(model=profile["model"], api_key=profile.get("api_key") or "local",
                       timeout=90, max_retries=0, callbacks=[])
+        from .model_execution import call_policy
+        from .model_reasoning import constrain_reasoning_profile
+        if call_policy.get().constrain_thinking:
+            profile = constrain_reasoning_profile(profile)
         if profile["protocol"] == "anthropic":
             from langchain_anthropic import ChatAnthropic
             from .agent_budget import output_limit
@@ -203,10 +207,9 @@ class ModelService:
         from .model_reasoning import request_options
         extra = request_options(profile)
         from .model_catalog import documented_metadata
-        from .model_execution import call_policy
         # 支持开关的模型可能默认深度思考；范围识别、独立事实摘录无需耗尽输出额度后
         # 重试。只对官方明确支持的接口生效，显式思考等级和最终回答不覆盖。
-        if (call_policy.get().auxiliary and not profile.get('reasoning_effort')
+        if ((call_policy.get().auxiliary or call_policy.get().constrain_thinking) and not profile.get('reasoning_effort')
                 and profile.get('thinking_mode') is None and profile.get('thinking_budget') is None
                 and 'disabled' in documented_metadata(profile, profile['model']).get('thinking_types', [])):
             extra['extra_body'] = {'thinking': {'type': 'disabled'}}
@@ -274,6 +277,9 @@ class ModelService:
         json_output = bool(schema and profile.get('protocol') == 'openai'
                            and profile.get('model_metadata', {}).get('structured_output') is True)
         policy = call_policy.get()
+        if policy.constrain_thinking:
+            from .model_reasoning import constrain_reasoning_profile
+            profile = constrain_reasoning_profile(profile)
         deadline = time.monotonic() + policy.seconds
         for attempt in range(3):
             if active_budget.get():check_request(profile,messages,schema.model_json_schema() if native_output else None)
@@ -387,7 +393,7 @@ class ModelService:
                              or 'connection' in type(exc).__name__.lower()
                              or 'timeout' in type(exc).__name__.lower()
                              or status in {408, 409, 429} or bool(status and status >= 500))
-                if transient and policy.split_on_failure:
+                if transient and policy.split_on_failure and requested is not None:
                     audit['error_category'] = 'timeout' if isinstance(exc, TimeoutError) else 'service'
                     raise ResegmentModelError('模型整理未完成，正在缩小批次；已保存原文和笔记保留。') from None
                 # 超时回调可能早于粗粒度时钟的下一跳，已触发的截止不能继续重试。

@@ -47,9 +47,9 @@ class DeepSubtasks:
             if paused:
                 result.update(running=0, queued=0)
             return result
-        active = [p for p in plans if p['mode'] == 'parallel']
+        active = [p for p in plans if p.get('mode') == 'parallel']
         if active:
-            phases = {p['phase'] for p in active}
+            phases = {p.get('phase', 'analyzing') for p in active}
             paused = parent.get('status') in ('cancelled', 'interrupted', 'failed') and phases != {'completed'}
             result.update(plan_version=1, scanning=not paused and any(not p['scan_complete'] for p in active),
                 total_known=all(p['scan_complete'] for p in active),

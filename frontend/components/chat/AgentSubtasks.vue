@@ -78,9 +78,12 @@ const props = defineProps({ run: { type: Object, required: true }, now: Number }
 const emit = defineEmits(['locate'])
 const api = useAiApi(), items = ref([]), findings = ref({}), more = ref({}), expandedProgress = ref({})
 const fetchedSummary = ref(null)
-const summary = computed(() => fetchedSummary.value || props.run.subtasks)
-const phaseLabel = computed(() => ({ partitioning: '读取并分片', analyzing: '并行分析', reducing: '汇总关联',
-  planning: '主模型分析与规划', checking: '核查疑点', retrieving: '专题检索', interrupted: '分析已暂停', completed: summary.value.plan_version === 2 ? '分工已完成' : '分片分析完成' })[summary.value.phase] || '子任务分析')
+const summary = computed(() => fetchedSummary.value || props.run.subtasks || {})
+const phaseLabel = computed(() => ({
+  partitioning: '读取并分片', analyzing: '并行分析', reducing: '汇总关联',
+  planning: '主模型分析与规划', checking: '核查疑点', retrieving: '专题检索', interrupted: '分析已暂停',
+  completed: summary.value?.plan_version === 2 ? '分工已完成' : '分片分析完成'
+})[summary.value?.phase] || '子任务分析')
 const rangeLabel = range => {
   const format = seconds => new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', timeZone: 'UTC' }).format(new Date((seconds + (props.run.timezone_offset || 0)) * 1000))
@@ -114,7 +117,7 @@ const load = async (append = false) => {
   try {
     const value = await api.request(`/agent/runs/${props.run.id}/subtasks`, { query: { account:props.run.account, version:props.run.version, offset:append ? items.value.length : 0, limit:20 } })
     if (disposed || identity() !== key || revision !== generation) return
-    items.value = append ? [...items.value, ...value.items] : value.items
+    items.value = append ? [...items.value, ...(value.items || [])] : (value.items || [])
     if (value.summary) fetchedSummary.value = value.summary
     hasMore.value = value.has_more
   } catch (e) { if (!disposed && identity() === key) error.value = `子任务加载失败：${e.message}` }
@@ -137,7 +140,7 @@ const locate = async source => {
 }
 const toggle = event => { if (event.target !== event.currentTarget) return; const changed = opened.value !== event.target.open; opened.value = event.target.open; clearTimeout(refreshTimer); if (opened.value) { if (changed) void load(); else scheduleRefresh() } }
 watch(identity, () => { ++generation; loading.value = false; fetchedSummary.value = null; items.value = []; expandedProgress.value = {}; findings.value = {}; more.value = {}; error.value = ''; if (opened.value) void load() }, { immediate: true })
-watch(() => JSON.stringify(props.run.subtasks), () => { fetchedSummary.value = null; clearTimeout(timer); if (opened.value) timer = setTimeout(() => load(), 250) })
+watch(() => JSON.stringify(props.run.subtasks || {}), () => { fetchedSummary.value = null; clearTimeout(timer); if (opened.value) timer = setTimeout(() => load(), 250) })
 watch(() => props.run.status, status => { clearTimeout(refreshTimer); if (opened.value && !['queued', 'running'].includes(status)) void load(); else scheduleRefresh() })
 onUnmounted(() => { disposed = true; ++generation; clearTimeout(timer); clearTimeout(refreshTimer) })
 </script>
