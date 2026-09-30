@@ -7,7 +7,6 @@ on:
       - ".github/workflows/sns-media-cross-platform.yml"
       - "desktop/package.json"
       - "desktop/package-lock.json"
-      - "desktop/scripts/smoke-macos-package.cjs"
       - "desktop/scripts/smoke-windows-package.cjs"
       - "desktop/scripts/sns-wasm-smoke.cjs"
       - "desktop/src/main.cjs"
@@ -43,9 +42,6 @@ jobs:
           - name: Windows x64
             os: windows-2022
             arch: x64
-          - name: macOS arm64
-            os: macos-14
-            arch: arm64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:

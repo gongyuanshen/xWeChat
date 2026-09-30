@@ -1,7 +1,7 @@
 # import sys
 # import requests
 
-from .platform_support import is_macos, is_windows
+from .platform_support import is_windows
 
 try:
     import wx_key
@@ -22,7 +22,6 @@ import random
 import logging
 import asyncio
 import importlib
-import httpx
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
@@ -669,54 +668,14 @@ class WeChatKeyFetcher:
 
 
 def get_db_key_workflow(
-        wechat_install_path: Optional[str] = None,
-        *,
-        db_storage_path: Optional[str] = None,
-        internal_db_key: Optional[str] = None,
-        key_mode: str = "auto",
-        cancel_event: Any = None,
-        timeout_seconds: float = 120.0,
-):
-    if is_macos():
-        mode = str(key_mode or "auto").strip().lower()
-        if mode not in {"auto", "macos_private_helper", "mac_private_helper"}:
-            raise RuntimeError(f"macOS 不支持数据库密钥获取模式: {key_mode}")
-        from .macos_db_key_helper import (
-            MacosDbKeyUnavailableError,
-            capture_macos_database_key,
-        )
-        from .wechat_decrypt import validate_realtime_database_key
-
-        result = capture_macos_database_key(
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
-        )
-        validation = validate_realtime_database_key(
-            str(db_storage_path or ""),
-            str(result.get("db_key") or ""),
-        )
-        if validation.get("valid") is not True:
-            logger.warning(
-                "[db_key] rejected macOS captured key: reason=%s verified_roles=%s modes=%s",
-                str(validation.get("reason") or "verification_failed"),
-                list(validation.get("verified_roles") or []),
-                dict(validation.get("modes") or {}),
-            )
-            raise MacosDbKeyUnavailableError(
-                (
-                    "本次捕获到的密钥未通过当前账号的完整实时数据库校验，"
-                    "可能是单个数据库的派生密钥。请确认选择了正确账号，重新点击获取，"
-                    "并在按钮显示“获取中”后完整退出微信程序，再立即重新打开微信并重新登录。"
-                ),
-                code="CAPTURE_KEY_MISMATCH",
-                retryable=True,
-            )
-        logger.info(
-            "[db_key] macOS captured key verified for realtime roles=%s modes=%s",
-            list(validation.get("verified_roles") or []),
-            dict(validation.get("modes") or {}),
-        )
-        return result
+    wechat_install_path: Optional[str] = None,
+    *,
+    db_storage_path: Optional[str] = None,
+    internal_db_key: Optional[str] = None,
+    key_mode: str = "auto",
+    cancel_event: Any = None,
+    timeout_seconds: float = 120.0,
+) -> dict[str, Any]:
     if not is_windows():
         raise RuntimeError("当前平台不支持自动获取数据库密钥，请使用同类工具获取后手动填写。")
 
@@ -769,12 +728,6 @@ def get_db_key_workflow(
 
 # ==============================   以下是图片密钥逻辑  =====================================
 
-def get_wechat_internal_global_config(wx_dir: Path, file_name1) -> bytes:
-    xwechat_files_root = wx_dir.parent
-    target_path = os.path.join(xwechat_files_root, "all_users", "config", file_name1)
-    if not os.path.exists(target_path):
-        raise FileNotFoundError(f"找不到配置文件: {target_path}，请确认微信数据目录结构是否完整")
-    return Path(target_path).read_bytes()
 
 
 def try_get_local_image_keys() -> List[Dict[str, Any]]:
@@ -859,43 +812,9 @@ def _get_image_key_kvcomm_dirs(account_dir: Optional[Path] = None) -> tuple[Path
     if override:
         return (Path(override).expanduser(),)
 
-    if is_macos():
-        container_data = Path.home() / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data"
-        candidates = [
-            container_data / "Documents" / "app_data" / "net" / "kvcomm",
-            container_data
-            / "Library"
-            / "Application Support"
-            / "com.tencent.xinWeChat"
-            / "xwechat"
-            / "net"
-            / "kvcomm",
-            container_data
-            / "Library"
-            / "Application Support"
-            / "com.tencent.xinWeChat"
-            / "net"
-            / "kvcomm",
-            container_data / "Documents" / "xwechat" / "net" / "kvcomm",
-        ]
-
-        if account_dir is not None:
-            account_path = Path(account_dir).expanduser()
-            for parent in (account_path, *account_path.parents):
-                if parent.name.casefold() == "xwechat_files":
-                    candidates.append(parent.parent / "app_data" / "net" / "kvcomm")
-                    break
-
-            cursor = account_path
-            for _ in range(6):
-                candidates.append(cursor / "net" / "kvcomm")
-                if cursor.parent == cursor:
-                    break
-                cursor = cursor.parent
-    else:
-        appdata = str(os.environ.get("APPDATA") or "").strip()
-        appdata_root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-        candidates = [appdata_root / "Tencent" / "xwechat" / "net" / "kvcomm"]
+    appdata = str(os.environ.get("APPDATA") or "").strip()
+    appdata_root = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    candidates = [appdata_root / "Tencent" / "xwechat" / "net" / "kvcomm"]
 
     deduplicated: list[Path] = []
     seen: set[str] = set()
@@ -1118,7 +1037,7 @@ async def get_image_key_integrated_workflow(
         wxid_dir: Optional[str] = None,
         db_storage_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Resolve image keys locally with real V2 validation before remote fallback."""
+    """Resolve image keys locally and require real V2 validation."""
     resolved_wxid_dir: Optional[Path] = None
     try:
         resolved_wxid_dir = _resolve_wxid_dir_for_image_key(
@@ -1286,52 +1205,9 @@ async def get_image_key_integrated_workflow(
                     source="native_v2_verified",
                 )
 
-    logger.info("[image_key] 本地验真未命中，最后尝试远程 API 解析")
-    remote_result = await fetch_and_save_remote_keys(
-        account,
-        wxid_dir=wxid_dir,
-        db_storage_path=db_storage_path,
-        persist=False,
+    raise RuntimeError(
+        "未能在本地获取并验证图片密钥，请使用内存扫描或手动填写有效密钥。"
     )
-    normalized_remote = _normalize_complete_image_key_payload(remote_result)
-    if normalized_remote is None:
-        raise RuntimeError("远程 API 返回了不完整或格式无效的图片密钥")
-    remote_xor, remote_aes = normalized_remote
-
-    if resolved_wxid_dir is not None and template_scan is not None and template_scan.templates:
-        if not verify_key_pair(
-            remote_xor,
-            remote_aes,
-            template_scan,
-            require_xor_match=True,
-        ):
-            raise RuntimeError("远程 API 返回的图片密钥未通过本地 V2 图片验真")
-        matched_wxid = str(remote_result.get("wxid") or canonical_account).strip()
-        _persist_verified_image_keys(
-            canonical_account=canonical_account,
-            request_account=account,
-            source_wxid_dir=resolved_wxid_dir,
-            matched_wxid=matched_wxid,
-            xor_key=remote_xor,
-            aes_key=remote_aes,
-            source="remote_v2_verified",
-        )
-        return _verified_image_key_result(
-            canonical_account=canonical_account,
-            matched_wxid=matched_wxid,
-            xor_key=remote_xor,
-            aes_key=remote_aes,
-            source="remote_v2_verified",
-        )
-
-    result = dict(remote_result)
-    result.update({
-        "xor_key": f"0x{remote_xor:02X}",
-        "aes_key": remote_aes,
-        "source": "remote_api",
-        "verified": False,
-    })
-    return result
 
 
 async def get_image_key_memory_workflow(
@@ -1398,95 +1274,3 @@ async def get_image_key_memory_workflow(
     )
     result.update({"pid": resolution.pid, "encoding": resolution.encoding})
     return result
-
-
-async def fetch_and_save_remote_keys(
-        account: Optional[str] = None,
-        *,
-        wxid_dir: Optional[str] = None,
-        db_storage_path: Optional[str] = None,
-        persist: bool = True,
-) -> Dict[str, Any]:
-    wx_id_dir = _resolve_wxid_dir_for_image_key(
-        account,
-        wxid_dir=wxid_dir,
-        db_storage_path=db_storage_path,
-    )
-    wxid = wx_id_dir.name
-
-    url = "https://view.free.c3o.re/api/key"
-    data = {"weixinIDFolder": wxid}
-
-    logger.info(
-        "[image_key] 准备请求远程密钥：request_account=%s resolved_account=%s wxid_dir=%s db_storage_path=%s",
-        str(account or "").strip(),
-        wxid,
-        str(wx_id_dir),
-        str(db_storage_path or "").strip(),
-    )
-
-    try:
-        blob1_bytes = get_wechat_internal_global_config(wx_id_dir, file_name1="global_config")
-        blob2_bytes = get_wechat_internal_global_config(wx_id_dir, file_name1="global_config.crc")
-    except Exception as e:
-        raise RuntimeError(f"读取微信内部文件失败: {e}")
-    logger.info(
-        "[image_key] 远程请求输入文件已读取：wxid=%s global_config_bytes=%s crc_bytes=%s",
-        wxid,
-        len(blob1_bytes),
-        len(blob2_bytes),
-    )
-
-    files = {
-        'fileBytes': ('file', blob1_bytes, 'application/octet-stream'),
-        'crcBytes': ('file.crc', blob2_bytes, 'application/octet-stream'),
-    }
-
-    async with httpx.AsyncClient(timeout=30) as client:
-        logger.info("[image_key] 向云端 API 发送请求：url=%s wxid=%s", url, wxid)
-        response = await client.post(url, data=data, files=files)
-
-    if response.status_code != 200:
-        raise RuntimeError(f"云端服务器错误: {response.status_code} - {response.text[:100]}")
-
-    config = response.json()
-    if not config:
-        raise RuntimeError("云端解析失败: 返回数据为空")
-    logger.info(
-        "[image_key] 收到远程响应：status_code=%s keys=%s nick_name=%s",
-        response.status_code,
-        _key_payload_log_metadata(config),
-        str(config.get("nickName", config.get("nick_name", ""))),
-    )
-
-    normalized = _normalize_complete_image_key_payload({
-        "xor_key": config.get("xorKey", config.get("xor_key")),
-        "aes_key": config.get("aesKey", config.get("aes_key")),
-    })
-    if normalized is None:
-        raise RuntimeError("云端解析失败: 返回的 XOR/AES 密钥不完整或格式无效")
-    xor_int, aes_val = normalized
-    xor_hex_str = f"0x{xor_int:02X}"
-
-    if persist:
-        upsert_account_keys_in_store(
-            account=wxid,
-            image_xor_key=xor_hex_str,
-            image_aes_key=aes_val,
-            image_key_verified=False,
-            image_key_source="remote_api",
-        )
-        logger.info(
-            "[image_key] 远程候选已按未验真状态保存：account=%s keys=%s",
-            wxid,
-            _key_payload_log_metadata({"xor_key": xor_hex_str, "aes_key": aes_val}),
-        )
-
-    return {
-        "wxid": wxid,
-        "xor_key": xor_hex_str,
-        "aes_key": aes_val,
-        "nick_name": config.get("nickName", config.get("nick_name", "")),
-        "source": "remote_api",
-        "verified": False,
-    }

@@ -64,7 +64,6 @@ from ..media_helpers import (
     _try_find_decrypted_resource,
     _try_strip_media_prefix,
 )
-from .. import cdn_image_service
 from ..chat_helpers import (
     _decode_message_content,
     _extract_md5_from_packed_info,
@@ -472,15 +471,6 @@ def _image_candidate_variant_rank(path: Path) -> int:
     return 2
 
 
-def _is_probable_large_image_source(path: Path) -> bool:
-    """Return whether a local image candidate can satisfy an explicit large-image request."""
-    stem = str(path.stem or "").lower()
-    path_parts = {str(part or "").lower() for part in path.parts}
-    if path_parts & {"thumb", "thumbnail", "thumbnails"}:
-        return False
-    if stem.endswith(("_thumb", ".thumb", "_thumbnail", ".thumbnail")):
-        return False
-    return _image_candidate_variant_rank(path) <= 2
 
 
 def _image_candidate_stat(path: Optional[Path]) -> tuple[int, float]:
@@ -1924,137 +1914,8 @@ def _lookup_image_md5_by_server_id_from_realtime_messages(account_dir_str: str, 
     return ""
 
 
-def _extract_image_cdn_info_from_xml(xml_text: str) -> dict[str, str]:
-    """从图片消息 XML 中抽取 CDN 原图下载所需的 fileid(cdnbigimgurl) + aeskey。"""
-    xml_text = str(xml_text or "")
-    if not xml_text:
-        return {}
-    fileid = (
-        _extract_xml_attr(xml_text, "cdnbigimgurl")
-        or _extract_xml_attr(xml_text, "cdnmidimgurl")
-        or _extract_xml_tag_or_attr(xml_text, "cdnbigimgurl")
-        or _extract_xml_tag_or_attr(xml_text, "cdnmidimgurl")
-    ).strip()
-    if not fileid:
-        return {}
-    aeskey = (
-        _extract_xml_attr(xml_text, "aeskey")
-        or _extract_xml_tag_text(xml_text, "aeskey")
-    ).strip()
-    return {"fileid": fileid, "aeskey": aeskey}
 
 
-def _lookup_image_cdn_download_info(account_dir_str: str, server_id: int, username: str) -> dict[str, str]:
-    """按 server_id 从消息库取图片消息(local_type=3)的 XML，解析出 CDN 原图的 fileid + aeskey。
-
-    先查静态 ``message_*.db``（解密/导入的账号），再查实时 WCDB（在线消息）。
-    """
-    account_dir_str = str(account_dir_str or "").strip()
-    username = str(username or "").strip()
-    try:
-        sid = int(server_id or 0)
-    except Exception:
-        sid = 0
-    if not account_dir_str or not username or not sid:
-        return {}
-    try:
-        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
-    except Exception:
-        return {}
-    account_dir = Path(account_dir_str)
-
-    # 1) 静态 message_*.db
-    static_paths: list[Path] = []
-    try:
-        for p in account_dir.glob("message_*.db"):
-            if p.is_file():
-                static_paths.append(p)
-    except Exception:
-        static_paths = []
-    static_paths.sort(key=lambda p: p.name)
-    for db_path in static_paths:
-        try:
-            conn = sqlite3.connect(str(db_path))
-        except Exception:
-            continue
-        try:
-            row = conn.execute(
-                f"SELECT local_type, message_content, compress_content FROM {table_name} "
-                "WHERE server_id = ? ORDER BY create_time DESC LIMIT 1",
-                (sid,),
-            ).fetchone()
-        except Exception:
-            row = None
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        if not row:
-            continue
-        try:
-            if int(row[0] or 0) != 3:
-                continue
-        except Exception:
-            continue
-        info = _extract_image_cdn_info_from_xml(_decode_message_content(row[2], row[1]))
-        if info:
-            return info
-
-    # 2) 实时 WCDB
-    try:
-        rt_conn = WCDB_REALTIME.ensure_connected(account_dir, timeout=3.0)
-    except Exception:
-        rt_conn = None
-    if rt_conn is not None:
-        table_literal = _sql_quote(table_name)
-        table_sql = (
-            "SELECT name FROM sqlite_master "
-            f"WHERE type = 'table' AND lower(name) = lower({table_literal}) LIMIT 1"
-        )
-        sid_lit = str(int(sid))
-        for db_path in _iter_realtime_message_db_paths_for_lookup(account_dir, username):
-            try:
-                with rt_conn.lock:
-                    table_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=table_sql) or []
-            except Exception:
-                continue
-            actual_table = ""
-            for item in table_rows:
-                if isinstance(item, dict):
-                    actual_table = str(_pick_row_value(item, "name") or "").strip()
-                    if actual_table:
-                        break
-            if not actual_table:
-                continue
-            quoted_table = _quote_sql_identifier(actual_table)
-            sql = (
-                "SELECT local_type, message_content, compress_content "
-                f"FROM {quoted_table} WHERE server_id = {sid_lit} "
-                "ORDER BY create_time DESC, local_id DESC LIMIT 1"
-            )
-            try:
-                with rt_conn.lock:
-                    rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=sql) or []
-            except Exception:
-                continue
-            if not rows or not isinstance(rows[0], dict):
-                continue
-            row = rows[0]
-            try:
-                if int(_pick_row_value(row, "local_type") or 0) != 3:
-                    continue
-            except Exception:
-                continue
-            info = _extract_image_cdn_info_from_xml(
-                _decode_message_content(
-                    _pick_row_value(row, "compress_content"),
-                    _pick_row_value(row, "message_content"),
-                )
-            )
-            if info:
-                return info
-    return {}
 
 
 def _is_safe_http_url(url: str) -> bool:
@@ -2587,7 +2448,6 @@ async def get_chat_image(
     record_attach: Optional[str] = None,
     deep_scan: bool = False,
     prefer_live: bool = False,
-    fetch_remote: bool = False,
 ):
     if (not md5) and (not file_id) and (not server_id):
         raise HTTPException(status_code=400, detail="Missing md5/file_id/server_id.")
@@ -2612,14 +2472,13 @@ async def get_chat_image(
         recordAttach=str(record_attach or ""),
         deepScan=bool(deep_scan),
         preferLive=bool(prefer_live),
-        fetchRemote=bool(fetch_remote),
     )
     trace("request:start")
 
     # Prefer the original image message's packed md5 when resolving a quote by server_id.
     # For realtime/live messages the decrypted output DB can lag behind db_storage, so also
     # query the live message shard before falling back to message_resource.db.
-    if server_id and not (fetch_remote and (md5 or file_id)):
+    if server_id:
         md5_from_msg = ""
         md5_from_realtime = ""
         if username:
@@ -2692,7 +2551,7 @@ async def get_chat_image(
         cachedMediaType=cached_media_type,
     )
 
-    if cached_path and (not prefer_live) and (not fetch_remote):
+    if cached_path and not prefer_live:
         trace(
             "response:ready",
             result="decrypted-cache-hit",
@@ -2731,83 +2590,6 @@ async def get_chat_image(
             detail="wxid_dir/db_storage_path not found. Please decrypt with db_storage_path to enable media lookup.",
         )
 
-    async def fetch_cdn_original() -> tuple[bytes, str] | None:
-        if not server_id:
-            return None
-        if not fetch_remote and not cdn_image_service.is_cdn_download_enabled():
-            return None
-        try:
-            cdn_info = await asyncio.to_thread(
-                _lookup_image_cdn_download_info,
-                str(account_dir),
-                int(server_id),
-                str(username or ""),
-            )
-        except Exception:
-            cdn_info = {}
-        cdn_fileid = str((cdn_info or {}).get("fileid") or "").strip()
-        cdn_aeskey = str((cdn_info or {}).get("aeskey") or "").strip()
-        if not cdn_fileid:
-            return None
-        try:
-            cdn_started_at = time.perf_counter()
-            cdn_data = await cdn_image_service.download_original_image(
-                account_dir.name,
-                cdn_fileid,
-                aes_key_hex=cdn_aeskey,
-                image_type="orig",
-            )
-            trace(
-                "cdn:download",
-                bytes=len(cdn_data or b""),
-                explicit=bool(fetch_remote),
-                elapsedMsLocal=round((time.perf_counter() - cdn_started_at) * 1000.0, 1),
-            )
-        except cdn_image_service.CdnQuotaExceededError as quota_err:
-            trace("cdn:quota-exceeded", detail=str(quota_err))
-            quota_headers: dict[str, str] | None = None
-            try:
-                resets_at = (quota_err.quota or {}).get("resetsAt")
-                if resets_at is not None:
-                    quota_headers = {"Retry-After": str(max(0, int(int(resets_at) - time.time())))}
-            except (TypeError, ValueError):
-                quota_headers = None
-            raise HTTPException(
-                status_code=429,
-                detail={"code": "quota_exceeded", "message": str(quota_err), "quota": quota_err.quota},
-                headers=quota_headers,
-            )
-        except cdn_image_service.CdnRateLimitedError as rate_err:
-            trace("cdn:rate-limited", detail=str(rate_err))
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "code": "rate_limited",
-                    "message": str(rate_err),
-                    "retryAfterSeconds": rate_err.retry_after,
-                },
-                headers=rate_err.headers() or None,
-            )
-        except cdn_image_service.CdnAccountFrozenError as frozen_err:
-            trace("cdn:account-frozen", detail=str(frozen_err))
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "account_frozen", "message": str(frozen_err)},
-            )
-        except Exception as cdn_err:  # noqa: BLE001
-            trace("cdn:error", error=str(cdn_err)[:200], explicit=bool(fetch_remote))
-            return None
-        if not cdn_data:
-            return None
-        payload, cdn_media_type, _cdn_ext = _detect_media_type_and_ext(cdn_data)
-        if not cdn_media_type.startswith("image/"):
-            cdn_media_type = "image/jpeg"
-        if md5 and _is_valid_md5(str(md5)):
-            try:
-                await asyncio.to_thread(_write_cached_chat_image, account_dir, str(md5), payload)
-            except Exception:
-                pass
-        return payload, cdn_media_type
 
     p: Optional[Path] = None
     candidates: list[Path] = []
@@ -2954,18 +2736,9 @@ async def get_chat_image(
         )
 
     if not p:
-        if cached_path and not fetch_remote:
+        if cached_path:
             trace("response:ready", result="decrypted-cache-fallback", mediaType=cached_media_type, bytes=len(cached_data or b""))
             return _build_cached_media_response(request, cached_data, cached_media_type)
-
-        # 本地找不到原图 → 自动下载已开启或用户明确点击加载时，用消息 XML 里的
-        # cdnbigimgurl(fileid) + aeskey 从 CDN 拉原图（每账号每天限 10 次）。显式点击
-        # “尝试加载大图”时即使关闭了自动下载开关，也允许本次用户发起的请求回源。
-        cdn_result = await fetch_cdn_original()
-        if cdn_result is not None:
-            payload, cdn_media_type = cdn_result
-            trace("response:ready", result="cdn-download", mediaType=cdn_media_type, bytes=len(payload))
-            return _build_cached_media_response(request, payload, cdn_media_type)
 
         trace(
             "response:error",
@@ -3022,13 +2795,6 @@ async def get_chat_image(
     best_data = b""
     best_media_type = "application/octet-stream"
     best_chosen: Optional[Path] = None
-    local_large_found = False
-    cached_candidate_key = ""
-    if cached_path is not None:
-        try:
-            cached_candidate_key = str(cached_path.resolve())
-        except Exception:
-            cached_candidate_key = str(cached_path)
     trace("decode:start", candidateCount=len(candidates))
     slow_decode_logged = 0
     for src_path in candidates:
@@ -3069,13 +2835,7 @@ async def get_chat_image(
             continue
 
         if media_type != "application/octet-stream":
-            try:
-                source_key = str(src_path.resolve())
-            except Exception:
-                source_key = str(src_path)
-            if source_key != cached_candidate_key and _is_probable_large_image_source(src_path):
-                local_large_found = True
-            if prefer_live or fetch_remote:
+            if prefer_live:
                 score = _image_payload_score(data, media_type)
                 if best_score is None or score > best_score:
                     best_score = score
@@ -3086,19 +2846,10 @@ async def get_chat_image(
             chosen = src_path
             break
 
-    if (prefer_live or fetch_remote) and best_chosen is not None:
+    if prefer_live and best_chosen is not None:
         chosen = best_chosen
         data = best_data
         media_type = best_media_type
-
-    if fetch_remote and not local_large_found:
-        cdn_result = await fetch_cdn_original()
-        if cdn_result is not None:
-            payload, cdn_media_type = cdn_result
-            trace("response:ready", result="cdn-download", mediaType=cdn_media_type, bytes=len(payload))
-            return _build_cached_media_response(request, payload, cdn_media_type)
-        trace("response:error", result="large-image-not-found")
-        raise HTTPException(status_code=404, detail="Large image not found locally or via CDN.")
 
     if not chosen:
         trace("response:error", result="decode-failed", decodeAttempts=decode_attempts)
@@ -4494,15 +4245,8 @@ async def open_chat_media_folder(
                 subprocess.Popen(["explorer.exe", "/select,", str(tp)])
             else:
                 subprocess.Popen(["explorer.exe", str(tp.parent)])
-        elif sys.platform == "darwin":
-            if tp.exists() and tp.is_dir():
-                subprocess.Popen(["open", str(tp)])
-            elif tp.exists():
-                subprocess.Popen(["open", "-R", str(tp)])
-            else:
-                subprocess.Popen(["open", str(tp.parent)])
         else:
-            raise HTTPException(status_code=400, detail="在文件管理器中显示媒体仅支持 Windows 和 macOS。")
+            raise HTTPException(status_code=400, detail="在文件管理器中显示媒体仅支持 Windows。")
     except HTTPException:
         raise
     except Exception as e:

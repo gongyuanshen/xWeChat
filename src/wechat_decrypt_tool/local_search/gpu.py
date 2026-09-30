@@ -17,7 +17,7 @@ from .catalog import file_hash
 MANIFEST_PATH = Path(__file__).parents[1] / 'resources/local_search_gpu.json'
 
 def gpu_devices():
-    # 当前加速组件仅面向 Windows；macOS 使用独立的 CPU 推理路径。
+    # 当前加速组件仅面向 Windows。
     if sys.platform != 'win32': return []
     try:
         r = subprocess.run(['nvidia-smi','--query-gpu=index,name,uuid,driver_version,memory.total','--format=csv,noheader,nounits'],
@@ -49,7 +49,7 @@ class GPUComponent:
 
     def status(self):
         return {'installed':self.installed(),'supported':self.supported,'platform':sys.platform,
-                'reason': 'macOS 使用 CPU 本地推理，无需 NVIDIA 加速组件' if sys.platform=='darwin' else '' if self.supported else '当前系统不支持此 NVIDIA 组件，仍可使用 CPU',
+                'reason': '' if self.supported else '当前系统不支持此 NVIDIA 组件，仍可使用 CPU',
                 'version':self.manifest['id'],
                 'size':sum(f['size'] for f in self.files),'job':self.store.get('gpu_component','global')}
 

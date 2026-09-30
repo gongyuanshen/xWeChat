@@ -79,36 +79,7 @@ const DEVELOPMENT_MANIFEST = Object.freeze({
   nativeAsrTarget: { wechatVersion: "", weixinSha256: "" },
 });
 
-const MACOS_DEVELOPMENT_MANIFEST = Object.freeze({
-  schemaVersion: 3,
-  platform: "macos",
-  distributionMode: "public",
-  buildId: "dev-local",
-  buildIssuedAtUnix: 0,
-  buildExpiresAtUnix: 0,
-  developmentBuild: true,
-  offlineBootstrapFeatureBits: 0,
-  offlineExportSealFormat: "none",
-  codeSignatureEnforced: false,
-  rootPublicKeyCompiled: false,
-  testHooksEnabled: true,
-  stagingPinnedSignerTrust: false,
-  macosSigningMode: "self-signed",
-  macosSignerTrustMode: "development",
-  macosPrivatePkiLeafRevocation: "not-applicable",
-  macosClientSigningIdentifier: "com.lifearchive.wechatdb.client",
-  macosBrokerSigningIdentifier: "com.lifearchive.wechatdb.broker",
-  macosHostSigningIdentifier: "com.lifearchive.wechatdataanalysis.backend",
-  macosClientSignerSha256: "0".repeat(64),
-  macosBrokerSignerSha256: "0".repeat(64),
-  macosHostSignerSha256: "0".repeat(64),
-  macosPrivateRootSha256: "0".repeat(64),
-  securityNoticeId: "WCE-AUTOMATED-ANALYSIS-NOTICE-V2",
-  securityNoticeSha256: "aa".repeat(32),
-  securityCheckpointSetId: "WCE-AI-CHECKPOINT-SET-V3",
-  securityCheckpointCount: 7,
-  securityCheckpointSetSha256: "bb".repeat(32),
-});
+
 
 function makeTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "wda-native-package-"));
@@ -144,11 +115,7 @@ test("artifact names are platform-specific and complete", () => {
     "wechatdb_broker.exe",
     "wechatdb_native_build.json",
   ]);
-  assert.deepEqual(nativeCoreArtifactNames("darwin"), [
-    "libwechatdb_client.dylib",
-    "wechatdb_broker",
-    "wechatdb_native_build.json",
-  ]);
+  assert.deepEqual(nativeCoreArtifactNames("darwin"), []);
   assert.deepEqual(nativeCoreArtifactNames("linux"), []);
 });
 
@@ -202,10 +169,6 @@ test("supported-platform packaging always requires an explicit artifact director
   );
   assert.throws(
     () => resolveNativeCoreArtifacts({ env: { WCE_NATIVE_CORE_REQUIRED: "1" }, platform: "win32" }),
-    /Missing WCE_NATIVE_CORE_ARTIFACT_DIR/
-  );
-  assert.throws(
-    () => resolveNativeCoreArtifacts({ env: { WECHAT_TOOL_NATIVE_CORE_MODE: "required" }, platform: "darwin" }),
     /Missing WCE_NATIVE_CORE_ARTIFACT_DIR/
   );
 });
@@ -322,31 +285,7 @@ test("Windows staging rejects an otherwise valid client without fused ASR export
   }
 });
 
-test("local macOS development staging copies the complete trio", () => {
-  const root = makeTempDir();
-  const artifactDir = path.join(root, "artifacts");
-  const destination = path.join(root, "stage");
-  writeArtifactSet(artifactDir, "darwin", MACOS_DEVELOPMENT_MANIFEST);
 
-  try {
-    const result = stageNativeCoreArtifacts({
-      destinationDir: destination,
-      env: {
-        WCE_NATIVE_CORE_ARTIFACT_DIR: artifactDir,
-        WCE_NATIVE_CORE_ALLOW_DEVELOPMENT_ARTIFACTS: "1",
-      },
-      logger: quietLogger(),
-      platform: "darwin",
-    });
-
-    assert.equal(result.staged, true);
-    for (const name of nativeCoreArtifactNames("darwin")) {
-      assert.ok(fs.statSync(path.join(destination, name)).isFile(), name);
-    }
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
 
 test("production manifest validation reports every release security field", () => {
   const errors = nativeCoreProductionManifestErrors(DEVELOPMENT_MANIFEST);
@@ -599,7 +538,7 @@ test("malformed and structurally invalid manifests fail even with a development 
     );
     assert.throws(
       () => resolveNativeCoreArtifacts({ env, platform: "win32" }),
-      /schemaVersion must equal 2 or 3; buildId must be a non-empty string/
+      /schemaVersion must equal 2; buildId must be a non-empty string/
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

@@ -1882,12 +1882,10 @@ export const useChatMessages = ({
     query.set('username', username)
     if (md5) query.set('md5', md5)
     if (fileId) query.set('file_id', fileId)
-    // Keep the direct local key for the first lookup and pass server_id only as
-    // the message context needed by the explicit CDN-original fallback.
+    // Resolve local media by its direct key or by the message server ID.
     if (serverId) query.set('server_id', serverId)
     query.set('prefer_live', 'true')
     query.set('deep_scan', 'true')
-    query.set('fetch_remote', 'true')
     query.set('v', String(Number(version || Date.now())))
     return `${apiBase}/chat/media/image?${query.toString()}`
   }

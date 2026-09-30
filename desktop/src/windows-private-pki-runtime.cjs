@@ -160,30 +160,8 @@ function ensurePrivatePkiIssuerCached(
   return evidence;
 }
 
-function configurePrivatePkiUpdateVerification(
-  updater,
-  {
-    isPackaged = false,
-    platform = process.platform,
-    resourcesPath = process.resourcesPath,
-    verifier = verifyPrivatePkiExecutable,
-  } = {}
-) {
-  if (!updater || platform !== "win32" || !isPackaged) return false;
-  updater.verifyUpdateCodeSignature = async (_publisherNames, installerPath) => {
-    try {
-      verifier(installerPath, { resourcesPath });
-      return null;
-    } catch (error) {
-      return `Private-PKI update signature rejected: ${error?.message || "verification failed"}`;
-    }
-  };
-  return true;
-}
-
 module.exports = {
   POLICY_SHA256,
-  configurePrivatePkiUpdateVerification,
   ensurePrivatePkiIssuerCached,
   resolvePrivatePkiRuntime,
   sha256File,

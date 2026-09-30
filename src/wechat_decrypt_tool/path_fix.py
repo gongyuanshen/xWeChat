@@ -16,7 +16,7 @@ class PathFixRequest(Request):
     """自定义Request类，自动修复JSON中的路径问题并检测相对路径"""
 
     def _is_absolute_path(self, path: str) -> bool:
-        """检测是否为绝对路径，支持Windows、macOS、Linux"""
+        """检测是否为绝对路径"""
         if not path:
             return False
 

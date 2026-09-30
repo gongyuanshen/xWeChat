@@ -26,10 +26,7 @@ def _runtime_token(value: object) -> str:
 def _runtime_summary() -> dict[str, object]:
     from . import __version__
 
-    if sys.platform == "darwin":
-        system = "macos"
-        os_version = platform.mac_ver()[0]
-    elif sys.platform == "win32":
+    if sys.platform == "win32":
         system = "windows"
         windows_release, windows_version, _csd, _ptype = platform.win32_ver()
         os_version = windows_version or windows_release

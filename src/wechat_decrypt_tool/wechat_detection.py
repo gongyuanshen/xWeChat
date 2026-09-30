@@ -6,7 +6,6 @@
 
 import logging
 import os
-import plistlib
 import re
 import struct
 import psutil
@@ -116,7 +115,7 @@ PROCESS_VM_READ = 0x0010
 MAX_PATH = 260
 TH32CS_SNAPPROCESS = 0x00000002
 
-# Windows API 函数仅在 Windows 初始化，避免 macOS 导入模块时失败。
+# Windows API 函数在 Windows 初始化。
 if os.name == "nt":
     kernel32 = ctypes.windll.kernel32
     psapi = ctypes.windll.psapi
@@ -356,7 +355,7 @@ def get_process_list():
 
 
 def _wechat_process_targets() -> set[str]:
-    return {"wechat"} if sys.platform == "darwin" else {"weixin.exe", "wechat.exe"}
+    return {"weixin.exe", "wechat.exe"}
 
 
 def _is_wechat_dir_candidate_name(name: str) -> bool:
@@ -364,10 +363,6 @@ def _is_wechat_dir_candidate_name(name: str) -> bool:
     if not normalized:
         return False
     return any(pattern.lower() in normalized for pattern in COMMON_WECHAT_PATTERNS)
-
-
-def _is_macos_version_data_dir_name(name: str) -> bool:
-    return bool(re.fullmatch(r"\d+(?:\.\d+)+(?:b\d+(?:\.\d+)*)?", str(name or "").strip()))
 
 
 def _safe_iter_subdirs(directory: str) -> List[tuple[str, str]]:
@@ -425,25 +420,6 @@ def _build_auto_detect_scan_paths() -> List[str]:
     add(os.path.join(home_dir, "Documents"))
     add(os.path.join(home_dir, "Desktop"))
     add(os.path.join(home_dir, "Downloads"))
-
-    if sys.platform == "darwin":
-        container_root = Path.home() / "Library" / "Containers" / "com.tencent.xinWeChat" / "Data"
-        app_support = container_root / "Library" / "Application Support" / "com.tencent.xinWeChat"
-        add(str(app_support))
-        try:
-            version_dirs = sorted(
-                (item for item in app_support.iterdir() if item.is_dir()),
-                key=lambda item: item.stat().st_mtime_ns,
-                reverse=True,
-            )
-        except OSError:
-            version_dirs = []
-        for item in version_dirs:
-            if re.match(r"^\d+(?:\.\d+)+(?:b\d+(?:\.\d+)*)?$", item.name):
-                add(str(item))
-        add(str(container_root / "Documents" / "xwechat_files"))
-        return scan_paths
-
     user_profile = str(os.environ.get("USERPROFILE") or "").strip()
     if user_profile:
         add(user_profile)
@@ -589,9 +565,7 @@ def auto_detect_wechat_data_dirs():
             continue
 
         scan_name = os.path.basename(os.path.normpath(scan_path))
-        scan_is_candidate = _is_wechat_dir_candidate_name(scan_name) or (
-            sys.platform == "darwin" and _is_macos_version_data_dir_name(scan_name)
-        )
+        scan_is_candidate = _is_wechat_dir_candidate_name(scan_name)
         matched_scan_root = scan_is_candidate and _contains_wechat_accounts_within(
             Path(scan_path),
             depth=2,
@@ -604,20 +578,13 @@ def auto_detect_wechat_data_dirs():
             continue
 
         for item_name, item_path in _safe_iter_subdirs(scan_path):
-            item_is_candidate = _is_wechat_dir_candidate_name(item_name) or (
-                sys.platform == "darwin" and _is_macos_version_data_dir_name(item_name)
-            )
+            item_is_candidate = _is_wechat_dir_candidate_name(item_name)
             if not item_is_candidate:
                 continue
             if not _contains_wechat_accounts_within(Path(item_path), depth=2):
                 continue
             _append_detected_dir(detected_dirs, item_path)
             logger.debug("目录扫描检测成功: %s", item_path)
-
-        # macOS default candidates can already point at the data root even when
-        # its version name is unfamiliar to this release.
-        if sys.platform == "darwin" and _contains_wechat_account_dirs(Path(scan_path)):
-            _append_detected_dir(detected_dirs, scan_path)
 
     # 策略2：进程内存分析（简化版）
     try:
@@ -1053,7 +1020,7 @@ def detect_wechat_installation(data_root_path: str | None = None) -> Dict[str, A
     """
     result = {
         "wechat_version": None,
-        "platform": "macos" if sys.platform == "darwin" else "windows" if os.name == "nt" else sys.platform,
+        "platform": "windows" if os.name == "nt" else sys.platform,
         "wechat_install_path": None,
         "wechat_exe_path": None,
         "is_running": False,
@@ -1080,26 +1047,15 @@ def detect_wechat_installation(data_root_path: str | None = None) -> Dict[str, A
                 exe_path = get_process_exe_path(pid)
                 if exe_path:
                     result["wechat_exe_path"] = exe_path
-                    if sys.platform == "darwin" and ".app/Contents/MacOS/" in exe_path:
-                        result["wechat_install_path"] = exe_path.split("/Contents/MacOS/", 1)[0]
-                    else:
-                        result["wechat_install_path"] = os.path.dirname(exe_path)
+                    result["wechat_install_path"] = os.path.dirname(exe_path)
                     result["is_running"] = True
                     result["detection_methods"].append(f"检测到微信进程: {process_name} (PID: {pid})")
 
                     # 尝试获取版本信息
                     try:
-                        if sys.platform == "darwin":
-                            info_plist = Path(result["wechat_install_path"]) / "Contents" / "Info.plist"
-                            with info_plist.open("rb") as stream:
-                                info = plistlib.load(stream)
-                            version = str(
-                                info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or ""
-                            ).strip()
-                        else:
-                            import win32api
-                            version_info = win32api.GetFileVersionInfo(exe_path, "\\")
-                            version = f"{version_info['FileVersionMS'] >> 16}.{version_info['FileVersionMS'] & 0xFFFF}.{version_info['FileVersionLS'] >> 16}.{version_info['FileVersionLS'] & 0xFFFF}"
+                        import win32api
+                        version_info = win32api.GetFileVersionInfo(exe_path, "\\")
+                        version = f"{version_info['FileVersionMS'] >> 16}.{version_info['FileVersionMS'] & 0xFFFF}.{version_info['FileVersionLS'] >> 16}.{version_info['FileVersionLS'] & 0xFFFF}"
                         result["wechat_version"] = version
                         result["detection_methods"].append(f"获取到微信版本: {version}")
                     except ImportError:
@@ -1112,22 +1068,6 @@ def detect_wechat_installation(data_root_path: str | None = None) -> Dict[str, A
 
     if not result["is_running"]:
         result["detection_methods"].append("未检测到微信进程")
-        if sys.platform == "darwin":
-            for app_path in (Path("/Applications/WeChat.app"), Path.home() / "Applications" / "WeChat.app"):
-                executable = app_path / "Contents" / "MacOS" / "WeChat"
-                if not executable.is_file():
-                    continue
-                result["wechat_install_path"] = str(app_path)
-                result["wechat_exe_path"] = str(executable)
-                try:
-                    with (app_path / "Contents" / "Info.plist").open("rb") as stream:
-                        info = plistlib.load(stream)
-                    result["wechat_version"] = str(
-                        info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or ""
-                    ).strip() or None
-                except (OSError, ValueError):
-                    pass
-                break
 
     # 2. 使用新的账号检测逻辑：同时支持 Backup 与登录信息目录，并合并结果
     result["detection_methods"].append("多账户检测（多来源合并）")

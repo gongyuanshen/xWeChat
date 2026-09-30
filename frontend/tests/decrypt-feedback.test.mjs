@@ -6,7 +6,7 @@ import vm from 'node:vm'
 const source = readFileSync(new URL('../pages/decrypt.vue', import.meta.url), 'utf8')
 function feedback(result) {
   const start = source.indexOf('const showDbKeyPersistenceWarning =')
-  const end = source.indexOf('\nconst runMacosLldbFallback', start)
+  const end = source.indexOf('\nconst handleGetDbKey', start)
   const context = { result, warning: { value: '' }, DB_KEY_PERSISTENCE_WARNING: 'KEY_SAVE_WARNING', logDecryptDebug: () => {} }
   vm.runInNewContext(`${source.slice(start, end)}\nshowDbKeyPersistenceWarning(result)`, context)
   return context.warning.value

@@ -31,24 +31,15 @@ def load_wce_integrity_native() -> Any:
     candidates = ([Path(explicit_native_path)] if explicit_native_path else []) + [
         repo_root / "native" / "wce_integrity" / "target" / "release" / "wce_integrity.dll",
         repo_root / "native" / "wce_integrity" / "target-next" / "release" / "wce_integrity.dll",
-        repo_root / "native" / "wce_integrity" / "target" / "release" / "libwce_integrity.dylib",
-        repo_root / "native" / "wce_integrity" / "target" / "release" / "libwce_integrity.so",
         Path(__file__).resolve().parent / "native" / "wce_integrity.pyd",
-        Path(__file__).resolve().parent / "native" / "libwce_integrity.dylib",
-        Path(__file__).resolve().parent / "native" / "libwce_integrity.so",
+        Path(__file__).resolve().parent / "native" / "wce_integrity.dll",
     ]
-    architecture = (platform.machine() or "").lower()
-    if architecture in {"arm64", "aarch64"}:
-        candidates.append(
-            Path(__file__).resolve().parent / "native" / "macos" / "arm64" / "libwce_integrity.dylib"
-        )
     if getattr(sys, "frozen", False):
         executable_native = Path(sys.executable).resolve().parent / "native"
         candidates.extend(
             (
                 executable_native / "wce_integrity.pyd",
-                executable_native / "libwce_integrity.dylib",
-                executable_native / "libwce_integrity.so",
+                executable_native / "wce_integrity.dll",
             )
         )
     bundle_root = getattr(sys, "_MEIPASS", None)
@@ -57,8 +48,7 @@ def load_wce_integrity_native() -> Any:
         candidates.extend(
             (
                 bundled_native / "wce_integrity.pyd",
-                bundled_native / "libwce_integrity.dylib",
-                bundled_native / "libwce_integrity.so",
+                bundled_native / "wce_integrity.dll",
             )
         )
     candidates = [path for path in candidates if path.is_file()]

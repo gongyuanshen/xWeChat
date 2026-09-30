@@ -1006,40 +1006,6 @@ export const useApi = () => {
     return await request(url, params?.signal ? { signal: params.signal } : {})
   }
 
-  const getMacosKeyCaptureStatus = async (params = {}) => {
-    return await request('/macos-key-capture/status', { retry: 0, timeout: 3000, ...(params?.signal ? { signal: params.signal } : {}) })
-  }
-
-  const macosKeyCaptureRequest = async (action, params = {}) => {
-    const options = {
-      method: 'POST',
-      retry: 0,
-      body: {
-        wechat_install_path: params.wechat_install_path || null,
-        db_storage_path: params.db_storage_path || null,
-        timeout: params.timeout || 240
-      }
-    }
-    if (params.signal) options.signal = params.signal
-    return await request(`/macos-key-capture/${action}`, options)
-  }
-
-  const prepareMacosKeyCapture = async (params = {}) => {
-    return await macosKeyCaptureRequest('prepare', params)
-  }
-
-  const preflightMacosKeyCapture = async (params = {}) => {
-    return await macosKeyCaptureRequest('preflight', params)
-  }
-
-  const captureMacosKey = async (params = {}) => {
-    return await macosKeyCaptureRequest('capture', params)
-  }
-
-  const cancelMacosKeyCapture = async (params = {}) => {
-    return await macosKeyCaptureRequest('cancel', params)
-  }
-
   // 获取图片密钥
   const getImageKey = async (params = {}) => {
     const query = new URLSearchParams()
@@ -1195,43 +1161,10 @@ export const useApi = () => {
     })
   }
 
-  const getCdnImageStatus = async (account = '') => {
-    const q = String(account || '').trim()
-    return await request('/system/cdn_image/status' + (q ? `?account=${encodeURIComponent(q)}` : ''))
-  }
-
-  // WxCDN 套餐 / 额度 / 兑换（后端 routers/cdn.py）
-  const getCdnPlan = async (account = '', { refresh = false } = {}) => {
-    const params = new URLSearchParams()
-    if (String(account || '').trim()) params.set('account', String(account).trim())
-    if (refresh) params.set('refresh', 'true')
-    const q = params.toString()
-    return await request('/cdn/plan' + (q ? `?${q}` : ''))
-  }
-  const connectCdn = async (account = '') => {
-    return await request('/cdn/connect', { method: 'POST', body: { account: String(account || '').trim() } })
-  }
-  const redeemCdnCode = async (account, code) => {
-    return await request('/cdn/redeem', { method: 'POST', body: { account: String(account || '').trim(), code: String(code || '') } })
-  }
-
-  const toggleCdnImage = async (enabled) => {
-    return await request('/system/cdn_image/toggle', {
-      method: 'POST',
-      body: { enabled: !!enabled }
-    })
-  }
-
-
   return {
     pickSystemDirectory,
     getImgHelperStatus,
     toggleImgHelper,
-    getCdnImageStatus,
-    toggleCdnImage,
-    getCdnPlan,
-    connectCdn,
-    redeemCdnCode,
     detectWechat,
     detectCurrentAccount,
     decryptDatabase,
@@ -1309,11 +1242,6 @@ export const useApi = () => {
     getWrappedAnnualMeta,
     getWrappedAnnualCard,
     getKeys,
-    getMacosKeyCaptureStatus,
-    prepareMacosKeyCapture,
-    preflightMacosKeyCapture,
-    captureMacosKey,
-    cancelMacosKeyCapture,
     getImageKey,
     getImageKeyMemory,
     getWxStatus,

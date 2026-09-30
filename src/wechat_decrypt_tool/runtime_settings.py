@@ -355,9 +355,7 @@ def get_env_file_path() -> Path | None:
         except Exception:
             return None
 
-    # Frozen builds never load `.env`, and their cwd sits inside the install
-    # payload (on macOS the signed .app bundle, where any new file breaks
-    # codesign verification and the app refuses to start).
+    # Frozen builds never load `.env`, and their cwd sits inside the install payload.
     if getattr(sys, "frozen", False):
         return None
 

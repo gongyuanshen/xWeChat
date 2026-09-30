@@ -5,7 +5,10 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../src/main.cjs'), 'utf8');
-const cacheCode = source.slice(source.indexOf('async function refreshRendererCacheForPackagedUi()'), source.indexOf('function parseEnvBool('));
+const cacheStart = source.indexOf('async function refreshRendererCacheForPackagedUi()');
+const cacheEnd = source.indexOf('function sendToRenderer(', cacheStart);
+assert.ok(cacheStart >= 0 && cacheEnd > cacheStart);
+const cacheCode = source.slice(cacheStart, cacheEnd);
 function setup({ staticUi = '1', fail = false, previous = 'old' } = {}) {
   const calls = [], settings = { lastSeenUiBuildId: previous };
   const context = { app: { isPackaged: false }, process: { env: { WECHAT_TOOL_STATIC_UI: staticUi } },

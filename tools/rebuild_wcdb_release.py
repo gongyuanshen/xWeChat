@@ -25,27 +25,6 @@ COMPONENTS = {
         "WCE_NATIVE_CORE",
         "wechatdb_native_build.json",
     ),
-    "macos-native": (
-        "macos-native-production.yml",
-        "wechatdb-native-macos-arm64-production",
-        "wechatdb-native-macos-arm64-production",
-        "WCE_NATIVE_CORE",
-        "wechatdb_native_build.json",
-    ),
-    "macos-xkey": (
-        "macos-key-capture-production.yml",
-        "wda-xkey-macos-universal-production",
-        "wda-xkey",
-        "WCE_MACOS_XKEY",
-        "wda_xkey_build.json",
-    ),
-    "macos-integrity": (
-        "macos-integrity-production.yml",
-        "wce-integrity-macos-arm64-production",
-        "wce-integrity-macos-arm64-production",
-        "WCE_INTEGRITY",
-        "wce_integrity_build.json",
-    ),
 }
 
 
@@ -71,8 +50,6 @@ def dispatch(component: str, revision: str, issued_at: int) -> dict:
         "build_id": build_id,
         "build_issued_at_unix": str(issued_at),
     }
-    if component == "macos-integrity":
-        inputs["wcda_revision"] = os.environ["GITHUB_SHA"]
     api(f"actions/workflows/{workflow}/dispatches", {"ref": "main", "inputs": inputs})
     print(f"Building {component}: {build_id} ({revision})", flush=True)
     return {"component": component, "workflow": workflow, "build_id": build_id}
@@ -153,29 +130,15 @@ def download(build: dict, run_id: int, revision: str, issued_at: int, output_roo
         archive.seek(0)
         with zipfile.ZipFile(archive) as package:
             package.extractall(destination)
-    if component in ("macos-native", "macos-xkey"):
-        executable = "wechatdb_broker" if component == "macos-native" else "wda_xkey_helper"
-        (destination / executable).chmod(0o755)
     manifest = json.loads((destination / manifest_name).read_text(encoding="utf-8"))
-    if component.endswith("native"):
-        identity = manifest["buildId"]
-        issued = manifest["buildIssuedAtUnix"]
-        expires = manifest["buildExpiresAtUnix"]
-        development = manifest["developmentBuild"]
-        if component == "windows-native" and (manifest.get("readOnlyBuild") is not True
-                or manifest.get("databaseWriteBuild") is not False
-                or manifest.get("wechatActions") != []):
-            raise RuntimeError("Release native core must be read-only")
-    elif component == "macos-xkey":
-        identity = manifest["build"]["id"]
-        issued = manifest["build"]["issuedAtUnix"]
-        expires = manifest["build"]["expiresAtUnix"]
-        development = manifest["build"]["development"]
-    else:
-        identity = manifest["buildId"]
-        issued = manifest["buildIssuedAtUnix"]
-        expires = manifest["buildExpiresAtUnix"]
-        development = manifest["development"]
+    identity = manifest["buildId"]
+    issued = manifest["buildIssuedAtUnix"]
+    expires = manifest["buildExpiresAtUnix"]
+    development = manifest["developmentBuild"]
+    if component == "windows-native" and (manifest.get("readOnlyBuild") is not True
+            or manifest.get("databaseWriteBuild") is not False
+            or manifest.get("wechatActions") != []):
+        raise RuntimeError("Release native core must be read-only")
     if (identity != build["build_id"] or development
             or issued != issued_at or expires != issued_at + LIFETIME_SECONDS):
         raise RuntimeError(f"{component} was not freshly built with this release's 45-day window")
@@ -188,9 +151,6 @@ def download(build: dict, run_id: int, revision: str, issued_at: int, output_roo
         f"{prefix}_BUILD_ID": identity,
         f"{prefix}_ARTIFACT_DIR": str(destination),
     }
-    if component == "macos-integrity":
-        with (destination / "libwce_integrity.dylib").open("rb") as binary:
-            values["WCE_INTEGRITY_BINARY_SHA256"] = hashlib.file_digest(binary, "sha256").hexdigest()
     return values
 
 

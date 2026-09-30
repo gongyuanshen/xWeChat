@@ -41,7 +41,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-2022, macos-14]
+        os: [windows-2022]
     runs-on: ${{ matrix.os }}
     # Windows 的真实 SQLite 持久化测试耗时波动较大，为后续构建预留时间。
     timeout-minutes: 60

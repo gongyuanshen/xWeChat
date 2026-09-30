@@ -1,4 +1,4 @@
-"""在 macOS / Windows 检查 AI 依赖、媒体、检查点及可选的真实 CPU 推理。"""
+"""在 Windows 检查 AI 依赖、媒体、检查点及可选的真实 CPU 推理。"""
 import argparse
 import json
 import multiprocessing

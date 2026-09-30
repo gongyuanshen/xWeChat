@@ -87,26 +87,26 @@
       <details class="lss-advanced" @toggle="advancedOpen=$event.target.open">
         <summary>
           <span class="lss-advanced-icon"><SlidersHorizontal :size="16" :stroke-width="1.8" aria-hidden="true" /></span>
-          <span class="lss-advanced-copy"><strong>高级设置</strong><span>{{ isMac ? '运行设备 · 读取批量 · 自动更新' : '运行设备与 GPU 加速 · 读取批量 · 自动更新' }}</span></span>
+          <span class="lss-advanced-copy"><strong>高级设置</strong><span>运行设备与 GPU 加速 · 读取批量 · 自动更新</span></span>
           <span class="lss-advanced-action">{{ advancedOpen ? '收起设置' : '展开设置' }}<ChevronDown :size="16" :stroke-width="1.8" aria-hidden="true" /></span>
         </summary>
         <div class="lss-advanced-body">
-          <p class="lss-note">{{ isMac ? 'macOS 使用 CPU 在本机运行检索模型，无需下载加速组件。' : 'CPU 即可使用，NVIDIA 加速为可选项，无需先下载加速组件。' }}</p>
+          <p class="lss-note">CPU 即可使用，NVIDIA 加速为可选项，无需先下载加速组件。</p>
               <article class="lss-device-panel">
-      <div class="lss-row"><div><h5>运行设备</h5><p>{{ isMac ? '自动模式使用 CPU，支持 Apple Silicon 与 Intel Mac。' : '优先使用可用的 NVIDIA GPU，出现故障时自动使用 CPU 继续。' }}</p></div>
+      <div class="lss-row"><div><h5>运行设备</h5><p>优先使用可用的 NVIDIA GPU，出现故障时自动使用 CPU 继续。</p></div>
         <div class="lss-segments" role="group" aria-label="推理设备"><button v-for="d in devices" :key="d.value" type="button" :aria-pressed="form.device === d.value" :disabled="!account || busy || running" @click="form.device=d.value; save()">{{ d.label }}</button></div>
       </div>
       <div class="lss-row lss-device-state"><span>已选：{{ devices.find(d=>d.value===form.device)?.label || 'NVIDIA GPU（当前系统使用 CPU）' }} · 实际：{{ actualDevice }}</span><button type="button" :disabled="busy || !account" @click="act(()=>request('/device/recheck',{method:'POST'},true),'设备检测完成')">重新检测</button></div>
       <UiSelect v-if="gpuDevices.length > 1" :model-value="String(form.device_id)" @update:model-value="form.device_id=Number($event)" label="选择 NVIDIA 显卡" :options="gpuDevices.map(d=>({value:String(d.id),label:d.name}))" @change="save" />
       <p v-if="state.device?.reason" class="lss-note">{{ state.device.reason }}</p>
-      <div v-if="!isMac" class="lss-row"><span>{{ state.gpu?.installed ? 'NVIDIA 加速组件已安装' : 'NVIDIA 加速组件 · ' + bytes(state.gpu?.size) }}</span>
+      <div class="lss-row"><span>{{ state.gpu?.installed ? 'NVIDIA 加速组件已安装' : 'NVIDIA 加速组件 · ' + bytes(state.gpu?.size) }}</span>
         <div class="lss-actions">
           <button v-if="!state.gpu?.installed" type="button" :disabled="busy || gpuActive || !state.gpu?.supported" :aria-busy="gpuActive || gpuOperation==='download'" @click="downloadGpu">{{ gpuDownloadLabel }}</button>
           <button v-if="gpuActive" type="button" :disabled="busy" @click="pauseGpu">{{ gpuOperation==='pause' ? '正在暂停…' : '暂停' }}</button>
           <button type="button" :disabled="busy || gpuActive || !state.gpu?.supported" @click="openImport('gpu')">离线导入</button>
         </div>
       </div>
-      <p v-if="!isMac && state.gpu?.job && state.gpu.job.status !== 'done'" class="lss-note">{{ stage(state.gpu.job) }} · {{ bytes(state.gpu.job.bytes) }} / {{ bytes(state.gpu.job.total) }} {{ state.gpu.job.error }}</p>
+      <p v-if="state.gpu?.job && state.gpu.job.status !== 'done'" class="lss-note">{{ stage(state.gpu.job) }} · {{ bytes(state.gpu.job.bytes) }} / {{ bytes(state.gpu.job.total) }} {{ state.gpu.job.error }}</p>
     </article>
 
 
@@ -184,8 +184,7 @@ const advancedOpen=ref(false),busy=ref(false),dialogError=ref(''),error=ref(''),
 const dialog=ref(''),dialogRef=ref(null),scopeSearch=ref(''),scopeDraft=ref([]),chats=ref([]),importId=ref(''),importPath=ref('')
 const period=ref('90'),startDate=ref(''),endDate=ref('')
 const periods=[{value:'90',label:'最近 90 天'},{value:'30',label:'最近 30 天'},{value:'0',label:'全部历史'},{value:'custom',label:'自定义时间'}]
-const isMac=computed(()=>state.value.gpu?.platform==='darwin')
-const devices=computed(()=>[{value:'auto',label:'自动'},{value:'cpu',label:'CPU'},...(!isMac.value ? [{value:'cuda',label:'NVIDIA GPU'}] : [])])
+const devices=computed(()=>[{value:'auto',label:'自动'},{value:'cpu',label:'CPU'},{value:'cuda',label:'NVIDIA GPU'}])
 const readBatchOptions=[{value:'0',label:'自动 · 推荐'},{value:'100',label:'100 条 · 低占用'},{value:'500',label:'500 条'},{value:'1000',label:'1,000 条'},{value:'2000',label:'2,000 条 · 大批量'}]
 const job=computed(()=>state.value.jobs?.[0])
 const indexStats=computed(()=>state.value.index_stats ?? job.value?.index_stats)

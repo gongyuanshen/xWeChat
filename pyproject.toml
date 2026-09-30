@@ -40,9 +40,7 @@ dependencies = [
     "python-pptx>=1.0",
     "Pillow>=10.0",
     "huggingface-hub==1.27.0",
-    "onnxruntime==1.28.0; sys_platform != 'darwin'",
-    # macOS 固定使用同时提供 Apple Silicon / Intel、macOS 13+ wheel 的 CPU 版本。
-    "onnxruntime==1.23.2; sys_platform == 'darwin'",
+    "onnxruntime==1.28.0",
     "tokenizers==0.23.1",
     "sqlite-vec==0.1.9",
     "deepagents==0.7.13",
@@ -83,14 +81,11 @@ include = [
     "src/wechat_decrypt_tool/native/wce_integrity*.pyd",
     "src/wechat_decrypt_tool/native/wechatdb_client.dll",
     "src/wechat_decrypt_tool/native/wechatdb_broker.exe",
-    "src/wechat_decrypt_tool/native/libwechatdb_client.dylib",
-    "src/wechat_decrypt_tool/native/wechatdb_broker",
     "src/wechat_decrypt_tool/native/wechatdb_native_build.json",
     "src/wechat_decrypt_tool/native/weflow_wasm/weflow_wasm_keystream.js",
     "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.js",
     "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.wasm",
     "src/wechat_decrypt_tool/native/weflow_wasm/sns_image_fixture.json",
-    "src/wechat_decrypt_tool/native/macos/source/*.c",
     "src/wechat_decrypt_tool/resources/*.json",
 ]
 

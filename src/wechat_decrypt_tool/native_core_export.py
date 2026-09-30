@@ -250,24 +250,6 @@ def _publish_temp_file(temp_path: Path, destination: Path, *, overwrite: bool) -
         os.rename(temp_path, destination)
         return
 
-    if sys.platform == "darwin":
-        renamex_np = ctypes.CDLL(None, use_errno=True).renamex_np
-        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
-        renamex_np.restype = ctypes.c_int
-        ctypes.set_errno(0)
-        if renamex_np(
-            os.fsencode(temp_path),
-            os.fsencode(destination),
-            0x00000004,  # RENAME_EXCL
-        ) != 0:
-            error = ctypes.get_errno() or errno.EIO
-            if error == errno.EEXIST:
-                raise FileExistsError(
-                    error, os.strerror(error), os.fspath(destination)
-                )
-            raise OSError(error, os.strerror(error), os.fspath(destination))
-        return
-
     # Linking within the destination directory provides an atomic no-replace
     # publish on other POSIX development platforms.
     os.link(temp_path, destination)

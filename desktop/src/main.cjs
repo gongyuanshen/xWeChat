@@ -26,13 +26,6 @@ if (
     app.commandLine.appendSwitch("disable-gpu-sandbox");
   } catch {}
 }
-let autoUpdater = null;
-let autoUpdaterLoadError = null;
-try {
-  ({ autoUpdater } = require("electron-updater"));
-} catch (err) {
-  autoUpdaterLoadError = err;
-}
 const { spawn, spawnSync } = require("child_process");
 const crypto = require("crypto");
 const fs = require("fs");
@@ -62,18 +55,14 @@ const {
 const { applyNativeCoreRuntimePolicy } = require("./native-core-runtime.cjs");
 const { loadWithRedirect, resolveDesktopUiUrl } = require("./renderer-startup.cjs");
 const {
-  ENV_INTEGRITY_NATIVE_PATH,
-  ENV_MACOS_DB_KEY_BUNDLE,
   ENV_SOURCE_NATIVE_CORE_DIR,
   applySourceRuntimeEnvironment,
   ensureSourceNativeCore,
 } = require("./source-native-core-bootstrap.cjs");
 const { resolveNativeCoreRuntimeDir } = require("./native-core-path.cjs");
 const {
-  configurePrivatePkiUpdateVerification,
   resolvePrivatePkiRuntime,
 } = require("./windows-private-pki-runtime.cjs");
-const { ensureMacosPrivatePkiTrust } = require("./macos-private-pki-runtime.cjs");
 
 const DEFAULT_BACKEND_HOST = "127.0.0.1";
 const LAN_BACKEND_HOST = "0.0.0.0";
@@ -111,7 +100,6 @@ function getTitleBarOverlayOptions(theme) {
 }
 
 function setWindowTitleBarTheme(win, theme) {
-  if (process.platform === "darwin") return false;
   if (!win || typeof win.setTitleBarOverlay !== "function") return false;
   try {
     win.setTitleBarOverlay(getTitleBarOverlayOptions(theme));
@@ -770,10 +758,7 @@ function ensureOutputLink() {
   // NOTE: We intentionally avoid creating a junction/symlink inside the install directory.
   // Some uninstall/update flows may traverse reparse points and delete the target directory,
   // causing data loss (the install dir is removed on every update/reinstall).
-  // These helper files are Windows installer affordances. Writing beside the
-  // executable on macOS would mutate Contents/MacOS and invalidate the app's
-  // code signature after the first launch.
-  if (!app.isPackaged || process.platform !== "win32") return;
+  if (!app.isPackaged) return;
 
   const exeDir = getExeDir();
   const target = resolveOutputDir();
@@ -901,8 +886,6 @@ function loadDesktopSettings() {
     // 'tray' (default): closing the window hides it to the system tray.
     // 'exit': closing the window quits the app.
     closeBehavior: "tray",
-    // When set, suppress the auto-update prompt for this exact version.
-    ignoredUpdateVersion: "",
     // Backend (FastAPI) listens on this port. Used in packaged builds.
     backendPort: DEFAULT_BACKEND_PORT,
     // When enabled, the backend binds to 0.0.0.0 so phone clients can reach /mcp.
@@ -1057,18 +1040,6 @@ function setCloseBehavior(next) {
   desktopSettings.closeBehavior = v === "exit" ? "exit" : "tray";
   persistDesktopSettings();
   return desktopSettings.closeBehavior;
-}
-
-function getIgnoredUpdateVersion() {
-  const v = String(loadDesktopSettings()?.ignoredUpdateVersion || "").trim();
-  return v || "";
-}
-
-function setIgnoredUpdateVersion(version) {
-  loadDesktopSettings();
-  desktopSettings.ignoredUpdateVersion = String(version || "").trim();
-  persistDesktopSettings();
-  return desktopSettings.ignoredUpdateVersion;
 }
 
 async function applyOutputDirChange(nextValue) {
@@ -1334,53 +1305,6 @@ async function refreshRendererCacheForPackagedUi() {
   persistDesktopSettings();
 }
 
-function parseEnvBool(value) {
-  if (value == null) return null;
-  const v = String(value).trim().toLowerCase();
-  if (!v) return null;
-  if (v === "1" || v === "true" || v === "yes" || v === "y" || v === "on") return true;
-  if (v === "0" || v === "false" || v === "no" || v === "n" || v === "off") return false;
-  return null;
-}
-
-let autoUpdateEnabledCache = null;
-function isAutoUpdateEnabled() {
-  if (autoUpdateEnabledCache != null) return !!autoUpdateEnabledCache;
-
-  const forced = parseEnvBool(process.env.AUTO_UPDATE_ENABLED);
-  let enabled = forced != null ? forced : !!app.isPackaged;
-  if (enabled && !autoUpdater) {
-    enabled = false;
-    logMain(
-      `[main] auto-update disabled: electron-updater unavailable: ${autoUpdaterLoadError?.message || "unknown error"}`
-    );
-  }
-
-  // In packaged builds electron-updater reads update config from app-update.yml.
-  // If missing, treat auto-update as disabled to avoid noisy errors.
-  if (enabled && app.isPackaged) {
-    try {
-      const updateConfigPath = path.join(process.resourcesPath, "app-update.yml");
-      if (!fs.existsSync(updateConfigPath)) {
-        enabled = false;
-        logMain(`[main] auto-update disabled: missing ${updateConfigPath}`);
-      }
-    } catch (err) {
-      enabled = false;
-      logMain(`[main] auto-update disabled: failed to check app-update.yml: ${err?.message || err}`);
-    }
-  }
-
-  autoUpdateEnabledCache = enabled;
-  return enabled;
-}
-
-let autoUpdaterInitialized = false;
-let updateDownloadInProgress = false;
-let installOnDownload = false;
-let updateDownloaded = false;
-let lastUpdateInfo = null;
-
 function sendToRenderer(channel, payload) {
   try {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -1513,279 +1437,7 @@ function runOutputDirWorker(action, payload, onProgress) {
   });
 }
 
-function looksLikeHtml(input) {
-  if (!input) return false;
-  const s = String(input);
-  if (!s.includes("<") || !s.includes(">")) return false;
-  // Be conservative: only treat the note as HTML if it contains common tags we expect from GitHub-rendered bodies.
-  return /<(p|div|br|ul|ol|li|a|strong|em|tt|code|pre|h[1-6])\b/i.test(s);
-}
-
-function htmlToPlainText(html) {
-  if (!html) return "";
-
-  let text = String(html);
-
-  // Drop script/style blocks entirely.
-  text = text.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
-  text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
-
-  // Keep links readable after stripping tags.
-  text = text.replace(
-    /<a\s+[^>]*href=(["'])([^"']+)\1[^>]*>([\s\S]*?)<\/a>/gi,
-    (_m, _q, href, inner) => {
-      const innerText = String(inner).replace(/<[^>]*>/g, "").trim();
-      const url = String(href || "").trim();
-      if (!url) return innerText;
-      if (!innerText) return url;
-      return `${innerText} (${url})`;
-    }
-  );
-
-  // Preserve line breaks / list structure before stripping remaining tags.
-  text = text.replace(/<\s*br\s*\/?>/gi, "\n");
-  text = text.replace(/<\/\s*(p|div|h1|h2|h3|h4|h5|h6)\s*>/gi, "\n");
-  text = text.replace(/<\s*li[^>]*>/gi, "- ");
-  text = text.replace(/<\/\s*li\s*>/gi, "\n");
-  text = text.replace(/<\/\s*(ul|ol)\s*>/gi, "\n");
-
-  // Strip remaining tags.
-  text = text.replace(/<[^>]*>/g, "");
-
-  // Decode the handful of entities we commonly see from GitHub-rendered HTML.
-  const named = {
-    nbsp: " ",
-    amp: "&",
-    lt: "<",
-    gt: ">",
-    quot: '"',
-    apos: "'",
-    "#39": "'",
-  };
-  text = text.replace(/&([a-z0-9#]+);/gi, (m, name) => {
-    const key = String(name || "").toLowerCase();
-    if (named[key] != null) return named[key];
-
-    // Numeric entities (decimal / hex).
-    const decMatch = key.match(/^#(\d+)$/);
-    if (decMatch) {
-      const n = Number(decMatch[1]);
-      if (Number.isFinite(n) && n >= 0 && n <= 0x10ffff) {
-        try {
-          return String.fromCodePoint(n);
-        } catch {
-          return m;
-        }
-      }
-      return m;
-    }
-
-    const hexMatch = key.match(/^#x([0-9a-f]+)$/i);
-    if (hexMatch) {
-      const n = Number.parseInt(hexMatch[1], 16);
-      if (Number.isFinite(n) && n >= 0 && n <= 0x10ffff) {
-        try {
-          return String.fromCodePoint(n);
-        } catch {
-          return m;
-        }
-      }
-      return m;
-    }
-
-    return m;
-  });
-
-  // Normalize whitespace/newlines.
-  text = text.replace(/\r\n/g, "\n");
-  text = text.replace(/\n{3,}/g, "\n\n");
-  return text.trim();
-}
-
-function normalizeReleaseNotes(releaseNotes) {
-  if (!releaseNotes) return "";
-
-  const normalizeText = (value) => {
-    if (value == null) return "";
-    const raw = typeof value === "string" ? value : String(value);
-    const trimmed = raw.trim();
-    if (!trimmed) return "";
-    if (looksLikeHtml(trimmed)) return htmlToPlainText(trimmed);
-    return trimmed;
-  };
-
-  if (typeof releaseNotes === "string") return normalizeText(releaseNotes);
-  if (Array.isArray(releaseNotes)) {
-    const parts = [];
-    for (const item of releaseNotes) {
-      const version = item?.version ? String(item.version) : "";
-      const note = item?.note;
-      const noteText =
-        typeof note === "string" ? note : note != null ? JSON.stringify(note, null, 2) : "";
-      const block = [version ? `v${version}` : "", normalizeText(noteText)]
-        .filter(Boolean)
-        .join("\n");
-      if (block) parts.push(block);
-    }
-    return parts.join("\n\n");
-  }
-  try {
-    return normalizeText(JSON.stringify(releaseNotes, null, 2));
-  } catch {
-    return normalizeText(releaseNotes);
-  }
-}
-
-function initAutoUpdater() {
-  if (autoUpdaterInitialized) return;
-  autoUpdaterInitialized = true;
-
-  // Configure auto-updater (align with WeFlow).
-  autoUpdater.autoDownload = false;
-  // Don't install automatically on quit; let the user choose when to restart/install.
-  autoUpdater.autoInstallOnAppQuit = false;
-  autoUpdater.disableDifferentialDownload = true;
-  configurePrivatePkiUpdateVerification(autoUpdater, {
-    isPackaged: app.isPackaged,
-    platform: process.platform,
-    resourcesPath: process.resourcesPath,
-  });
-
-  autoUpdater.on("download-progress", (progress) => {
-    sendToRenderer("app:downloadProgress", progress);
-    const percent = Number(progress?.percent || 0);
-    if (Number.isFinite(percent) && percent > 0) {
-      setWindowProgressBar(Math.max(0, Math.min(1, percent / 100)));
-    }
-  });
-
-  autoUpdater.on("update-downloaded", () => {
-    updateDownloadInProgress = false;
-    updateDownloaded = true;
-    installOnDownload = false;
-    setWindowProgressBar(-1);
-
-    const payload = {
-      version: lastUpdateInfo?.version ? String(lastUpdateInfo.version) : "",
-      releaseNotes: normalizeReleaseNotes(lastUpdateInfo?.releaseNotes),
-    };
-    sendToRenderer("app:updateDownloaded", payload);
-
-    try {
-      // If the window is hidden to tray, show a lightweight hint instead of forcing UI focus.
-      tray?.displayBalloon?.({
-        title: "更新已下载完成",
-        content: "可在弹窗中选择“立即重启安装”，或稍后再安装。",
-      });
-    } catch {}
-  });
-
-  autoUpdater.on("error", (err) => {
-    updateDownloadInProgress = false;
-    installOnDownload = false;
-    updateDownloaded = false;
-    setWindowProgressBar(-1);
-    const message = err?.message || String(err);
-    logMain(`[main] autoUpdater error: ${message}`);
-    sendToRenderer("app:updateError", { message });
-  });
-}
-
-async function checkForUpdatesInternal() {
-  const enabled = isAutoUpdateEnabled();
-  if (!enabled) return { hasUpdate: false, enabled: false };
-
-  initAutoUpdater();
-
-  try {
-    const result = await autoUpdater.checkForUpdates();
-    const updateInfo = result?.updateInfo;
-    lastUpdateInfo = updateInfo || null;
-    const latestVersion = updateInfo?.version ? String(updateInfo.version) : "";
-    const currentVersion = (() => {
-      try {
-        return app.getVersion();
-      } catch {
-        return "";
-      }
-    })();
-
-    if (latestVersion && currentVersion && latestVersion !== currentVersion) {
-      return {
-        hasUpdate: true,
-        enabled: true,
-        version: latestVersion,
-        releaseNotes: normalizeReleaseNotes(updateInfo?.releaseNotes),
-      };
-    }
-
-    return { hasUpdate: false, enabled: true };
-  } catch (err) {
-    const message = err?.message || String(err);
-    logMain(`[main] checkForUpdates failed: ${message}`);
-    return { hasUpdate: false, enabled: true, error: message };
-  }
-}
-
-async function downloadAndInstallInternal() {
-  if (!isAutoUpdateEnabled()) {
-    throw new Error("自动更新已禁用");
-  }
-  initAutoUpdater();
-
-  if (updateDownloadInProgress) {
-    throw new Error("正在下载更新中，请稍候…");
-  }
-
-  updateDownloadInProgress = true;
-  installOnDownload = true;
-  updateDownloaded = false;
-  setWindowProgressBar(0);
-
-  try {
-    // Ensure update info is up-to-date (downloadUpdate relies on the last check).
-    await autoUpdater.checkForUpdates();
-    await autoUpdater.downloadUpdate();
-    return { success: true };
-  } catch (err) {
-    updateDownloadInProgress = false;
-    installOnDownload = false;
-    setWindowProgressBar(-1);
-    throw err;
-  }
-}
-
-function checkForUpdatesOnStartup() {
-  if (!isAutoUpdateEnabled()) return;
-  if (!app.isPackaged) return; // keep dev noise-free by default
-
-  setTimeout(async () => {
-    const result = await checkForUpdatesInternal();
-    if (!result?.hasUpdate) return;
-
-    const ignored = getIgnoredUpdateVersion();
-    if (ignored && ignored === result.version) return;
-
-    sendToRenderer("app:updateAvailable", {
-      version: result.version,
-      releaseNotes: result.releaseNotes || "",
-    });
-  }, 3000);
-}
-
 function getTrayIconPath() {
-  if (process.platform === "darwin") {
-    const packaged = path.join(process.resourcesPath, "icon.png");
-    try {
-      if (app.isPackaged && fs.existsSync(packaged)) return packaged;
-    } catch {}
-
-    const devMac = path.resolve(__dirname, "..", "src", "icon.png");
-    try {
-      if (fs.existsSync(devMac)) return devMac;
-    } catch {}
-  }
-
   // Prefer an icon shipped in `src/` so it works both in dev and packaged (asar) builds.
   const shipped = path.join(__dirname, "icon.ico");
   try {
@@ -1844,12 +1496,7 @@ function createTray() {
   }
 
   try {
-    let trayIcon = iconPath;
-    if (process.platform === "darwin") {
-      trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 18, height: 18 });
-      trayIcon.setTemplateImage(true);
-    }
-    tray = new Tray(trayIcon);
+    tray = new Tray(iconPath);
   } catch (err) {
     tray = null;
     logMain(`[main] failed to create tray: ${err?.message || err}`);
@@ -1866,88 +1513,6 @@ function createTray() {
         {
           label: "显示",
           click: () => requestMainWindow("tray-menu"),
-        },
-        {
-          label: "检查更新...",
-          click: async () => {
-            try {
-              if (!isAutoUpdateEnabled()) {
-                await dialog.showMessageBox({
-                  type: "info",
-                  title: "检查更新",
-                  message: "自动更新已禁用（仅打包版本可用）。",
-                  buttons: ["确定"],
-                  noLink: true,
-                });
-                return;
-              }
-
-              const result = await checkForUpdatesInternal();
-              if (result?.error) {
-                await dialog.showMessageBox({
-                  type: "error",
-                  title: "检查更新失败",
-                  message: result.error,
-                  buttons: ["确定"],
-                  noLink: true,
-                });
-                return;
-              }
-
-              if (result?.hasUpdate && result?.version) {
-                const { response } = await dialog.showMessageBox({
-                  type: "info",
-                  title: "发现新版本",
-                  message: `发现新版本 ${result.version}，是否立即更新？`,
-                  detail: result.releaseNotes ? `更新内容：\n${result.releaseNotes}` : undefined,
-                  buttons: ["立即更新", "稍后", "忽略此版本"],
-                  defaultId: 0,
-                  cancelId: 1,
-                  noLink: true,
-                });
-
-                if (response === 0) {
-                  try {
-                    await downloadAndInstallInternal();
-                  } catch (err) {
-                    const message = err?.message || String(err);
-                    logMain(`[main] downloadAndInstall failed (tray): ${message}`);
-                    await dialog.showMessageBox({
-                      type: "error",
-                      title: "更新失败",
-                      message,
-                      buttons: ["确定"],
-                      noLink: true,
-                    });
-                  }
-                } else if (response === 2) {
-                  try {
-                    setIgnoredUpdateVersion(result.version);
-                  } catch {}
-                }
-
-                return;
-              }
-
-              await dialog.showMessageBox({
-                type: "info",
-                title: "检查更新",
-                message: "当前已是最新版本。",
-                buttons: ["确定"],
-                noLink: true,
-              });
-            } catch (err) {
-              const message = err?.message || String(err);
-              logMain(`[main] tray check updates failed: ${message}`);
-              await dialog.showMessageBox({
-                type: "error",
-                title: "检查更新失败",
-                message,
-                buttons: ["确定"],
-                noLink: true,
-              });
-            }
-          },
         },
         {
           type: "separator",
@@ -2048,14 +1613,12 @@ function repoRoot() {
 }
 
 function getPackagedBackendPath() {
-  const executableName = process.platform === "win32" ? "wechat-backend.exe" : "wechat-backend";
-  return path.join(process.resourcesPath, "backend", executableName);
+  return path.join(process.resourcesPath, "backend", "wechat-backend.exe");
 }
 
 function getFfmpegPath() {
   if (app.isPackaged) {
-    const executableName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
-    return path.join(process.resourcesPath, "ffmpeg", executableName);
+    return path.join(process.resourcesPath, "ffmpeg", "ffmpeg.exe");
   }
 
   try {
@@ -2070,20 +1633,8 @@ function getNativeCoreRuntimeDir(env = process.env) {
   // fallback for direct `electron .` and dev:static source launches.
   if (
     !app.isPackaged &&
-    (
-      (
-        process.platform === "darwin" &&
-        (
-          !String(env[ENV_SOURCE_NATIVE_CORE_DIR] || "").trim() ||
-          !String(env[ENV_MACOS_DB_KEY_BUNDLE] || "").trim() ||
-          !String(env[ENV_INTEGRITY_NATIVE_PATH] || "").trim()
-        )
-      ) ||
-      (
-        process.platform === "win32" &&
-        !String(env[ENV_SOURCE_NATIVE_CORE_DIR] || "").trim()
-      )
-    )
+    process.platform === "win32" &&
+    !String(env[ENV_SOURCE_NATIVE_CORE_DIR] || "").trim()
   ) {
     const sourceNativeCore = ensureSourceNativeCore({ env });
     applySourceRuntimeEnvironment(env, sourceNativeCore);
@@ -2525,9 +2076,8 @@ function createMainWindow() {
     height: 800,
     minWidth: 980,
     minHeight: 700,
-    ...(process.platform === "darwin"
-      ? { titleBarStyle: "hiddenInset", trafficLightPosition: { x: 12, y: 9 } }
-      : { titleBarStyle: "hidden", titleBarOverlay: getTitleBarOverlayOptions("light") }),
+    titleBarStyle: "hidden",
+    titleBarOverlay: getTitleBarOverlayOptions("light"),
     backgroundColor: "#EDEDED",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
@@ -2679,7 +2229,7 @@ async function captureRegionToPngBuffer(wc, options = {}) {
 
 // --- 零依赖 ZIP（store 模式，压缩方法 0）--------------------------------------
 // PNG 内部已经是 deflate，再压一遍几乎不省体积，所以直接 store：
-// 少一个依赖（desktop/package.json 只想留 electron-updater / ffmpeg-static），
+// 少一个依赖（desktop/package.json 的运行依赖仅保留 ffmpeg-static），
 // 产物依然是标准合法 zip。文件都是几 MB 级别，不需要 zip64。
 const ZIP_CRC32_TABLE = (() => {
   const table = new Int32Array(256);
@@ -3317,43 +2867,6 @@ function registerWindowIpc() {
     }
   });
 
-  ipcMain.handle("app:checkForUpdates", async () => {
-    return await checkForUpdatesInternal();
-  });
-
-  ipcMain.handle("app:downloadAndInstall", async () => {
-    return await downloadAndInstallInternal();
-  });
-
-  ipcMain.handle("app:installUpdate", async () => {
-    if (!isAutoUpdateEnabled()) {
-      throw new Error("自动更新已禁用");
-    }
-    initAutoUpdater();
-    if (!updateDownloaded) {
-      throw new Error("更新尚未下载完成");
-    }
-
-    try {
-      // Safety: remove legacy `output` junctions in the install dir before triggering the NSIS update/uninstall.
-      // Some uninstall flows may traverse reparse points and delete the real per-user output directory.
-      try {
-        ensureOutputLink();
-      } catch {}
-      autoUpdater.quitAndInstall(false, true);
-      return { success: true };
-    } catch (err) {
-      const message = err?.message || String(err);
-      logMain(`[main] installUpdate failed: ${message}`);
-      throw new Error(message);
-    }
-  });
-
-  ipcMain.handle("app:ignoreUpdate", async (_event, version) => {
-    setIgnoredUpdateVersion(version);
-    return { success: true };
-  });
-
   ipcMain.handle("dialog:chooseDirectory", async (_event, options) => {
     try {
       const result = await dialog.showOpenDialog({
@@ -3489,15 +3002,6 @@ async function main() {
   if (app.isPackaged && process.platform === "win32") {
     resolvePrivatePkiRuntime(process.resourcesPath);
   }
-  if (app.isPackaged && process.platform === "darwin") {
-    const evidence = ensureMacosPrivatePkiTrust({
-      executablePath: process.execPath,
-      resourcesPath: process.resourcesPath,
-    });
-    logMain(
-      `[private-pki] macos userTrust=${evidence.alreadyTrusted ? "cached" : "installed"} root=${evidence.rootSha256.slice(0, 12)} verifiedTargets=${evidence.verifiedTargetCount}`
-    );
-  }
   await refreshRendererCacheForPackagedUi();
   Menu.setApplicationMenu(null);
   registerWindowIpc();
@@ -3529,14 +3033,9 @@ async function main() {
   });
   aiNotifications.start();
 
-  // Auto-check updates once after the first UI load (packaged builds only).
-  checkForUpdatesOnStartup();
 }
 
 app.on("window-all-closed", () => {
-  // Standard macOS lifecycle: keep the app runtime alive so clicking the Dock
-  // icon can recreate a window. All child processes are stopped in before-quit.
-  if (process.platform === "darwin" && getCloseBehavior() !== "exit") return;
   app.quit();
 });
 

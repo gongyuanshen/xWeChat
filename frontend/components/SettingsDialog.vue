@@ -626,62 +626,6 @@
             </div>
           </section>
 
-          <section ref="mediaSectionRef">
-            <div class="mb-2.5 text-[12px] font-bold text-[#999] tracking-widest">聊天与媒体</div>
-            <div class="overflow-hidden rounded-[10px] border border-[#e7e7e7] bg-white divide-y divide-[#ececec]">
-              <div class="px-3.5 py-3">
-                <div class="flex items-center justify-between gap-3">
-                  <div class="min-w-0 flex-1">
-                    <div class="text-[13px] font-medium text-[#222]">自动获取原图</div>
-                    <div class="mt-0.5 text-[11px] text-[#909090]">本地缺原图时自动联网拉取原图，受服务额度限制。关闭后仅显示本地已有图片。</div>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    :aria-checked="cdnImageEnabled"
-                    class="settings-switch shrink-0"
-                    :class="switchTrackClass(cdnImageEnabled, cdnImageLoading)"
-                    @click="toggleCdnImage"
-                  >
-                    <span class="settings-switch-thumb" :class="cdnImageEnabled ? 'translate-x-[20px]' : 'translate-x-0'" />
-                  </button>
-                </div>
-              </div>
-              <MediaDownloadSettings :account="keySelectedAccount" />
-            </div>
-          </section>
-
-          <section ref="updatesSectionRef">
-            <div class="mb-2.5 text-[12px] font-bold text-[#999] tracking-widest">更新</div>
-            <div class="overflow-hidden rounded-[10px] border border-[#e7e7e7] bg-white divide-y divide-[#ececec]">
-              <div class="px-3.5 py-3">
-                <div class="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
-                  <div class="min-w-0 flex-1">
-                    <div class="text-[13px] font-medium text-[#222]">当前版本</div>
-                    <div class="mt-0.5 text-[11px] text-[#909090]">{{ desktopVersionText }}</div>
-                  </div>
-                  <button
-                    type="button"
-                    class="shrink-0 rounded-[6px] border border-[#e2e2e2] bg-[#fafafa] px-2.5 py-1 text-[12px] text-[#222] transition hover:bg-[#f0f0f0] disabled:cursor-not-allowed disabled:opacity-50"
-                    :disabled="!isDesktopEnv || desktopUpdate.manualCheckLoading.value"
-                    @click="onDesktopCheckUpdates"
-                  >
-                    {{ desktopUpdate.manualCheckLoading.value ? '检查中...' : '检查桌面版更新' }}
-                  </button>
-                </div>
-                <div v-if="desktopUpdate.lastCheckMessage.value" class="mt-2 rounded-[6px] bg-[#f9f9f9] border border-[#eee] px-2.5 py-1.5 text-[11px] text-[#666] whitespace-pre-wrap break-words">
-                  <ErrorNotice
-                    v-if="desktopUpdateLastCheckFailed"
-                    :message="desktopUpdate.lastCheckMessage.value"
-                    compact
-                    manual
-                  />
-                  <template v-else>{{ desktopUpdate.lastCheckMessage.value }}</template>
-                </div>
-              </div>
-            </div>
-          </section>
-
           <section ref="snsSectionRef">
             <div class="mb-2.5 text-[12px] font-bold text-[#999] tracking-widest">朋友圈</div>
             <div class="overflow-hidden rounded-[10px] border border-[#e7e7e7] bg-white divide-y divide-[#ececec]">
@@ -742,8 +686,6 @@ const settingNavItems = [
   { key: 'mcp', label: 'MCP 接入', hint: '局域网 / Skill / 工具' },
   { key: 'keys', label: '数据库与密钥', hint: '密钥查看 / 复制' },
   { key: 'startup', label: '启动偏好', hint: '默认页面' },
-  { key: 'media', label: '聊天与媒体', hint: '原图获取' },
-  { key: 'updates', label: '更新', hint: '版本信息 / 检查更新' },
   { key: 'sns', label: '朋友圈', hint: '图片缓存策略' },
 ]
 
@@ -756,23 +698,11 @@ const aiSectionRef = ref(null)
 const mcpSectionRef = ref(null)
 const keysSectionRef = ref(null)
 const startupSectionRef = ref(null)
-const mediaSectionRef = ref(null)
-const updatesSectionRef = ref(null)
 const snsSectionRef = ref(null)
 
 const isDesktopEnv = ref(false)
-const desktopUpdate = useDesktopUpdate()
-
-const desktopVersionText = computed(() => {
-  if (!isDesktopEnv.value) return '仅桌面端可用'
-  const v = String(desktopUpdate.currentVersion.value || '').trim()
-  return v || '—'
-})
-
 const desktopDefaultToChatWhenData = ref(true)
 
-const cdnImageEnabled = ref(false)
-const cdnImageLoading = ref(false)
 const snsUseCache = ref(true)
 
 const desktopAutoLaunch = ref(false)
@@ -1070,8 +1000,6 @@ const sectionElements = computed(() => [
   { key: 'mcp', el: mcpSectionRef.value },
   { key: 'keys', el: keysSectionRef.value },
   { key: 'startup', el: startupSectionRef.value },
-  { key: 'media', el: mediaSectionRef.value },
-  { key: 'updates', el: updatesSectionRef.value },
   { key: 'sns', el: snsSectionRef.value },
 ])
 
@@ -2100,38 +2028,10 @@ const toggleDesktopDefaultToChat = () => {
   writeLocalBoolSetting(DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, next)
 }
 
-const loadCdnImageStatus = async () => {
-  try {
-    const res = await api.getCdnImageStatus()
-    cdnImageEnabled.value = res?.enabled === true
-  } catch {
-    // 读取失败保持默认关闭
-  }
-}
-
-const toggleCdnImage = async () => {
-  if (cdnImageLoading.value) return
-  const next = !cdnImageEnabled.value
-  cdnImageLoading.value = true
-  cdnImageEnabled.value = next
-  try {
-    const res = await api.toggleCdnImage(next)
-    cdnImageEnabled.value = res?.enabled === true
-  } catch {
-    cdnImageEnabled.value = !next
-  } finally {
-    cdnImageLoading.value = false
-  }
-}
-
 const toggleSnsUseCache = () => {
   const next = !snsUseCache.value
   snsUseCache.value = next
   writeLocalBoolSetting(SNS_SETTING_USE_CACHE_KEY, next)
-}
-
-const onDesktopCheckUpdates = async () => {
-  await desktopUpdate.manualCheck()
 }
 
 const refreshSettingsDialogData = async () => {
@@ -2148,7 +2048,6 @@ const refreshSettingsDialogData = async () => {
 
 
   if (isDesktopEnv.value) {
-    void desktopUpdate.initListeners()
     tasks.push(refreshDesktopAutoLaunch())
     tasks.push(refreshDesktopCloseBehavior())
     tasks.push(refreshDesktopOutputDir())
@@ -2174,10 +2073,6 @@ watch(() => props.focusTarget, async () => {
   if (!props.open) return
   await scrollToFocusTarget()
 })
-const desktopUpdateLastCheckFailed = computed(() => /失败|错误|异常/.test(
-  String(desktopUpdate.lastCheckMessage.value || '')
-))
-
 onMounted(async () => {
   if (process.client && typeof window !== 'undefined') {
     const isElectron = /electron/i.test(String(navigator.userAgent || ''))
@@ -2192,7 +2087,6 @@ onMounted(async () => {
 
   desktopDefaultToChatWhenData.value = readLocalBoolSetting(DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, true)
   snsUseCache.value = readLocalBoolSetting(SNS_SETTING_USE_CACHE_KEY, true)
-  void loadCdnImageStatus()
 
   if (props.open) await refreshSettingsDialogData()
 

@@ -31,7 +31,7 @@ class SemanticIndex:
         db.row_factory = sqlite3.Row
         try:
             if not hasattr(db, 'enable_load_extension'):
-                raise RuntimeError('当前 Python 的 SQLite 不支持本地检索扩展，请使用应用内置后端或 uv 管理的 Python 3.11；不要使用 macOS 系统 Python')
+                raise RuntimeError('当前 Python 的 SQLite 不支持本地检索扩展，请使用应用内置后端或 uv 管理的 Python 3.11')
             try:
                 db.enable_load_extension(True)
                 sqlite_vec.load(db)

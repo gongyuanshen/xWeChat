@@ -2,11 +2,6 @@
   <div
     class="sidebar-rail theme-scope border-r flex flex-col"
   >
-    <div
-      v-if="isMacosDesktop"
-      class="macos-sidebar-titlebar-spacer"
-      aria-hidden="true"
-    />
     <div class="flex-1 flex flex-col justify-start pt-0 gap-0">
       <!-- Avatar -->
       <div class="w-full h-[52px] flex items-center justify-center">
@@ -515,7 +510,6 @@ const accountDeleteError = ref('')
 const accountInfoApiUnsupported = ref(false)
 const deleteAccountApiUnsupported = ref(false)
 const brokenAvatarUrls = ref({})
-const isMacosDesktop = ref(false)
 
 const normalizeAccountName = (value) => String(value || '').trim()
 
@@ -700,7 +694,6 @@ watch(selectedAccount, () => {
 })
 
 onMounted(async () => {
-  isMacosDesktop.value = window?.wechatDesktop?.platform === 'darwin'
   await chatAccounts.ensureLoaded()
   if (process.client && typeof window !== 'undefined') {
     window.addEventListener('keydown', onWindowKeydown)
@@ -837,13 +830,6 @@ const deleteCurrentAccountData = async () => {
   border-color: var(--sidebar-rail-border);
   overflow-y: auto;
   scrollbar-width: none;
-}
-
-.macos-sidebar-titlebar-spacer {
-  width: 100%;
-  height: var(--desktop-titlebar-height, 32px);
-  min-height: var(--desktop-titlebar-height, 32px);
-  -webkit-app-region: drag;
 }
 
 .sidebar-rail::-webkit-scrollbar {

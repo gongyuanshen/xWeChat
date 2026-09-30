@@ -105,7 +105,6 @@ async function main() {
       env: { ...process.env, WECHAT_TOOL_DATA_DIR: data, WECHAT_TOOL_OUTPUT_DIR: path.join(data, 'output'),
         WECHAT_TOOL_PORT: String(port), WECHAT_TOOL_STATIC_UI: '1', PYTHONIOENCODING: 'utf-8' } })
     page = await app.firstWindow({ timeout: 120000 }); page.setDefaultTimeout(30000)
-    if (process.platform === 'darwin') result.accessibility_trusted = await app.evaluate(({ systemPreferences }) => systemPreferences.isTrustedAccessibilityClient(false))
     if (values.continuous) {
       streamProxy = await require('./ai_acceptance_stream_proxy.cjs').createStreamProxy(base)
       await page.route('**/api/ai/agent/events?**', route => route.continue({ url: streamProxy.url + new URL(route.request().url()).pathname + new URL(route.request().url()).search }))

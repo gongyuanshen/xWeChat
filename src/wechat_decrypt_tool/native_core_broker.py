@@ -117,13 +117,11 @@ class NativeCoreManagedOperation:
 def _broker_name() -> str:
     if sys.platform.startswith("win"):
         return "wechatdb_broker.exe"
-    if sys.platform == "darwin":
-        return "wechatdb_broker"
-    raise NativeCoreComponentMissingError("wechatdb native broker supports Windows and macOS only.")
+    raise NativeCoreComponentMissingError("wechatdb native broker supports Windows only.")
 
 
 def _client_name() -> str:
-    return "wechatdb_client.dll" if sys.platform.startswith("win") else "libwechatdb_client.dylib"
+    return "wechatdb_client.dll"
 
 
 def _candidate_broker_paths() -> tuple[Path, ...]:
@@ -142,7 +140,6 @@ def _candidate_broker_paths() -> tuple[Path, ...]:
             repo_root.parent / "wechatdb-native" / "build" / "windows-vs" / "Release" / name,
             repo_root.parent / "wechatdb-native" / "build" / "windows-vs" / "Debug" / name,
             repo_root.parent / "wechatdb-native" / "build" / "windows-msvc-debug" / name,
-            repo_root.parent / "wechatdb-native" / "build" / "macos-arm64-debug" / name,
         )
     )
     result: list[Path] = []
@@ -167,16 +164,11 @@ def resolve_native_core_broker() -> Path:
 
 def _new_endpoint() -> str:
     token = secrets.token_hex(12)
-    if sys.platform.startswith("win"):
-        return rf"\\.\pipe\LifeArchiveProject.WeChatDB.Native.{os.getpid()}.{token}"
-    directory = tempfile.gettempdir().rstrip("/\\")
-    return f"{directory}/lap-wce-{os.getpid()}-{token}.sock"
+    return rf"\\.\pipe\LifeArchiveProject.WeChatDB.Native.{os.getpid()}.{token}"
 
 
 def _startup_timeout_seconds() -> float:
-    default_timeout_ms = (
-        "60000" if sys.platform == "darwin" or sys.platform.startswith("win") else "5000"
-    )
+    default_timeout_ms = "60000"
     raw = str(
         os.environ.get(ENV_NATIVE_CORE_STARTUP_TIMEOUT_MS, default_timeout_ms) or ""
     ).strip()
@@ -521,8 +513,6 @@ def ensure_native_core_broker(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
-            if sys.platform == "darwin":
-                Path(endpoint).unlink(missing_ok=True)
             if isinstance(exc, NativeCoreUnavailableError) and log_path is not None:
                 tail = _broker_log_tail(log_path, log_start_offset)
                 detail = f" Broker log: {log_path}."
@@ -594,8 +584,6 @@ def stop_native_core_broker(*, _force: bool = False) -> None:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
-    if endpoint and sys.platform == "darwin":
-        Path(endpoint).unlink(missing_ok=True)
 
 
 atexit.register(stop_native_core_broker, _force=True)

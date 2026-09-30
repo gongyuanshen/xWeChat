@@ -87,12 +87,12 @@
                         :class="{ 'opacity-100': !!message._imageLargeLoading }"
                         :disabled="!!message._imageLargeLoading"
                         :aria-busy="message._imageLargeLoading ? 'true' : 'false'"
-                        title="先从微信本地目录查找大图；本地没有时通过原图接口获取。"
+                        title="重新查找微信本地目录中已有的图片。"
                         @click.stop.prevent="onTryLoadLargeImageClick(message)"
                       >
-                        {{ message._imageLargeLoading ? '下载中...' : '尝试加载大图' }}
+                        {{ message._imageLargeLoading ? '查找中...' : '查找本地图片' }}
                       </button>
-                      <span v-if="message._imageLargeLoading" class="text-[11px] text-gray-500" role="status" aria-live="polite">正在触发原图下载，请稍候…</span>
+                      <span v-if="message._imageLargeLoading" class="text-[11px] text-gray-500" role="status" aria-live="polite">正在查找本地图片，请稍候…</span>
                       <ErrorNotice
                         v-if="message._imageLargeError"
                         :message="message._imageLargeError"

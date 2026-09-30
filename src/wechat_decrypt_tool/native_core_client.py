@@ -534,22 +534,12 @@ class NativeCoreBuildManifest:
     native_asr_authorization: str = ""
     native_asr_target_wechat_version: str = ""
     native_asr_target_weixin_sha256: str = ""
-    macos_client_signer_sha256: bytes = field(default=b"\0" * 32, repr=False)
-    macos_broker_signer_sha256: bytes = field(default=b"\0" * 32, repr=False)
-    macos_host_signer_sha256: bytes = field(default=b"\0" * 32, repr=False)
-    macos_private_root_sha256: bytes = field(default=b"\0" * 32, repr=False)
-    macos_client_signing_identifier: str = ""
-    macos_broker_signing_identifier: str = ""
-    macos_host_signing_identifier: str = ""
     read_only_build: bool = True
     source_runtime: bool = False
     windows_host_verification: str = ""
-    macos_host_verification: str = ""
 
     @property
     def client_signer_sha256(self) -> bytes:
-        if self.platform == "macos":
-            return self.macos_client_signer_sha256
         return self.windows_client_signer_sha256
 
 
@@ -951,7 +941,7 @@ def _load_native_core_build_manifest(
     root_public_key_compiled = payload.get("rootPublicKeyCompiled")
     test_hooks_enabled = payload.get("testHooksEnabled")
     staging_pinned_signer_trust = payload.get("stagingPinnedSignerTrust")
-    manifest_platform = "macos" if schema_version == 3 else "windows"
+    manifest_platform = "windows"
     windows_client_signer_sha256 = payload.get("windowsClientSignerSha256")
     offline_bootstrap_feature_bits_value = payload.get(
         "offlineBootstrapFeatureBits"
@@ -965,19 +955,15 @@ def _load_native_core_build_manifest(
     offline_export_seal_format = payload.get("offlineExportSealFormat")
     distribution_mode_value = payload.get("distributionMode")
     distribution_capsule_value = payload.get("distributionCapsule")
-    if type(schema_version) is not int or schema_version not in {2, 3}:
+    if type(schema_version) is not int or schema_version != 2:
         raise NativeCoreProtocolError(
             "wechatdb native build manifest has an unsupported schemaVersion."
         )
-    if schema_version == 3 and payload.get("platform") != "macos":
-        raise NativeCoreProtocolError(
-            "wechatdb native schemaVersion 3 requires platform macos."
-        )
-    if schema_version == 2 and "platform" in payload:
+    if "platform" in payload:
         raise NativeCoreProtocolError(
             "wechatdb native schemaVersion 2 must not declare a platform."
         )
-    if schema_version == 2 and (
+    if (
         read_only_build is not True
         or not isinstance(wechat_actions_value, list)
         or wechat_actions_value
@@ -985,59 +971,29 @@ def _load_native_core_build_manifest(
         raise NativeCoreProtocolError(
             "Windows wechatdb native build manifest must declare readOnlyBuild=true and no WeChat actions."
         )
-    if schema_version == 3:
-        read_only_build = True
     source_runtime = False
     windows_host_verification = ""
-    macos_host_verification = ""
     windows_source_runtime_fields = {
         name for name in ("sourceRuntime", "windowsHostVerification") if name in payload
     }
-    macos_source_runtime_fields = {
-        name for name in ("sourceRuntime", "macosHostVerification") if name in payload
-    }
-    if schema_version == 2:
-        if "macosHostVerification" in payload:
+    if windows_source_runtime_fields:
+        if windows_source_runtime_fields != {
+            "sourceRuntime",
+            "windowsHostVerification",
+        }:
             raise NativeCoreProtocolError(
-                "Windows wechatdb native manifests must not declare macOS source-runtime fields."
+                "Windows source-runtime fields must be declared together."
             )
-        if windows_source_runtime_fields:
-            if windows_source_runtime_fields != {
-                "sourceRuntime",
-                "windowsHostVerification",
-            }:
-                raise NativeCoreProtocolError(
-                    "Windows source-runtime fields must be declared together."
-                )
-            if (
-                payload.get("sourceRuntime") is not True
-                or payload.get("windowsHostVerification")
-                != "same-user-direct-parent"
-            ):
-                raise NativeCoreProtocolError(
-                    "Windows source-runtime host verification policy is invalid."
-                )
-            source_runtime = True
-            windows_host_verification = "same-user-direct-parent"
-    if schema_version == 3:
-        if "windowsHostVerification" in payload:
+        if (
+            payload.get("sourceRuntime") is not True
+            or payload.get("windowsHostVerification")
+            != "same-user-direct-parent"
+        ):
             raise NativeCoreProtocolError(
-                "macOS wechatdb native manifests must not declare Windows source-runtime fields."
+                "Windows source-runtime host verification policy is invalid."
             )
-        if macos_source_runtime_fields:
-            if macos_source_runtime_fields != {"sourceRuntime", "macosHostVerification"}:
-                raise NativeCoreProtocolError(
-                    "macOS source-runtime fields must be declared together."
-                )
-            if (
-                payload.get("sourceRuntime") is not True
-                or payload.get("macosHostVerification") != "same-user-direct-parent"
-            ):
-                raise NativeCoreProtocolError(
-                    "macOS source-runtime host verification policy is invalid."
-                )
-            source_runtime = True
-            macos_host_verification = "same-user-direct-parent"
+        source_runtime = True
+        windows_host_verification = "same-user-direct-parent"
     if (
         not isinstance(build_id, str)
         or not _NATIVE_CORE_BUILD_ID_PATTERN.fullmatch(build_id)
@@ -1068,100 +1024,21 @@ def _load_native_core_build_manifest(
         raise NativeCoreProtocolError(
             "Source-runtime manifests must retain the production security profile."
         )
-    macos_client_signer_digest = bytes(32)
-    macos_broker_signer_digest = bytes(32)
-    macos_host_signer_digest = bytes(32)
-    macos_private_root_digest = bytes(32)
-    macos_client_identifier = ""
-    macos_broker_identifier = ""
-    macos_host_identifier = ""
-    if manifest_platform == "windows":
-        if development_build and windows_client_signer_sha256 in {None, ""}:
-            signer_digest = bytes(32)
-        elif (
-            not isinstance(windows_client_signer_sha256, str)
-            or not re.fullmatch(r"[0-9A-Fa-f]{64}", windows_client_signer_sha256)
-        ):
-            raise NativeCoreProtocolError(
-                "wechatdb native build manifest contains an invalid windowsClientSignerSha256."
-            )
-        else:
-            signer_digest = bytes.fromhex(windows_client_signer_sha256)
-        if not development_build and not any(signer_digest):
-            raise NativeCoreProtocolError(
-                "wechatdb native build manifest contains an invalid windowsClientSignerSha256."
-            )
-    else:
+    if development_build and windows_client_signer_sha256 in {None, ""}:
         signer_digest = bytes(32)
-        macos_identifiers = (
-            payload.get("macosClientSigningIdentifier"),
-            payload.get("macosBrokerSigningIdentifier"),
-            payload.get("macosHostSigningIdentifier"),
+    elif (
+        not isinstance(windows_client_signer_sha256, str)
+        or not re.fullmatch(r"[0-9A-Fa-f]{64}", windows_client_signer_sha256)
+    ):
+        raise NativeCoreProtocolError(
+            "wechatdb native build manifest contains an invalid windowsClientSignerSha256."
         )
-        if (
-            any(
-                not isinstance(value, str)
-                or re.fullmatch(r"[A-Za-z0-9.-]+", value) is None
-                for value in macos_identifiers
-            )
-            or len(set(macos_identifiers)) != 3
-        ):
-            raise NativeCoreProtocolError(
-                "wechatdb native build manifest contains invalid macOS signing identifiers."
-            )
-        macos_client_identifier, macos_broker_identifier, macos_host_identifier = (
-            macos_identifiers
+    else:
+        signer_digest = bytes.fromhex(windows_client_signer_sha256)
+    if not development_build and not any(signer_digest):
+        raise NativeCoreProtocolError(
+            "wechatdb native build manifest contains an invalid windowsClientSignerSha256."
         )
-        macos_pin_values = (
-            payload.get("macosClientSignerSha256"),
-            payload.get("macosBrokerSignerSha256"),
-            payload.get("macosHostSignerSha256"),
-            payload.get("macosPrivateRootSha256"),
-        )
-        if any(
-            not isinstance(value, str)
-            or re.fullmatch(r"[0-9a-f]{64}", value) is None
-            for value in macos_pin_values
-        ):
-            raise NativeCoreProtocolError(
-                "wechatdb native build manifest contains invalid macOS signer pins."
-            )
-        (
-            macos_client_signer_digest,
-            macos_broker_signer_digest,
-            macos_host_signer_digest,
-            macos_private_root_digest,
-        ) = tuple(bytes.fromhex(value) for value in macos_pin_values)
-        macos_pin_digests = (
-            macos_client_signer_digest,
-            macos_broker_signer_digest,
-            macos_host_signer_digest,
-            macos_private_root_digest,
-        )
-        if development_build:
-            if any(any(value) for value in macos_pin_digests):
-                raise NativeCoreProtocolError(
-                    "Development macOS native builds must not carry production signer pins."
-                )
-            expected_trust_mode = "development"
-            expected_revocation = "not-applicable"
-        else:
-            if any(not any(value) for value in macos_pin_digests) or len(
-                set(macos_pin_digests)
-            ) != 4:
-                raise NativeCoreProtocolError(
-                    "Production macOS signer and root pins must be non-zero and distinct."
-                )
-            expected_trust_mode = "private-pki"
-            expected_revocation = "build-and-lease-only"
-        if (
-            payload.get("macosSigningMode") != "self-signed"
-            or payload.get("macosSignerTrustMode") != expected_trust_mode
-            or payload.get("macosPrivatePkiLeafRevocation") != expected_revocation
-        ):
-            raise NativeCoreProtocolError(
-                "wechatdb native build manifest contains an invalid macOS private-PKI policy."
-            )
     if native_asr_target_value is None:
         native_asr_target_wechat_version = ""
         native_asr_target_weixin_sha256 = ""
@@ -1305,16 +1182,8 @@ def _load_native_core_build_manifest(
         native_asr_target_wechat_version=native_asr_target_wechat_version,
         native_asr_target_weixin_sha256=native_asr_target_weixin_sha256,
         read_only_build=read_only_build,
-        macos_client_signer_sha256=macos_client_signer_digest,
-        macos_broker_signer_sha256=macos_broker_signer_digest,
-        macos_host_signer_sha256=macos_host_signer_digest,
-        macos_private_root_sha256=macos_private_root_digest,
-        macos_client_signing_identifier=macos_client_identifier,
-        macos_broker_signing_identifier=macos_broker_identifier,
-        macos_host_signing_identifier=macos_host_identifier,
         source_runtime=source_runtime,
         windows_host_verification=windows_host_verification,
-        macos_host_verification=macos_host_verification,
     )
 
 
@@ -1333,33 +1202,6 @@ def _required_native_core_build_manifest(
             "wechatdb native build manifest does not match the current platform."
         )
     frozen = bool(getattr(sys, "frozen", False))
-    if manifest.platform == "macos":
-        if (
-            frozen
-            and _is_production_native_core_build_manifest(manifest)
-            and not manifest.source_runtime
-        ):
-            from .native_core_lease import validate_native_core_authorization_policy
-
-            validate_native_core_authorization_policy(manifest)
-            return manifest
-        if not frozen and _is_source_public_native_core_build_manifest(manifest):
-            from .native_core_lease import validate_native_core_authorization_policy
-
-            validate_native_core_authorization_policy(manifest)
-            return manifest
-        if frozen and manifest.source_runtime:
-            raise NativeCoreProtocolError(
-                "Frozen WeChatDataAnalysis rejects the source-public macOS native core."
-            )
-        if not frozen:
-            raise NativeCoreProtocolError(
-                "Source WeChatDataAnalysis on macOS requires the exact restricted "
-                "source-public native core."
-            )
-        raise NativeCoreProtocolError(
-            "Frozen WeChatDataAnalysis requires a production wechatdb native core."
-        )
     if frozen and _is_production_native_core_build_manifest(manifest):
         from .native_core_lease import validate_native_core_authorization_policy
 
@@ -1488,8 +1330,6 @@ def _is_source_public_native_core_build_manifest(
         manifest
     ):
         return False
-    if manifest.platform == "macos":
-        return manifest.macos_host_verification == "same-user-direct-parent"
     return (
         manifest.platform == "windows"
         and manifest.windows_host_verification == "same-user-direct-parent"
@@ -1501,9 +1341,7 @@ def _manifest_matches_runtime_platform(
     runtime_platform: str | None = None,
 ) -> bool:
     current = sys.platform if runtime_platform is None else runtime_platform
-    return (current.startswith("win") and manifest.platform == "windows") or (
-        current == "darwin" and manifest.platform == "macos"
-    )
+    return current.startswith("win") and manifest.platform == "windows"
 
 
 def _verify_native_core_runtime_build_id(
@@ -1532,9 +1370,7 @@ def _verify_native_core_component_build_ids(
 def _native_library_name() -> str:
     if sys.platform.startswith("win"):
         return "wechatdb_client.dll"
-    if sys.platform == "darwin":
-        return "libwechatdb_client.dylib"
-    raise NativeCoreComponentMissingError("wechatdb native core supports Windows and macOS only.")
+    raise NativeCoreComponentMissingError("wechatdb native core supports Windows only.")
 
 
 def _candidate_library_paths() -> tuple[Path, ...]:
@@ -1554,11 +1390,9 @@ def _candidate_library_paths() -> tuple[Path, ...]:
     candidates.extend(
         (
             package_dir / "native" / file_name,
-            package_dir / "native" / "macos" / arch / file_name,
             repo_root.parent / "wechatdb-native" / "build" / "windows-vs" / "Release" / file_name,
             repo_root.parent / "wechatdb-native" / "build" / "windows-vs" / "Debug" / file_name,
             repo_root.parent / "wechatdb-native" / "build" / "windows-msvc-debug" / file_name,
-            repo_root.parent / "wechatdb-native" / "build" / "macos-arm64-debug" / file_name,
         )
     )
 
@@ -1589,17 +1423,15 @@ def resolve_native_core_library() -> Path:
 def _native_core_broker_name() -> str:
     if sys.platform.startswith("win"):
         return "wechatdb_broker.exe"
-    if sys.platform == "darwin":
-        return "wechatdb_broker"
     raise NativeCoreComponentMissingError(
-        "wechatdb native broker supports Windows and macOS only."
+        "wechatdb native broker supports Windows only."
     )
 
 
 def _native_core_entrypoint_directory() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent / "native"
-    if sys.platform in {"darwin", "win32"}:
+    if sys.platform == "win32":
         configured = str(os.environ.get(ENV_SOURCE_NATIVE_CORE_DIR, "") or "").strip()
         if configured:
             try:

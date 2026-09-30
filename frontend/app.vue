@@ -38,22 +38,6 @@
       @close="dismissNoAccountGuide"
     />
 
-    <ClientOnly v-if="isDesktopUpdater && route.path !== '/agreement'">
-      <DesktopUpdateDialog
-        :open="desktopUpdate.open.value"
-        :info="desktopUpdate.info.value"
-        :is-downloading="desktopUpdate.isDownloading.value"
-        :ready-to-install="desktopUpdate.readyToInstall.value"
-        :progress="desktopUpdate.progress.value"
-        :error="desktopUpdate.error.value"
-        :has-ignore="true"
-        @close="desktopUpdate.dismiss"
-        @update="desktopUpdate.startUpdate"
-        @install="desktopUpdate.installUpdate"
-        @ignore="desktopUpdate.ignore"
-      />
-    </ClientOnly>
-
     <div
       v-if="!firstUseRouteResolved"
       class="first-use-route-guard"
@@ -78,7 +62,6 @@ import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
 const route = useRoute()
-const desktopUpdate = useDesktopUpdate()
 const {
   open: settingsDialogOpen,
   focusTarget: settingsDialogFocusTarget,
@@ -166,20 +149,7 @@ if (process.client) {
 // server HTML (no patch) and the layout/CSS fixes won't apply reliably.
 // So we detect desktop onMounted and update reactively.
 const isDesktop = ref(false)
-const isDesktopUpdater = ref(false)
-let desktopUpdaterInitialized = false
 let postAgreementRuntimeInitialized = false
-
-const initializeDesktopUpdater = async () => {
-  if (
-    desktopUpdaterInitialized
-    || !isDesktopUpdater.value
-    || route.path === '/agreement'
-    || !isFirstUseAgreementAccepted()
-  ) return
-  desktopUpdaterInitialized = true
-  await desktopUpdate.initListeners()
-}
 
 const initializePostAgreementRuntime = () => {
   if (
@@ -231,16 +201,9 @@ onMounted(async () => {
   const isElectron = /electron/i.test(String(navigator.userAgent || ''))
   const api = window?.wechatDesktop
   isDesktop.value = isElectron && !!api
-  const brandOk = !api?.__brand || api.__brand === 'WeChatDataAnalysisDesktop'
-  isDesktopUpdater.value =
-    isDesktop.value &&
-    brandOk &&
-    typeof api?.checkForUpdates === 'function' &&
-    typeof api?.downloadAndInstall === 'function'
   updateDprVar()
   window.addEventListener('resize', updateDprVar)
 
-  void initializeDesktopUpdater()
   initializePostAgreementRuntime()
 
   await nextTick()
@@ -254,7 +217,6 @@ onBeforeUnmount(() => {
 
 watch(() => route.path, () => {
   void enforceFirstUseRoute()
-  void initializeDesktopUpdater()
   initializePostAgreementRuntime()
 })
 

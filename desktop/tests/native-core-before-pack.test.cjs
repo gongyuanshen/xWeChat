@@ -7,7 +7,6 @@ const path = require("path");
 
 const { nativeCoreArtifactNames } = require("../scripts/build-backend.cjs");
 const {
-  stageMacosPrivatePkiEvidence,
   stageWindowsPrivatePkiEvidence,
   validatePackagedBackend,
 } = require("../scripts/native-core-before-pack.cjs");
@@ -81,14 +80,12 @@ function makeBackend(
 }
 
 test("beforePack accepts a complete production backend trio", () => {
-  for (const platform of ["win32", "darwin"]) {
-    const backendDir = makeBackend(platform);
-    try {
-      const result = validatePackagedBackend({ backendDir, platform });
-      assert.equal(result.manifest.buildId, PRODUCTION_MANIFEST.buildId);
-    } finally {
-      fs.rmSync(backendDir, { recursive: true, force: true });
-    }
+  const backendDir = makeBackend("win32");
+  try {
+    const result = validatePackagedBackend({ backendDir, platform: "win32" });
+    assert.equal(result.manifest.buildId, PRODUCTION_MANIFEST.buildId);
+  } finally {
+    fs.rmSync(backendDir, { recursive: true, force: true });
   }
 });
 
@@ -186,30 +183,12 @@ test("beforePack rejects stale legacy WCDB files and partial trios", () => {
   }
 });
 
-test("beforePack rejects the retired macOS WCDB bridge", () => {
-  const backendDir = makeBackend("darwin");
-  const legacy = path.join(backendDir, "native", "macos", "arm64", "libwcdb_api.dylib");
+test("beforePack rejects non-win32 platforms", () => {
+  const backendDir = makeBackend("win32");
   try {
-    fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    fs.writeFileSync(legacy, "legacy");
     assert.throws(
       () => validatePackagedBackend({ backendDir, platform: "darwin" }),
-      /Legacy WCDB runtime must not be packaged: .*libwcdb_api\.dylib/
-    );
-  } finally {
-    fs.rmSync(backendDir, { recursive: true, force: true });
-  }
-});
-
-test("beforePack rejects the retired macOS WCDB dynamic library", () => {
-  const backendDir = makeBackend("darwin");
-  const legacy = path.join(backendDir, "native", "macos", "universal", "libWCDB.dylib");
-  try {
-    fs.mkdirSync(path.dirname(legacy), { recursive: true });
-    fs.writeFileSync(legacy, "legacy");
-    assert.throws(
-      () => validatePackagedBackend({ backendDir, platform: "darwin" }),
-      /Legacy WCDB runtime must not be packaged: .*libWCDB\.dylib/
+      /unsupported on platform: darwin/
     );
   } finally {
     fs.rmSync(backendDir, { recursive: true, force: true });
@@ -241,61 +220,7 @@ test("beforePack stages only the pinned public root and verifier", () => {
   }
 });
 
-test("beforePack stages only the pinned macOS public root", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-macos-signing-evidence-"));
-  const rootCertificate = path.join(root, "root.cer");
-  const signingDir = path.join(root, "staged");
-  fs.writeFileSync(rootCertificate, "DER macOS public root fixture");
-  const rootPin = crypto.createHash("sha256").update(fs.readFileSync(rootCertificate)).digest("hex");
-  try {
-    const result = stageMacosPrivatePkiEvidence({
-      env: {
-        WCE_MACOS_PRIVATE_ROOT_CERT_PATH: rootCertificate,
-        WCE_NATIVE_CORE_PRIVATE_ROOT_SHA256: rootPin,
-      },
-      manifest: {
-        ...PRODUCTION_MANIFEST,
-        macosSigningMode: "self-signed",
-        macosSignerTrustMode: "private-pki",
-        macosPrivateRootSha256: rootPin,
-      },
-      signingDir,
-    });
-    assert.equal(result.rootSha256, rootPin.toUpperCase());
-    assert.deepEqual(fs.readdirSync(signingDir), ["macos-private-pki-root.cer"]);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
 
-test("beforePack removes stale cross-platform signing evidence", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-macos-signing-clean-"));
-  const rootCertificate = path.join(root, "root.cer");
-  const signingDir = path.join(root, "staged");
-  fs.mkdirSync(signingDir, { recursive: true });
-  fs.writeFileSync(rootCertificate, "DER macOS public root fixture");
-  fs.writeFileSync(path.join(signingDir, "windows-private-pki-root.cer"), "stale");
-  fs.writeFileSync(path.join(signingDir, "windows-private-pki.ps1"), "stale");
-  const rootPin = crypto.createHash("sha256").update(fs.readFileSync(rootCertificate)).digest("hex");
-  try {
-    stageMacosPrivatePkiEvidence({
-      env: {
-        WCE_MACOS_PRIVATE_ROOT_CERT_PATH: rootCertificate,
-        WCE_NATIVE_CORE_PRIVATE_ROOT_SHA256: rootPin,
-      },
-      manifest: {
-        ...PRODUCTION_MANIFEST,
-        macosSigningMode: "self-signed",
-        macosSignerTrustMode: "private-pki",
-        macosPrivateRootSha256: rootPin,
-      },
-      signingDir,
-    });
-    assert.deepEqual(fs.readdirSync(signingDir), ["macos-private-pki-root.cer"]);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
 
 test("beforePack rejects a root certificate outside the native trust domain", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-signing-mismatch-"));

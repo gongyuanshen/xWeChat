@@ -7,7 +7,6 @@ on:
       - 'desktop/**'
       - '.github/workflows/installer-unicode.yml'
       - '.github/workflows/release.yml'
-      - '.github/workflows/macos-private-build.yml'
       - 'tools/rebuild_wcdb_release.py'
       - '.gitattributes'
   push:
@@ -16,7 +15,6 @@ on:
       - 'desktop/**'
       - '.github/workflows/installer-unicode.yml'
       - '.github/workflows/release.yml'
-      - '.github/workflows/macos-private-build.yml'
       - 'tools/rebuild_wcdb_release.py'
       - '.gitattributes'
 
@@ -53,7 +51,6 @@ jobs:
         run: |
           node --test `
             tests/package-config.test.cjs `
-            tests/macos-xkey-signing.test.cjs `
             tests/desktop-settings.test.cjs `
             tests/output-dir.test.cjs `
             tests/installer-output-dir.test.cjs `

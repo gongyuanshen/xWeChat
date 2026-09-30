@@ -25,8 +25,6 @@ _MAX_CREDENTIAL_BYTES = 4096
 _LEASE_BYTES = 224
 _LEGACY_ENTROPY_DOMAIN = b"WeChatDataAnalysis/native-core/device-credential/v1\0"
 _ENTROPY_DOMAIN = b"WeChatDataAnalysis/native-core/device-credential/v2\0"
-_MACOS_KEYCHAIN_MAGIC = b"WCEKC002"
-_MACOS_KEYCHAIN_SERVICE = "com.lifearchive.wechatdataanalysis.native-core-credential.v2"
 
 CredentialTransform = Callable[[bytes, bytes], bytes]
 BytesLike = bytes | bytearray | memoryview
@@ -204,97 +202,27 @@ def _parse_record(plaintext: bytes, *, expected_schema: int) -> StoredDeviceCred
 
 
 def _protect_current_user(payload: bytes, entropy: bytes) -> bytes:
-    if sys.platform == "darwin":
-        account_digest = hashlib.sha256(
-            _ENTROPY_DOMAIN + b"macos-keychain\0" + entropy
-        ).digest()
-        account = base64.urlsafe_b64encode(account_digest).rstrip(b"=").decode("ascii")
-        encoded = base64.b64encode(payload).decode("ascii")
-        result = subprocess.run(
-            [
-                "/usr/bin/security",
-                "add-generic-password",
-                "-U",
-                "-a",
-                account,
-                "-s",
-                _MACOS_KEYCHAIN_SERVICE,
-                "-w",
-                encoded,
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise NativeCoreUnavailableError(
-                "Cannot store the native core device credential in macOS Keychain."
-            )
-        return _MACOS_KEYCHAIN_MAGIC + account_digest
     if os.name == "nt":
         from .native_core_raw_key_cache import _dpapi_transform
 
         return _dpapi_transform(payload, entropy=entropy, protect=True)
     raise NativeCoreUnavailableError(
-        "Native core device credentials require Windows DPAPI or macOS Keychain."
+        "Native core device credentials require Windows DPAPI."
     )
 
 
 def _unprotect_current_user(payload: bytes, entropy: bytes) -> bytes:
-    if sys.platform == "darwin":
-        account_digest = hashlib.sha256(
-            _ENTROPY_DOMAIN + b"macos-keychain\0" + entropy
-        ).digest()
-        if (
-            len(payload) != len(_MACOS_KEYCHAIN_MAGIC) + len(account_digest)
-            or not payload.startswith(_MACOS_KEYCHAIN_MAGIC)
-            or not hmac.compare_digest(payload[len(_MACOS_KEYCHAIN_MAGIC) :], account_digest)
-        ):
-            raise NativeCoreProtocolError(
-                "Native core macOS Keychain credential binding is invalid."
-            )
-        account = base64.urlsafe_b64encode(account_digest).rstrip(b"=").decode("ascii")
-        result = subprocess.run(
-            [
-                "/usr/bin/security",
-                "find-generic-password",
-                "-a",
-                account,
-                "-s",
-                _MACOS_KEYCHAIN_SERVICE,
-                "-w",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise NativeCoreProtocolError(
-                "Native core device credential is missing from macOS Keychain."
-            )
-        try:
-            encoded = result.stdout.strip().encode("ascii")
-            decoded = base64.b64decode(encoded, validate=True)
-        except (UnicodeEncodeError, ValueError) as exc:
-            raise NativeCoreProtocolError(
-                "Native core macOS Keychain credential is invalid."
-            ) from exc
-        if base64.b64encode(decoded) != encoded:
-            raise NativeCoreProtocolError(
-                "Native core macOS Keychain credential is not canonical."
-            )
-        return decoded
     if os.name == "nt":
         from .native_core_raw_key_cache import _dpapi_transform
 
         return _dpapi_transform(payload, entropy=entropy, protect=False)
     raise NativeCoreUnavailableError(
-        "Native core device credentials require Windows DPAPI or macOS Keychain."
+        "Native core device credentials require Windows DPAPI."
     )
 
 
 class DeviceCredentialStore:
-    """Persist a signed lease with CurrentUser DPAPI or the login Keychain."""
+    """Persist a signed lease with CurrentUser DPAPI."""
 
     def __init__(
         self,
@@ -435,40 +363,6 @@ class DeviceCredentialStore:
             ) from exc
 
     def delete(self) -> None:
-        if self._protect is _protect_current_user and sys.platform == "darwin":
-            try:
-                encoded = self._path.read_bytes()
-            except FileNotFoundError:
-                encoded = b""
-            except OSError as exc:
-                raise NativeCoreUnavailableError(
-                    "Cannot read the native core device credential."
-                ) from exc
-            protected = encoded[len(_FILE_MAGIC) :] if encoded.startswith(_FILE_MAGIC) else b""
-            if (
-                len(protected) == len(_MACOS_KEYCHAIN_MAGIC) + 32
-                and protected.startswith(_MACOS_KEYCHAIN_MAGIC)
-            ):
-                account = base64.urlsafe_b64encode(
-                    protected[len(_MACOS_KEYCHAIN_MAGIC) :]
-                ).rstrip(b"=").decode("ascii")
-                result = subprocess.run(
-                    [
-                        "/usr/bin/security",
-                        "delete-generic-password",
-                        "-a",
-                        account,
-                        "-s",
-                        _MACOS_KEYCHAIN_SERVICE,
-                    ],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode not in {0, 44}:
-                    raise NativeCoreUnavailableError(
-                        "Cannot remove the native core device credential from macOS Keychain."
-                    )
         try:
             self._path.unlink(missing_ok=True)
         except OSError as exc:

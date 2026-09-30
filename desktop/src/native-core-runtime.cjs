@@ -25,9 +25,6 @@ function nativeCoreArtifactNames(platform = process.platform) {
   if (platform === "win32") {
     return ["wechatdb_client.dll", "wechatdb_broker.exe", NATIVE_CORE_MANIFEST];
   }
-  if (platform === "darwin") {
-    return ["libwechatdb_client.dylib", "wechatdb_broker", NATIVE_CORE_MANIFEST];
-  }
   return [];
 }
 
@@ -57,8 +54,8 @@ function hasCompleteNativeCore(nativeDir, platform = process.platform, fsImpl = 
 
 function hasValidManifestIdentity(manifest) {
   return (
-    ((manifest?.schemaVersion === 2 && !Object.prototype.hasOwnProperty.call(manifest, "platform")) ||
-      (manifest?.schemaVersion === 3 && manifest?.platform === "macos")) &&
+    manifest?.schemaVersion === 2 &&
+    !Object.prototype.hasOwnProperty.call(manifest, "platform") &&
     typeof manifest?.buildId === "string" &&
     BUILD_ID_PATTERN.test(manifest.buildId)
   );
@@ -98,13 +95,6 @@ function hasNoDistributionCapsule(manifest) {
 }
 
 function hasExpectedLeafRevocation(manifest) {
-  if (manifest?.schemaVersion === 3) {
-    const expected =
-      manifest?.macosSignerTrustMode === "private-pki"
-        ? "build-and-lease-only"
-        : "not-applicable";
-    return manifest?.macosPrivatePkiLeafRevocation === expected;
-  }
   const expected =
     manifest?.windowsSignerTrustMode === "private-pki"
       ? "build-and-lease-only"
@@ -119,10 +109,9 @@ function isProductionNativeCoreManifestBase(manifest, options = {}) {
     manifest.distributionMode === "public" &&
     hasNoDistributionCapsule(manifest) &&
     !NON_PRODUCTION_BUILD_ID_PATTERN.test(manifest.buildId) &&
-    (manifest.schemaVersion !== 2 ||
-      (manifest.readOnlyBuild === true &&
-        Array.isArray(manifest.wechatActions) &&
-        manifest.wechatActions.length === 0)) &&
+    manifest.readOnlyBuild === true &&
+    Array.isArray(manifest.wechatActions) &&
+    manifest.wechatActions.length === 0 &&
     manifest.developmentBuild === false &&
     manifest.offlineBootstrapFeatureBits === 3 &&
     manifest.offlineExportSealFormat === "WES2" &&
@@ -133,29 +122,6 @@ function isProductionNativeCoreManifestBase(manifest, options = {}) {
     hasCurrentSecurityContract(manifest)
   );
   if (!common) return false;
-  if (manifest.schemaVersion === 3) {
-    const identifiers = [
-      manifest.macosClientSigningIdentifier,
-      manifest.macosBrokerSigningIdentifier,
-      manifest.macosHostSigningIdentifier,
-    ];
-    const pins = [
-      manifest.macosClientSignerSha256,
-      manifest.macosBrokerSignerSha256,
-      manifest.macosHostSignerSha256,
-      manifest.macosPrivateRootSha256,
-    ];
-    return (
-      manifest.platform === "macos" &&
-      manifest.macosSigningMode === "self-signed" &&
-      manifest.macosSignerTrustMode === "private-pki" &&
-      hasExpectedLeafRevocation(manifest) &&
-      identifiers.every((value) => /^[A-Za-z0-9.-]+$/.test(String(value || ""))) &&
-      new Set(identifiers).size === 3 &&
-      pins.every(isNonZeroSha256) &&
-      new Set(pins.map((value) => String(value).toLowerCase())).size === 4
-    );
-  }
   return (
     isNonZeroSha256(manifest.windowsClientSignerSha256) &&
     isNonZeroSha256(manifest.windowsBrokerSignerSha256) &&
@@ -173,7 +139,6 @@ function isProductionNativeCoreManifestBase(manifest, options = {}) {
 function hasSourceRuntimeFields(manifest) {
   return (
     Object.prototype.hasOwnProperty.call(manifest || {}, "sourceRuntime") ||
-    Object.prototype.hasOwnProperty.call(manifest || {}, "macosHostVerification") ||
     Object.prototype.hasOwnProperty.call(manifest || {}, "windowsHostVerification")
   );
 }
@@ -192,9 +157,6 @@ function isSourcePublicNativeCoreManifest(manifest, options = {}) {
   ) {
     return false;
   }
-  if (manifest.schemaVersion === 3) {
-    return manifest.macosHostVerification === "same-user-direct-parent";
-  }
   return (
     manifest.schemaVersion === 2 &&
     manifest.windowsHostVerification === "same-user-direct-parent"
@@ -207,10 +169,9 @@ function isDevelopmentNativeCoreManifest(manifest) {
     manifest.distributionMode === "public" &&
     hasNoDistributionCapsule(manifest) &&
     manifest.buildId === "dev-local" &&
-    (manifest.schemaVersion !== 2 ||
-      (manifest.readOnlyBuild === true &&
-        Array.isArray(manifest.wechatActions) &&
-        manifest.wechatActions.length === 0)) &&
+    manifest.readOnlyBuild === true &&
+    Array.isArray(manifest.wechatActions) &&
+    manifest.wechatActions.length === 0 &&
     manifest.developmentBuild === true &&
     manifest.offlineBootstrapFeatureBits === 0 &&
     manifest.offlineExportSealFormat === "none" &&
@@ -221,36 +182,11 @@ function isDevelopmentNativeCoreManifest(manifest) {
     hasCurrentSecurityContract(manifest)
   );
   if (!common) return false;
-  if (manifest.schemaVersion === 3) {
-    const identifiers = [
-      manifest.macosClientSigningIdentifier,
-      manifest.macosBrokerSigningIdentifier,
-      manifest.macosHostSigningIdentifier,
-    ];
-    const pins = [
-      manifest.macosClientSignerSha256,
-      manifest.macosBrokerSignerSha256,
-      manifest.macosHostSignerSha256,
-      manifest.macosPrivateRootSha256,
-    ];
-    return (
-      manifest.platform === "macos" &&
-      manifest.macosSigningMode === "self-signed" &&
-      manifest.macosSignerTrustMode === "development" &&
-      hasExpectedLeafRevocation(manifest) &&
-      identifiers.every((value) => /^[A-Za-z0-9.-]+$/.test(String(value || ""))) &&
-      new Set(identifiers).size === 3 &&
-      pins.every((value) => String(value || "") === "0".repeat(64))
-    );
-  }
   return manifest.windowsSignerTrustMode === "public" && hasExpectedLeafRevocation(manifest);
 }
 
 function manifestMatchesPlatform(manifest, platform) {
-  return (
-    (platform === "win32" && manifest?.schemaVersion === 2) ||
-    (platform === "darwin" && manifest?.schemaVersion === 3 && manifest?.platform === "macos")
-  );
+  return platform === "win32" && manifest?.schemaVersion === 2;
 }
 
 function resolveNativeCoreRuntimePolicy({
@@ -294,12 +230,7 @@ function resolveNativeCoreRuntimePolicy({
   if (isPackaged && !production) {
     throw new Error("Packaged WeChatDataAnalysis requires an approved production wechatdb native core");
   }
-  if (!isPackaged && platform === "darwin" && !sourcePublic) {
-    throw new Error(
-      "Source WeChatDataAnalysis on macOS requires the exact restricted source-public wechatdb native core"
-    );
-  }
-  if (!isPackaged && platform !== "darwin" && !sourcePublic && !development) {
+  if (!isPackaged && !sourcePublic && !development) {
     throw new Error(
       "Source WeChatDataAnalysis on Windows requires the exact restricted source-public or dev-local wechatdb native core"
     );

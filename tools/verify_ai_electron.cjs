@@ -141,7 +141,7 @@ async function main() {
       assert.ok(copiedText.length > 10, '桌面剪贴板应包含实际回答')
       const fixtureInput = page.getByLabel('给 AI 助手的消息')
       await fixtureInput.fill('')
-      await fixtureInput.press(process.platform === 'darwin' ? 'Meta+V' : 'Control+V')
+      await fixtureInput.press('Control+V')
       assert.equal(await fixtureInput.inputValue(), copiedText)
       result.native_clipboard = { matched: true, characters: copiedText.length }
       await capture('electron-answer-copy-paste')

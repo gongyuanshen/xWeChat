@@ -39,8 +39,7 @@ const scopeChats=[
   ...Array.from({length:636},(_,i)=>({username:`person-${i}`,name:personNames[i] || `个人聊天示例 ${i+1}`,isGroup:false})),
 ]
 if(scopePreview)config.usernames=[...scopeChats.slice(0,128).filter((_,i)=>i!==4 && i!==127).map(c=>c.username),...scopeChats.slice(128).filter((_,i)=>[0,2,5,6,7,8,9,10,11,12,13,14].includes(i)).map(c=>c.username)]
-const mac=navigator.userAgent.includes('Mac')
-const gpu={supported:!mac,platform:mac?'darwin':'win32',size:1671874915,installed:false,job:null}
+const gpu={supported:true,platform:'win32',size:1671874915,installed:false,job:null}
 let gpuTimer
 globalThis.useAiApi=()=>({request:async(path,options={})=>{
   if(path.startsWith('/local-search/status'))return JSON.parse(JSON.stringify({config,models,jobs,index_stats:indexStats,message_total:messageTotal,device:{actual_device:'cpu'},gpu,audit:[]}))

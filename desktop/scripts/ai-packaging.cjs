@@ -10,7 +10,7 @@ function aiPackagingArgs(root, platform = process.platform) {
     'onnxruntime', 'tokenizers', 'sqlite_vec', 'huggingface_hub'];
   const args = packages.flatMap(name => ['--collect-all', name]);
   for (const name of ['local_search_models.json', 'local_search_gpu.json']) {
-    args.push('--add-data', `${path.join(root, 'src/wechat_decrypt_tool/resources', name)}${platform === 'win32' ? ';' : ':'}wechat_decrypt_tool/resources`);
+    args.push('--add-data', `${path.join(root, 'src/wechat_decrypt_tool/resources', name)};wechat_decrypt_tool/resources`);
   }
   args.push('--collect-submodules', 'tiktoken_ext', '--hidden-import', 'langgraph.checkpoint.sqlite.aio');
   return args;

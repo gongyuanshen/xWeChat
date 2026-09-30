@@ -143,7 +143,7 @@
             </button>
           </div>
 
-          <div v-if="!isMacos" class="rounded-lg border border-[#DDEBE0] bg-[#F4FAF6]/82 p-4 backdrop-blur sm:p-5">
+          <div class="rounded-lg border border-[#DDEBE0] bg-[#F4FAF6]/82 p-4 backdrop-blur sm:p-5">
             <label for="wechatInstallPath" class="block text-[15px] font-medium text-[#000000e6]">
               微信安装目录
             </label>
@@ -313,8 +313,7 @@ const detectionResult = ref(null)
 const customPath = ref('')
 const wechatInstallPath = ref('')
 const isPickingWechatInstallPath = ref(false)
-const platformCapabilities = ref({ platform: '' })
-const isMacos = computed(() => platformCapabilities.value?.platform === 'macos')
+const platformCapabilities = ref({ platform: 'windows' })
 const STORAGE_KEY = 'wechat_data_root_path'
 const guideMode = ref('')
 const guideOpen = computed(() => !!guideMode.value)
@@ -616,7 +615,7 @@ onMounted(async () => {
       platformCapabilities.value = await getPlatformCapabilities()
     } catch {
       platformCapabilities.value = {
-        platform: /Macintosh|Mac OS X/i.test(String(navigator.userAgent || '')) ? 'macos' : 'windows'
+        platform: 'windows'
       }
     }
   }

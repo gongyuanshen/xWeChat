@@ -9,7 +9,6 @@ const path = require("node:path");
 
 const {
   POLICY_SHA256,
-  configurePrivatePkiUpdateVerification,
   ensurePrivatePkiIssuerCached,
   resolvePrivatePkiRuntime,
   verifyPrivatePkiExecutable,
@@ -115,34 +114,4 @@ test("packaged update verifier rejects modified root and policy evidence", (t) =
   const second = makeRuntime(t);
   fs.appendFileSync(path.join(second.resources, "signing", "windows-private-pki.ps1"), "# tampered");
   assert.throws(() => resolvePrivatePkiRuntime(second.resources), /policy was modified/);
-});
-
-test("electron-updater uses the private-PKI callback only in packaged Windows", async () => {
-  const updater = {};
-  assert.equal(
-    configurePrivatePkiUpdateVerification(updater, { isPackaged: false, platform: "win32" }),
-    false
-  );
-  assert.equal(
-    configurePrivatePkiUpdateVerification(updater, {
-      isPackaged: true,
-      platform: "win32",
-      resourcesPath: "C:\\resources",
-      verifier(filePath, options) {
-        assert.equal(filePath, "C:\\download\\Setup.exe");
-        assert.equal(options.resourcesPath, "C:\\resources");
-      },
-    }),
-    true
-  );
-  assert.equal(await updater.verifyUpdateCodeSignature([], "C:\\download\\Setup.exe"), null);
-
-  configurePrivatePkiUpdateVerification(updater, {
-    isPackaged: true,
-    platform: "win32",
-    verifier() {
-      throw new Error("bad signer");
-    },
-  });
-  assert.match(await updater.verifyUpdateCodeSignature([], "bad.exe"), /bad signer/);
 });

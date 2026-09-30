@@ -123,10 +123,6 @@ def _open_path_with_default_app(path: Path) -> None:
         opener(target)
         return
 
-    if sys.platform == "darwin":
-        subprocess.Popen(["open", target])
-        return
-
     subprocess.Popen(["xdg-open", target])
 
 

@@ -1,4 +1,4 @@
-"""打包当前工作区源码与锁文件，生成双平台可核对的同版本清单，不包含账号或密钥。"""
+"""打包当前工作区源码与锁文件，生成平台可核对的同版本清单，不包含账号或密钥。"""
 import argparse
 import hashlib
 import json
@@ -35,7 +35,7 @@ def main():
     manifest = {'created_utc': datetime.now(timezone.utc).isoformat(),
                 'head': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip(),
                 # 打包本身不读取验收环境，不能把尚未核实的真实调用数写成零。
-                'working_tree': True, 'files': {}, 'verification': {'windows': 'pending', 'macos': 'pending', 'real_model_calls': None}}
+                'working_tree': True, 'files': {}, 'verification': {'windows': 'pending', 'real_model_calls': None}}
     with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED) as bundle:
         for name, full in files():
             data = full.read_bytes()

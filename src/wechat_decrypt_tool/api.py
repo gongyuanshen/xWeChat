@@ -54,7 +54,6 @@ from .wcdb_realtime import WCDB_REALTIME, shutdown as _wcdb_shutdown
 from .img_helper import IMG_HELPER
 from .routers.biz import router as _biz_router
 from .routers.system import router as _system_router
-from .routers.cdn import router as _cdn_router
 
 app = FastAPI(
     title="微信数据库解密工具",
@@ -159,7 +158,6 @@ app.include_router(_general_router)
 app.include_router(_favorites_router)
 app.include_router(_record_export_router)
 app.include_router(_system_router)
-app.include_router(_cdn_router)
 from .routers import chat_send as _chat_send_router
 app.include_router(_chat_send_router.router, prefix="/api", tags=["chat_send"])
 
@@ -200,7 +198,8 @@ class _SPAStaticFiles(StaticFiles):
 
     @staticmethod
     def _normalize_path(path: str) -> str:
-        return str(path or "").strip().lstrip("/")
+        # Starlette supplies filesystem paths using the host OS separator.
+        return str(path or "").replace(os.sep, "/").strip().lstrip("/")
 
     @classmethod
     def _is_shell_path(cls, path: str) -> bool:
@@ -232,7 +231,8 @@ class _SPAStaticFiles(StaticFiles):
                 response.headers["content-type"] = content_type
             return self._apply_cache_headers(normalized, response)
         except StarletteHTTPException as exc:
-            if exc.status_code != 404:
+            # Missing API endpoints must remain errors, not a successful HTML page.
+            if exc.status_code != 404 or normalized == "api" or normalized.startswith("api/"):
                 raise
 
             # For client-side routes (no file extension), return Nuxt's SPA fallback.

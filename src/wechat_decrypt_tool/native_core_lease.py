@@ -47,7 +47,6 @@ ENV_LICENSE_TIMEOUT_SECONDS = "WECHAT_TOOL_NATIVE_CORE_LICENSE_TIMEOUT_SECONDS"
 DEFAULT_PRODUCTION_LICENSE_URL = "https://license.fqyw.love/v1/leases"
 _PRODUCTION_APP_IDS = {
     "windows": "wechat-data-analysis.windows",
-    "macos": "wechat-data-analysis.macos",
 }
 _LICENSE_PROTOCOL_VERSION = 2
 _MAX_RESPONSE_BYTES = 64 * 1024

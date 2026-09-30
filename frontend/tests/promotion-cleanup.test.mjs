@@ -16,12 +16,27 @@ test('应用源码无推广入口、演示钩子和官网演示依赖', () => {
     }
   }
 })
-test('媒体设置挂载于设置页，保留原图开关和真实接口', () => {
+test('设置和请求层不再暴露原项目媒体服务与更新入口', () => {
   const settings = readFileSync(new URL('components/SettingsDialog.vue', root), 'utf8')
-  assert.match(settings, /<MediaDownloadSettings :account="keySelectedAccount"/)
-  assert.match(settings, /@click="toggleCdnImage"/)
+  for (const symbol of ['MediaDownloadSettings', 'toggleCdnImage', 'useDesktopUpdate']) {
+    assert.equal(settings.includes(symbol), false, `设置页仍包含 ${symbol}`)
+  }
   const api = readFileSync(new URL('composables/useApi.js', root), 'utf8')
-  for (const route of ['/cdn/plan', '/cdn/connect', '/cdn/redeem']) assert.ok(api.includes(route))
+  for (const route of ['/cdn/plan', '/cdn/connect', '/cdn/redeem', '/system/cdn_image']) {
+    assert.equal(api.includes(route), false, `请求层仍包含 ${route}`)
+  }
+})
+
+test('桌面入口没有原项目更新请求或安装通道', () => {
+  for (const file of ['../desktop/src/main.cjs', '../desktop/src/preload.cjs', 'app.vue']) {
+    const text = readFileSync(new URL(file, root), 'utf8')
+    for (const symbol of ['autoUpdater', 'checkForUpdates', 'downloadAndInstall', 'installUpdate', 'DesktopUpdateDialog']) {
+      assert.equal(text.includes(symbol), false, `${file} 仍包含 ${symbol}`)
+    }
+  }
+  const pkg = JSON.parse(readFileSync(new URL('../desktop/package.json', root), 'utf8'))
+  assert.equal(pkg.dependencies['electron-updater'], undefined)
+  assert.equal(pkg.build.publish, undefined)
 })
 
 test('清理演示样式后保留公共导航图标及选中态', () => {

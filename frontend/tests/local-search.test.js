@@ -461,15 +461,6 @@ it('模型下载期间禁止离线导入，暂停请求中禁止再次暂停和�
   expect(wrapper.find('.lss-model-actions').findAll('button').find(b=>b.text()==='离线导入').attributes('disabled')).toBeUndefined()
 })
 
-it('macOS 展示 CPU 运行说明，不显示 NVIDIA 选项或组件下载',async()=>{
-  gpu={supported:false,platform:'darwin',size:1000};await open()
-  expect(wrapper.find('.lss-device-panel').text()).toContain('Apple Silicon 与 Intel Mac')
-  expect(button('NVIDIA GPU')).toBeUndefined()
-  expect(button('下载加速组件')).toBeUndefined()
-  expect(button('CPU').attributes('disabled')).toBeUndefined()
-  expect(wrapper.find('.lss-advanced-copy').text()).not.toContain('GPU 加速')
-})
-
 
 it('消息分母固定，进度条按已保存消息占总量计算',async()=>{
   ready();config.enabled=true
