@@ -12,6 +12,7 @@ dependencies = [
     "aiofiles>=23.2.1",
     "typing-extensions>=4.8.0",
     "pywin32>=310; sys_platform == 'win32'",
+    "uiautomation==2.0.29; sys_platform == 'win32'",
     "psutil>=7.0.0",
     "pycryptodome>=3.23.0",
     "requests>=2.32.4",

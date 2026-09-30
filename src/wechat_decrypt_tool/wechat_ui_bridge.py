@@ -236,6 +236,12 @@ class WeChatRateLimiter:
         if rollback_session:
             self._session_cache.pop(session, None)
 
+    def retain_uncertain_message(self, session: str, content: str) -> None:
+        """Start duplicate protection at the uncertain result, not before UI waits."""
+        now = self._clock()
+        self._msg_cache[self.compute_message_key(session, content)] = now
+        self._session_cache[session] = now
+
     def reset(self) -> None:
         """Reset internal caches (for tests and teardown)."""
         self._msg_cache.clear()
@@ -425,7 +431,7 @@ class WeChatBridge:
             return False
 
     def _locate_input_box(self, hwnd: int, session_title: str) -> bool:
-        """Check window hierarchy and verify that an editable input control is ready (Let-it-fail)."""
+        """Legacy native HWND client only; Qt uses WeChatQtUI.locate_input."""
         if not hwnd or not self.win32gui:
             return False
         if not self.win32gui.IsWindow(hwnd):
@@ -745,7 +751,8 @@ class WeChatBridge:
         5. WeChat process & window probe
         6. Client lock & hung verification
         7. Window activation & foreground verification
-        8. Atomic clipboard backup, session switch navigation, input box check, text injection, paste, Alt+S trigger, and restoration
+        8. Qt: exact UIA session selection, draft readback, send and local receipt verification;
+           legacy HWND: clipboard backup, session navigation, paste, Alt+S and restoration
         9. Return SendReceipt with execution timing
         """
         # 1. Centralized Entry Validation (Fail-Fast)
@@ -795,25 +802,24 @@ class WeChatBridge:
                 self.rate_limiter.rollback_message(session, content)
                 raise
 
-            # 10. Atomic clipboard backup, session switch, input check, injection, and send
-            backup = self._backup_clipboard()
-            try:
-                # Switch to session
-                self._switch_to_session(session)
-
-                # Locate input box
-                if not self._locate_input_box(hwnd, session):
-                    raise WeChatInputBoxNotFoundError()
-
-                # Paste content and send
-                self._set_clipboard_text(content)
-                self._trigger_paste()
-                self._trigger_send_shortcut()
-            except (WeChatBridgeError, Exception):
-                self.rate_limiter.rollback_message(session, content)
-                raise
-            finally:
-                self._restore_clipboard(backup)
+            # Explicit Qt adapter; an UIA error must never fall back to blind keys.
+            if self.win32gui.GetClassName(hwnd).lower().startswith("qt"):
+                self._send_qt_message(hwnd, session, content)
+            else:
+                # Legacy native-window client keeps its existing clipboard path.
+                backup = self._backup_clipboard()
+                try:
+                    self._switch_to_session(session)
+                    if not self._locate_input_box(hwnd, session):
+                        raise WeChatInputBoxNotFoundError()
+                    self._set_clipboard_text(content)
+                    self._trigger_paste()
+                    self._trigger_send_shortcut()
+                except Exception:
+                    self.rate_limiter.rollback_message(session, content)
+                    raise
+                finally:
+                    self._restore_clipboard(backup)
 
         duration_ms = round((time.perf_counter() - t_start) * 1000.0, 2)
         return SendReceipt(
@@ -823,3 +829,29 @@ class WeChatBridge:
             duration_ms=duration_ms,
             timestamp=time.time(),
         )
+
+    def _send_qt_message(self, hwnd: int, session: str, content: str) -> None:
+        ui = None
+        try:
+            import uiautomation as auto
+            from .wechat_qt_ui import WeChatQtUI
+
+            with auto.UIAutomationInitializerInThread():
+                ui = WeChatQtUI(hwnd, auto, self.send_timeout_s)
+                ui.send_text(session, content)
+        except Exception as exc:
+            attempted = ui is not None and ui.submission_attempted
+            if not attempted:
+                self.rate_limiter.rollback_message(session, content)
+            else:
+                self.rate_limiter.retain_uncertain_message(session, content)
+            stage = ui.stage if ui is not None else "initialize"
+            logger.exception("WeChat Qt UIA failed: hwnd=%s stage=%s submitted=%s", hwnd, stage, attempted)
+            if isinstance(exc, WeChatBridgeError):
+                raise
+            raise WeChatBridgeError(
+                f"微信 UI Automation 操作失败（阶段: {stage}）；请检查客户端状态和后台异常日志"
+                + ("；发送结果不确定，请勿直接重发" if attempted else ""),
+                code="WECHAT_SEND_UNCONFIRMED" if attempted else "WECHAT_UIA_ERROR",
+                status_code=504 if attempted else 502,
+            ) from exc

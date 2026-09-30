@@ -677,7 +677,9 @@ function main() {
       "--hidden-import",
       "wechat_decrypt_tool.key_v4",
       "--hidden-import",
-      "yara"
+      "yara",
+      "--collect-all",
+      "uiautomation"
     );
   }
   if (integrityNativeBinary) {
