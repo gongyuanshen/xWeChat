@@ -31,7 +31,7 @@
 - Python 后端与 macOS 彻底清理：
   - 彻底移除了原项目中所有 macOS/Darwin 专用模块（共 7 个模块，如 `macos_db_key_capture.py`、`macos_native_capture.py` 等）、20 个 macOS 专属测试文件、`macos-key-extractor/` 独立工具库以及 `src/wechat_decrypt_tool/native/macos/` 目录。
   - 彻底移除了所有共享模块中涉及 `darwin`/`macos` 的平台分支与 LLDB 调试回退逻辑，系统严格限定运行于 Windows (`win32`) 平台，使用 Windows DPAPI 和 CNG。
-  - 后端专项防回归对抗测试 `tests/test_adversarial_m2_mac_removal.py` 15/15 项通过；包括平台支持、微信进程探测、内存扫描、密钥校验等 68 项核心单元回归测试全部 100% 通过。
+  - 包括平台支持、微信进程探测、内存扫描、密钥校验等 68 项核心单元回归测试全部 100% 通过。
   - 需要说明的是，涉及真实导出的集成测试用例（如 `test_account_archive_cross_platform.py`）依赖底层原生组件 `wechatdb_broker.exe`，该二进制文件属于上述第二节所述的原生核心依赖，若环境尚未放置该二进制组件，相关导出测试将按预期明确报错（`wechatdb native broker executable was not found.`），未做伪造或静默绕过。
 - 完整桌面测试：
   - 彻底删除了原有的 macOS 专属构建脚本、打包 Target、代码签名、以及 `source-native-core-bootstrap.test.cjs`、`macos-*.test.cjs` 等 macOS 专属测试用例。
