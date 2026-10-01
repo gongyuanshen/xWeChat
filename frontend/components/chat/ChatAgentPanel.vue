@@ -13,7 +13,7 @@
       <div class="agent-menu-anchor" ref="menuAnchor">
         <button ref="menuTrigger" type="button" aria-label="更多 AI 功能" :aria-expanded="menuOpen" aria-controls="agent-more-menu" @click="menuOpen = !menuOpen"><Ellipsis :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
         <div v-if="menuOpen" id="agent-more-menu" class="agent-menu">
-          <button type="button" aria-label="旧版全局历史" @click="menuOpen = false; legacyHistory = !legacyHistory; navigationOpen = true; loadHistory()"><History :size="16" :stroke-width="1.8" aria-hidden="true" />旧版全局历史</button>
+          <button type="button" aria-label="对话历史" @click="menuOpen = false; showHistory()"><History :size="16" :stroke-width="1.8" aria-hidden="true" />对话历史</button>
           <button type="button" @click="mode = 'agent'; menuOpen = false"><MessageCircleMore :size="16" :stroke-width="1.8" aria-hidden="true" />对话<Check v-if="mode === 'agent'" :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
           <button type="button" @click="mode = 'tools'; menuOpen = false"><Toolbox :size="16" :stroke-width="1.8" aria-hidden="true" />工具与任务<Check v-if="mode === 'tools'" :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
           <button type="button" @click="menuOpen = false; settings.openDialog('ai')"><SlidersHorizontal :size="16" :stroke-width="1.8" aria-hidden="true" />AI 服务设置</button>
@@ -31,7 +31,7 @@
       <p v-if="threadLoading" class="agent-loading" role="status">正在打开对话…</p>
       <AssistantThread :key="thread?.id || selectionKey" :messages="assistantMessages" :running="running" :expanded="expanded" @scroll="onScroll" @ready="onThreadReady">
         <template #welcome>
-        <div v-if="!thread?.messages?.length && !threadLoading" class="agent-welcome"><span class="agent-welcome-symbol"><MessageCircleMore :size="16" :stroke-width="1.8" aria-hidden="true" /></span><h3>想从聊天里了解什么？</h3><p>查找消息、梳理进展，或继续追问。<br>从当前聊天开始，可按需查找其他聊天，回答附上原文出处。</p><button v-for="q in suggestions" :key="q" type="button" :disabled="sending || running || !account || (!contact?.username && !legacyView)" @click="sendSuggestion(q)">{{ q }}<ArrowUp :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
+        <div v-if="!thread?.messages?.length && !threadLoading" class="agent-welcome"><span class="agent-welcome-symbol"><MessageCircleMore :size="16" :stroke-width="1.8" aria-hidden="true" /></span><h3>想从聊天里了解什么？</h3><p>查找消息、梳理进展，或继续追问。<br>从当前聊天开始，可按需查找其他聊天，回答附上原文出处。</p><button v-for="q in suggestions" :key="q" type="button" :disabled="sending || running || !account || !contact?.username" @click="sendSuggestion(q)">{{ q }}<ArrowUp :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
         </template>
         <template #message="{ message }">
           <div v-if="message.role === 'user'" class="agent-user"><p>{{ message.text }}</p></div>
@@ -47,11 +47,11 @@
       <button v-if="newContent" type="button" class="agent-new-content" @click="toBottom">有新内容 <ArrowDown :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
       <footer class="agent-composer">
         <div class="agent-input-box">
-          <textarea ref="draftInput" v-model="draft" aria-label="给 AI 助手的消息" :placeholder="running ? '可以补充要求，例如：只看上周的…' : (contact?.username || legacyView ? '向当前聊天提问…' : '请先选择一个聊天')" rows="1" @input="resizeDraft" @keydown.enter.exact="sendOnEnter" @compositionstart="composing = true" @compositionend="composing = false" />
+          <textarea ref="draftInput" v-model="draft" aria-label="给 AI 助手的消息" :placeholder="running ? '可以补充要求，例如：只看上周的…' : (contact?.username ? '向当前聊天提问…' : '请先选择一个聊天')" rows="1" @input="resizeDraft" @keydown.enter.exact="sendOnEnter" @compositionstart="composing = true" @compositionend="composing = false" />
           <div class="agent-input-actions">
             <AgentContextRing :budget="run?.context_budget" />
             <AgentModelPicker v-model="modelChoice" :profiles="profiles" :profiles-loading="profilesLoading" :profiles-error="profilesError" @refresh="loadProfiles" />
-            <button type="button" class="agent-send" :disabled="running ? stopping : (threadLoading || sending || !draft.trim() || !account || (!contact?.username && !legacyView))" :aria-label="running ? '停止处理' : '发送问题'" @click="primaryAction"><span v-if="running" class="agent-stop-icon" aria-hidden="true" /><ArrowUp v-else :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
+            <button type="button" class="agent-send" :disabled="running ? stopping : (threadLoading || sending || !draft.trim() || !account || !contact?.username)" :aria-label="running ? '停止处理' : '发送问题'" @click="primaryAction"><span v-if="running" class="agent-stop-icon" aria-hidden="true" /><ArrowUp v-else :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
           </div>
         </div>
         <small v-if="modelSelection.state.notice" class="agent-error" role="status">{{ modelSelection.state.notice }} <button v-if="modelSelection.state.dirty" type="button" @click="modelSelection.choose(modelChoice)">重试保存</button></small>
@@ -145,14 +145,13 @@ const trapFocus = (event, root) => {
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
 const pinned = computed(() => !!saved.value.pinned[props.account])
-const legacyHistory = ref(false), legacyView = ref(false)
-const selectionKey = computed(() => `${props.account}:${legacyView.value ? 'legacy' : props.contact?.username || 'none'}`)
+const selectionKey = computed(() => `${props.account}:${props.contact?.username || 'none'}`)
 const draftKey = computed(() => `${selectionKey.value}:${thread.value?.id || 'new'}`)
 const draft = computed({ get: () => saved.value.drafts[draftKey.value] || '', set: value => { saved.value.drafts[draftKey.value] = value } })
 const nameFor = id => [props.contact, ...(props.contacts || []), ...directory.value].find(c => c?.username === id)?.name || id
 const avatarFor = username => username && props.account ? `/chat/avatar?${new URLSearchParams({account:props.account,username})}` : ''
-const contactUsername = computed(() => legacyView.value ? '' : (thread.value?.username || props.contact?.username || ''))
-const contactName = computed(() => legacyView.value ? '旧版全局历史' : (nameFor(contactUsername.value) || '当前聊天'))
+const contactUsername = computed(() => thread.value?.username || props.contact?.username || '')
+const contactName = computed(() => nameFor(contactUsername.value) || '当前聊天')
 const scopeLabel = computed(() => !thread.value ? contactName.value : thread.value.scope.length === 1 ? nameFor(thread.value.scope[0]) : `${thread.value.scope.length} 个会话`)
 const scopeContacts = computed(() => directory.value.filter(c => `${c.name} ${c.username}`.toLowerCase().includes(scopeQuery.value.toLowerCase())))
 const running = computed(() => ['queued', 'running'].includes(run.value?.status))
@@ -241,11 +240,11 @@ const readThread = async id => {
   } finally { if (current === version) { threadLoading.value = false; pendingThreadId.value = '' } }
 }
 const loadSelection = async () => {
-  if (!props.account || (!props.contact?.username && !legacyView.value)) { thread.value = null; run.value = null; return }
+  if (!props.account || !props.contact?.username) { thread.value = null; run.value = null; return }
   const account = props.account, key = selectionKey.value
   const chosen = saved.value.selected[key]
   if (chosen) { await readThread(chosen); return }
-  const list = await api.request('/agent/threads', { query: { account, ...(legacyView.value ? {unassigned:true} : {username:props.contact?.username}) } })
+  const list = await api.request('/agent/threads', { query: { account, username:props.contact.username } })
   if (disposed || props.account !== account || key !== selectionKey.value) return
   if (list[0]) { saved.value.selected[key] = list[0].id; await readThread(list[0].id) }
 }
@@ -280,12 +279,12 @@ const refresh = async () => {
 const ensureThread = async () => {
   if (thread.value) return thread.value
   const account = props.account, key = selectionKey.value, oldDraft = draft.value
-  const created = await api.request('/agent/threads', {method:'POST',body:{account, username:props.contact?.username || ''}})
+  const created = await api.request('/agent/threads', {method:'POST',body:{account, username:props.contact.username}})
   if (account !== props.account || key !== selectionKey.value) throw new Error('聊天已切换，请在当前对话重新发送')
   saved.value.selected[key] = created.id; thread.value = created; saved.value.drafts[draftKey.value] = oldDraft; void loadHistory(); return created
 }
 const send = async () => {
-  if (threadLoading.value || sending.value || !props.account || !draft.value.trim() || (!props.contact?.username && !legacyView.value)) return
+  if (threadLoading.value || sending.value || !props.account || !draft.value.trim() || !props.contact?.username) return
   if (new TextEncoder().encode(draft.value.trim()).length > 1048576) { error.value = '输入超过 1 MiB，请分次发送。'; return }
   const text = draft.value.trim(), oldKey = draftKey.value, sendKey = selectionKey.value
   sending.value = true
@@ -315,7 +314,7 @@ const send = async () => {
   if (sendKey === selectionKey.value) sending.value = false
 }
 const sendSuggestion = async question => {
-  if (threadLoading.value || sending.value || running.value || !props.account || (!props.contact?.username && !legacyView.value)) return
+  if (threadLoading.value || sending.value || running.value || !props.account || !props.contact?.username) return
   draft.value = question
   await send()
 }
@@ -326,7 +325,14 @@ const primaryAction = async () => {
   try { await runAction('stop') } finally { stopping.value = false }
 }
 const sendOnEnter = event => { if (event.isComposing || composing.value) return; event.preventDefault(); void send() }
-const newThread = () => guardAction(async () => { mode.value = 'agent'; legacyView.value = false; legacyHistory.value = false; closeInspector(); delete saved.value.pinned[props.account]; delete saved.value.selected[selectionKey.value]; ++version; threadLoading.value = false; thread.value = null; run.value = null; if (!expanded.value) navigationOpen.value = false; await toBottom(); draftInput.value?.focus() })
+const newThread = () => guardAction(async () => {
+  mode.value = 'agent'; closeInspector()
+  delete saved.value.pinned[props.account]; delete saved.value.selected[selectionKey.value]
+  ++version; threadLoading.value = false; thread.value = null; run.value = null
+  showHistory()
+  if (!expanded.value) navigationOpen.value = false
+  await toBottom(); draftInput.value?.focus()
+})
 const togglePin = () => guardAction(async () => { if (pinned.value) { delete saved.value.pinned[props.account]; await loadSelection() } else { const t = await ensureThread(); saved.value.pinned[props.account] = t.id } })
 const locateSource = async source => {
   rememberView()
@@ -353,11 +359,11 @@ const restartRun = id => guardAction(async () => {
   }
 })
 const loadHistory = async ({silent = false} = {}) => {
-  const account = props.account, key = selectionKey.value, current = ++historyVersion, revision = statusRevision
+  const account = props.account, username = props.contact?.username, key = selectionKey.value, current = ++historyVersion, revision = statusRevision
   historyPending++; lastHistorySync = Date.now()
   if (!silent) { historyLoading.value = true; historyError.value = '' }
   try {
-    const items = account ? await api.request('/agent/threads', {query:{account, ...(legacyHistory.value ? {unassigned:true} : {username:props.contact?.username || '__none__'})},timeout:12000}) : []
+    const items = account && username ? await api.request('/agent/threads', {query:{account,username},timeout:12000}) : []
     if (!disposed && account === props.account && key === selectionKey.value && current === historyVersion) {
       for (const item of items) {
         // 请求发出后收到的新事件优先，避免旧列表把已完成任务重新显示成运行中。
@@ -373,10 +379,16 @@ const loadHistory = async ({silent = false} = {}) => {
   } catch (e) { if (!silent && !disposed && account === props.account && key === selectionKey.value && current === historyVersion) historyError.value = `会话列表加载失败：${e.message}` }
   finally { historyPending--; if (current === historyVersion) historyLoading.value = false }
 }
-const openHistory = () => { navigationOpen.value = !navigationOpen.value; if (navigationOpen.value) void loadHistory() }
+const showHistory = () => {
+  navigationOpen.value = true
+  void loadHistory()
+}
+const openHistory = () => {
+  if (navigationOpen.value) navigationOpen.value = false
+  else showHistory()
+}
 const selectHistory = item => guardAction(async () => {
   const account = props.account
-  legacyView.value = !item.username
   const key = selectionKey.value
   if (!await readThread(item.id) || account !== props.account) return
   saved.value.selected[key] = item.id
@@ -450,7 +462,7 @@ const connect = () => {
 }
 // 分别监听账号和聊天标识，避免新消息替换联系人对象时误触发切换、收起大视图。
 watch([() => props.account, () => props.contact?.username], ([account], [oldAccount]) => {
-  rememberView(oldAccount); legacyView.value = false; legacyHistory.value = false; sending.value = false; stopping.value = false; ++version; ++historyVersion; closeInspector(); cancelRefreshRetry()
+  rememberView(oldAccount); sending.value = false; stopping.value = false; ++version; ++historyVersion; closeInspector(); cancelRefreshRetry()
   thread.value = null; run.value = null; pastRuns.value = {}; threadLoading.value = false; pendingThreadId.value = ''; error.value = ''; streamWarning.value = ''; syncWarning.value = ''; historyError.value = ''; newContent.value = false; streamConnected.value = false
   runStatuses.value = {}; history.value = []; directory.value = []; expanded.value = false
   connect(); void loadHistory(); void guardAction(loadSelection)

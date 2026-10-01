@@ -32,13 +32,13 @@ def update_settings(body: AgentSettings):
 
 
 @router.get('/threads')
-def threads(account: str, username: str = '', unassigned: bool = False):
+def threads(account: str, username: str = ''):
     store = get_agent_service().store
     owner = account_name(account)
     records = store.list('agent_thread', owner)
     result = []
     for record in records:
-        if record.get('parent_run_id') or (unassigned and record.get('username')):
+        if record.get('parent_run_id'):
             continue
         if username and record['username'] != username:
             continue

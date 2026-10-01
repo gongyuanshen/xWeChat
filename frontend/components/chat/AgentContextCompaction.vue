@@ -9,7 +9,10 @@
     <template v-else>
       <button type="button" class="compaction-divider" :aria-expanded="expanded" :aria-controls="detailId" @click="expanded = !expanded"><span><FileText :size="16" :stroke-width="1.8" aria-hidden="true" />{{ label }}</span></button>
       <div v-if="expanded" :id="detailId" class="compaction-details" role="region" :aria-label="label + '详情'">
-        <p v-if="job.status !== 'completed'">本次压缩未完成，原上下文已保留。</p>
+        <template v-if="job.status !== 'completed'">
+          <p>本次压缩未完成，原上下文已保留。</p>
+          <p v-if="job.error_message" role="alert">{{ job.error_message }}</p>
+        </template>
         <template v-else>
           <p v-if="usage" class="compaction-usage">上下文用量 {{ usage }}</p>
           <p v-if="loading" role="status">正在读取摘要…</p>

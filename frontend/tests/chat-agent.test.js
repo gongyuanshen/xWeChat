@@ -47,7 +47,6 @@ describe('聊天 Agent', () => {
     const w = mountPanel(); await flushPromises()
     await w.setProps({contact:{username,name:'测试会话'}}); await flushPromises()
     expect(w.find('.agent-header > button[aria-label="AI 对话历史"] svg.lucide').exists()).toBe(true)
-    expect(w.find('.agent-header > button[aria-label="旧版全局历史"]').exists()).toBe(false)
     const expected = `/api/chat/avatar?${new URLSearchParams({account:'acc',username})}`
     expect(w.find('.agent-owner-avatar img').attributes('src')).toBe(expected)
     await send(w, '总结一下')
@@ -400,6 +399,73 @@ describe('聊天 Agent', () => {
     await w.find('[aria-label="展开大视图"]').trigger('click');await flushPromises()
     expect(w.find('.agent-thread-list').exists()).toBe(true)
     w.unmount()
+  })
+  it('重启恢复回答后，新建对话可从更多菜单的对话历史返回完整回答', async () => {
+    threads.saved={id:'saved',title:'最近讨论了什么',username:'first',scope:['first'],latest_run:'completed',messages:[
+      {id:'q',role:'user',text:'请总结',run_id:'completed'},
+      {id:'a',role:'assistant',text:'已保存的完整回答',run_id:'completed'},
+    ]}
+    runs.completed={id:'completed',thread_id:'saved',status:'completed',answer:'已保存的完整回答',timeline:[]}
+    let w=mountPanel()
+    try {
+      await flushPromises()
+      expect(w.text()).toContain('已保存的完整回答')
+      w.unmount()
+      w=mountPanel();await flushPromises()
+      expect(w.text()).toContain('已保存的完整回答')
+      await w.find('[aria-label="新建 AI 对话"]').trigger('click');await flushPromises()
+      expect(w.find('.agent-thread-title').text()).toBe('新对话')
+      await w.find('[aria-label="更多 AI 功能"]').trigger('click')
+      expect(w.find('.agent-menu button').text()).toBe('对话历史')
+      await w.find('.agent-menu [aria-label="对话历史"]').trigger('click');await flushPromises()
+      expect(w.find('.agent-menu').exists()).toBe(false)
+      expect(w.find('.agent-thread-list-heading').text()).toBe('当前聊天的对话')
+      expect(w.find('.agent-thread-select').text()).toContain('最近讨论了什么')
+      const lists=request.mock.calls.filter(([path,options])=>path==='/agent/threads'&&options.method!=='POST')
+      expect(lists.at(-1)[1].query).toEqual({account:'acc',username:'first'})
+      // 菜单入口明确打开列表，已展开时再次点击也不能将列表收起。
+      await w.find('[aria-label="更多 AI 功能"]').trigger('click')
+      await w.find('.agent-menu [aria-label="对话历史"]').trigger('click');await flushPromises()
+      expect(w.find('.agent-thread-select').exists()).toBe(true)
+      await w.find('.agent-thread-select').trigger('click');await flushPromises()
+      expect(w.text()).toContain('已保存的完整回答')
+      expect(request.mock.calls.some(([,options])=>options?.method==='POST')).toBe(false)
+      expect(threads.saved.messages).toHaveLength(2)
+    } finally { w.unmount() }
+  })
+  it('更多菜单只提供当前聊天的对话历史，读取不混入其他聊天或未归属记录', async () => {
+    threads.saved={id:'saved',title:'当前聊天的对话',username:'first',scope:['first'],messages:[]}
+    threads.other={id:'other',title:'其他聊天的对话',username:'second',scope:['second'],messages:[]}
+    threads.detached={id:'detached',title:'未归属的记录',username:'',scope:['first'],messages:[]}
+    const w=mountPanel()
+    try {
+      await flushPromises()
+      await w.find('[aria-label="更多 AI 功能"]').trigger('click')
+      expect(w.findAll('.agent-menu button').map(button=>button.text())).toEqual(['对话历史','对话','工具与任务','AI 服务设置'])
+      await w.find('.agent-menu [aria-label="对话历史"]').trigger('click');await flushPromises()
+      expect(w.find('.agent-thread-list-heading').text()).toBe('当前聊天的对话')
+      expect(w.findAll('.agent-thread-select')).toHaveLength(1)
+      expect(w.find('.agent-thread-select').text()).toContain('当前聊天的对话')
+      for (const [,options] of request.mock.calls.filter(([path,options])=>path==='/agent/threads'&&options?.method!=='POST')) {
+        expect(options.query).toEqual({account:'acc',username:'first'})
+      }
+    } finally { w.unmount() }
+  })
+  it('未选择聊天时不读取账号全局历史，也不能新建无归属的对话', async () => {
+    const w=mountPanel()
+    try {
+      await flushPromises()
+      request.mockClear()
+      await w.setProps({contact:null});await flushPromises()
+      await w.find('[aria-label="更多 AI 功能"]').trigger('click')
+      await w.find('.agent-menu [aria-label="对话历史"]').trigger('click');await flushPromises()
+      expect(w.find('.agent-thread-item').exists()).toBe(false)
+      await w.find('textarea').setValue('未选择聊天的草稿')
+      expect(w.find('.agent-send').attributes('disabled')).toBeDefined()
+      await w.find('textarea').trigger('keydown',{key:'Enter'});await flushPromises()
+      expect(request.mock.calls.some(([path])=>path==='/agent/threads')).toBe(false)
+      expect(w.find('textarea').element.value).toBe('未选择聊天的草稿')
+    } finally { w.unmount() }
   })
   it('新对话发送后进入左侧列表，重命名同步标题，删除当前对话回到空态', async () => {
     const w=mountPanel();await flushPromises()

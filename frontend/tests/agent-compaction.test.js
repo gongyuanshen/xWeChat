@@ -59,6 +59,17 @@ it.each(['failed', 'cancelled', 'interrupted'])('任务%s后不伪装为仍压�
   wrapper.unmount()
 })
 
+it('压缩失败展开后显示后端保存的具体校验原因', async () => {
+  const item = entry('failed')
+  item.context_job.error_message = '上下文摘要无效：摘要包含无法溯源的来源或路径'
+  const wrapper = mount(Compaction, { props: { item, run: { ...run(), status: 'interrupted' }, viewState: {} } })
+  await wrapper.get('button').trigger('click')
+  expect(wrapper.get('[role="alert"]').text()).toContain('无法溯源')
+  expect(wrapper.text()).toContain('原上下文已保留')
+  expect(request).not.toHaveBeenCalled()
+  wrapper.unmount()
+})
+
 it('读取失败可重试，旧记录缺少窗口时显示 Token 而非借用当前模型', async () => {
   request.mockRejectedValueOnce(new Error('暂时无法读取')).mockResolvedValueOnce({ before: 800, after: 200, summary: null })
   const wrapper = mount(Compaction, { props: { item: entry(), run: run(), viewState: {} } })

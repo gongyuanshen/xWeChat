@@ -477,7 +477,9 @@ class ChatGateway:
             raise ValueError('；'.join(errors[:12]) + '。本次未保存任何发现。请按本页原文修正上述项，'
                 '跨页事实留在对应页，不要猜来源；重新一次性提交本页全部发现，不要用单条试提交代替完整分析。')
         batch_index = state['committed_pages'] + 1
-        note_path = f'/notes/batch_{batch_index:05d}.json'
+        # 批次编号属于范围；文件身份同时包含任务、版本与页面，避免范围及继承历史互相覆盖。
+        note_identity = hashlib.sha256(json.dumps([self.id, self.version, page_id]).encode('utf-8')).hexdigest()
+        note_path = f'/notes/batch_{batch_index:05d}_{note_identity}.json'
         page.update(committed=True, batch_index=batch_index, note_path=note_path)
         state.update(pending_page='', committed_pages=batch_index)
 

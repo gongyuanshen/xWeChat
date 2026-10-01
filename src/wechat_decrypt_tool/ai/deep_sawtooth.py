@@ -1,6 +1,7 @@
 """DSH 式锯齿压缩：压力触发、完整近期尾部、前缀重放摘要与可恢复提交。"""
 import asyncio
 import json
+import logging
 import re
 import time
 import uuid
@@ -12,6 +13,7 @@ from langgraph.types import Command
 
 from .deep_context import DurableSummarization, ContextRecoveryRequired
 from .deep_conversation import effective_messages, fingerprint
+from .diagnostics import event as diagnostic_event
 from .providers import ProviderFailure
 
 
@@ -47,7 +49,8 @@ class SawtoothSummarization(DurableSummarization):
         # 从尾部累加相同口径的计量，保留边界向前移动至完整工具交互之前。
         keep = 0 if emergency else self.options['keep'][1]
         boundary = len(messages)
-        while boundary > 0:
+        # 紧急整理不保留尾部；先减一会把最后的完整工具交互再次留在超限请求中。
+        while not emergency and boundary > 0:
             boundary -= 1
             if self._count_tokens(messages[boundary:]) >= keep:
                 break
@@ -78,9 +81,27 @@ class SawtoothSummarization(DurableSummarization):
                 part.get('type') not in ('text', 'reasoning') for part in response.content if isinstance(part, dict)):
             problem = '摘要包含非文本输出'
         # 校验来源与内部路径确实出现在输入中，语义质量由关键事实回归另行验证。
-        tokens = re.findall(r'(?<![a-f0-9])[a-f0-9]{24}(?![a-f0-9])|/(?:context|materials|history|notes)/[^\s<>"，。；）]+', text)
-        if any(token not in source for token in tokens):
-            problem = '摘要包含无法溯源的来源或路径'
+        # 只移除路径外侧成对的 Markdown 包装；文件名自身的括号仍须完整溯源。
+        references = re.compile(r'(?<![a-f0-9])[a-f0-9]{24}(?![a-f0-9])|/(?:context|materials|history|notes)/[^\s<>"`，。；）]+')
+        offset = 0
+        while match := references.search(text, offset):
+            token = match.group()
+            opener = text[match.start() - 1:match.start()]
+            if token.startswith('/') and opener in ('(', '['):
+                closer = ')' if opener == '(' else ']'
+                depth = 1
+                for index, character in enumerate(token):
+                    if character == opener:
+                        depth += 1
+                    elif character == closer:
+                        depth -= 1
+                        if depth == 0:
+                            token = token[:index]
+                            break
+            offset = match.start() + len(token)
+            if token not in source:
+                problem = '摘要包含无法溯源的来源或路径'
+                break
         if problem:
             raise ContextRecoveryRequired('上下文摘要无效：' + problem)
         return text
@@ -94,7 +115,6 @@ class SawtoothSummarization(DurableSummarization):
         source = json.dumps([message_to_dict(m) for m in messages], ensure_ascii=False)
         # 摘要容量使用辅助请求自己的输出预留，先尝试一次完整前缀。
         if self._count_tokens(messages, tools=definitions) <= self.summary_capacity:
-            last = None
             for attempt in range(self.summary_attempts):
                 self.archive.guard()
                 try:
@@ -103,13 +123,14 @@ class SawtoothSummarization(DurableSummarization):
                 except ContextOverflowError:
                     break
                 except (ProviderFailure, ContextRecoveryRequired) as exc:
-                    last = exc
                     if getattr(exc, 'authentication', False):
                         raise
-                    if attempt + 1 < self.summary_attempts:
-                        await asyncio.sleep(.25 * 2**attempt)
-            else:
-                raise ContextRecoveryRequired('上下文整理暂不可用，完整历史已保留，可恢复。') from last
+                    if attempt + 1 == self.summary_attempts:
+                        # 保留校验原因，不能把本地无效摘要改写成上游服务不可用。
+                        if isinstance(exc, ContextRecoveryRequired):
+                            raise
+                        raise ContextRecoveryRequired('上下文整理服务暂不可用，完整历史已保留，可恢复。') from exc
+                    await asyncio.sleep(.25 * 2**attempt)
         # 只有实际摘要请求放不下才使用旧的有界分段流程，禁止目录降级。
         fallback = DurableSummarization(backend=self.archive, model=self.model,
             token_counter=self.token_counter, trigger=self.options['trigger'], keep=self.options['keep'],
@@ -172,6 +193,13 @@ class SawtoothSummarization(DurableSummarization):
                 self.archive.guard()
                 record.update(status='cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed',
                               error=type(exc).__name__, finished_at=time.time())
+                if isinstance(exc, ContextRecoveryRequired):
+                    # 仅持久化本地语义异常的说明；上游正文、聊天与密钥不进入失败详情。
+                    record['error_message'] = str(exc)
+                diagnostic_event('agent.context.compaction.interrupted' if isinstance(exc, asyncio.CancelledError)
+                    else 'agent.context.compaction.failed', level=logging.INFO if isinstance(exc, asyncio.CancelledError)
+                    else logging.ERROR, error=exc, run_id=self.archive.run_id, version=self.archive.version,
+                    input_budget=self.input_capacity, count=before)
                 self.archive.service.workspace.put(self.archive.run_id, self.archive.version,
                     'context:job:' + job, 'context_compaction', record)
                 self.notify(job, '上下文整理未完成，原记录已保留。', 'failed', **record)

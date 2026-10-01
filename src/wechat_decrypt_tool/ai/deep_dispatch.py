@@ -12,6 +12,7 @@ from .deep_tools import ChatGateway
 from .providers import ProviderFailure
 from .agent_schemas import AgentControl
 from .model_execution import model_policy
+from .deep_synchronization import serialized
 
 
 class ParallelAnalysis:
@@ -122,8 +123,11 @@ class ParallelAnalysis:
             self.workspace.put(child['id'], 1, 'directory:conversations', 'deep_directory', directory)
         return self.run(child['id'])
 
+    @serialized
     def merge_partition(self, parent, child, job):
         self.analysis_plans.guard(parent)
+        from .agent_notes import load_stage_notes
+        batch_paths = {note['file_path'] for note in load_stage_notes(self.store, child['id'], child['version'])}
         self.workspace.inherit(child['id'], parent['id'])
         with self.store.connection() as db:
             rows = db.execute("SELECT id,kind,body FROM agent_piece WHERE run_id=? AND version=? AND "
@@ -154,7 +158,16 @@ class ParallelAnalysis:
                 key = row[0]
             elif row[1] == 'deep_file':
                 if row[0].startswith('file:/notes/'):
-                    if row[0] in existing_note_keys:
+                    # 子任务聚合、接力与普通笔记不是父任务的原始批次，按子任务版本隔离。
+                    if row[0].removeprefix('file:') not in batch_paths:
+                        name = row[0].removeprefix('file:/notes/')
+                        path = '/notes/subtasks/' + fingerprint([child['id'], child['version']]) + '/' + name
+                        body['path'] = path
+                        pieces.append(('file:' + path, row[1], body))
+                        continue
+                    # 新批次路径绑定原始任务页面；重放同一子任务时复用路径和范围内编号。
+                    unique_batch = re.fullmatch(r'file:/notes/batch_\d+_[a-f0-9]{64}\.json', row[0])
+                    if row[0] in existing_note_keys and not unique_batch:
                         next_idx = max(existing_batch_indices, default=0) + 1
                         existing_batch_indices.add(next_idx)
                         new_path = f"/notes/batch_{next_idx:05d}.json"
@@ -171,17 +184,13 @@ class ParallelAnalysis:
                                     continue
                                 val = body[ckey]
                                 if isinstance(val, str):
-                                    try:
-                                        nd = json.loads(val)
-                                        if isinstance(nd, dict):
-                                            nd['batch_index'] = next_idx
-                                            if 'note_path' in nd:
-                                                nd['note_path'] = new_path
-                                            if 'path' in nd:
-                                                nd['path'] = new_path
-                                            body[ckey] = json.dumps(nd, ensure_ascii=False, indent=2)
-                                    except Exception:
-                                        pass
+                                    nd = json.loads(val)
+                                    nd['batch_index'] = next_idx
+                                    if 'note_path' in nd:
+                                        nd['note_path'] = new_path
+                                    if 'path' in nd:
+                                        nd['path'] = new_path
+                                    body[ckey] = json.dumps(nd, ensure_ascii=False, indent=2)
                                 elif isinstance(val, dict):
                                     val['batch_index'] = next_idx
                                     if 'note_path' in val:
@@ -464,6 +473,12 @@ class ParallelAnalysis:
                 input_mappings[s] = {'sender': ev[s].get('sender', ''), 'sent_at': ev[s].get('sent_at', ''),
                                      'time': ev[s].get('time', 0), 'text': ev[s].get('text', '')}
 
+        cited_inputs = {s for fact in input_facts if isinstance(fact, dict) for s in fact.get('sources', [])}
+        for fact in input_facts:
+            if isinstance(fact, str):
+                cited_inputs.update(re.findall(r'\[\[([a-f0-9]{24}|src_[^\]]+)\]\]', fact))
+        prompt_mappings = {s: input_mappings[s] for s in cited_inputs if s in input_mappings}
+
         allowed_sources = {s for n in batch_notes for s in n.get('sources', [])}
         batches_covered = [n.get('batch_index', 0) for n in batch_notes if n.get('batch_index')]
         if not batches_covered:
@@ -497,51 +512,72 @@ class ParallelAnalysis:
             'group_id': group_id,
             'batches_covered': batches_covered,
             'input_facts': input_facts,
-            'message_mappings': input_mappings,
+            'message_mappings': prompt_mappings,
         }, ensure_ascii=False)
 
-        request = [SystemMessage(content=prompt_system), HumanMessage(content=prompt_human)]
-        response = await model.ainvoke(request, config={'callbacks': [], 'tags': ['internal', 'relay_compression']})
-        content_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', str(response.content).strip())
-        try:
-            result_dict = json.loads(content_text)
-        except Exception as exc:
-            raise ProviderFailure(f"接力压缩模型未返回合法 JSON：{exc}") from exc
+        # 缓存事实内容，不缓存范围内编号或统计；恢复和并发调用复用已校验结果。
+        cache_key = 'relay:' + fingerprint([prompt_system, input_facts, prompt_mappings])
+        async with self.analysis_plans.lock(parent, cache_key):
+            self.analysis_plans.guard(parent)
+            try:
+                saved = self.workspace.get(parent['id'], parent['version'], cache_key)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f'接力缓存 JSON 损坏：{cache_key} [run_id={parent["id"]}, version={parent["version"]}]') from exc
+            cache_hit = saved is not None
+            if not cache_hit:
+                request = [SystemMessage(content=prompt_system), HumanMessage(content=prompt_human)]
+                response = await model.ainvoke(request, config={'callbacks': [], 'tags': ['internal', 'relay_compression']})
+                self.analysis_plans.guard(parent)
+                content_text = re.sub(r'^```(?:json)?\s*|\s*```$', '', str(response.content).strip())
+                try:
+                    result_dict = json.loads(content_text)
+                except json.JSONDecodeError as exc:
+                    raise ProviderFailure('接力压缩模型未返回合法 JSON') from exc
+                if isinstance(result_dict, list):
+                    saved = {'consolidated_facts': result_dict, 'unresolved': []}
+                elif isinstance(result_dict, dict):
+                    field = 'consolidated_facts' if 'consolidated_facts' in result_dict else 'facts'
+                    saved = {'consolidated_facts': result_dict.get(field), 'unresolved': result_dict.get('unresolved', [])}
+                else:
+                    raise ProviderFailure('接力压缩模型返回结构无效')
 
-        if isinstance(result_dict, list):
-            consolidated = result_dict
-            unresolved = []
-        elif isinstance(result_dict, dict):
-            consolidated = result_dict.get('consolidated_facts') or result_dict.get('facts') or []
-            unresolved = result_dict.get('unresolved', [])
-        else:
-            raise ProviderFailure("接力压缩模型返回结构无效")
-
-        for fact in consolidated:
-            if isinstance(fact, dict):
-                fact_sources = fact.get('sources', [])
-                if not isinstance(fact_sources, list):
-                    fact_sources = [fact_sources]
-                    fact['sources'] = fact_sources
-                if not fact_sources or not set(fact_sources) <= allowed_sources:
-                    raise ValueError(f"Relay compression produced invalid sources: {fact_sources}")
-                quote = fact.get('quote')
-                if quote:
-                    matched = any(
-                        compact(quote) in compact(input_mappings.get(s, {}).get('text', ''))
-                        for s in fact_sources if s in input_mappings
-                    )
-                    if not matched and hasattr(ev, '__contains__'):
+            if (not isinstance(saved, dict) or not isinstance(saved.get('consolidated_facts'), list)
+                    or not isinstance(saved.get('unresolved'), list)
+                    or any(not isinstance(item, str) for item in saved['unresolved'])):
+                raise ValueError(f'接力结果结构无效：{cache_key} [run_id={parent["id"]}, version={parent["version"]}]')
+            consolidated, unresolved = saved['consolidated_facts'], saved['unresolved']
+            if input_facts and not consolidated:
+                raise ValueError('接力结果丢失全部输入事实，不能保存为空结果')
+            for fact in consolidated:
+                if isinstance(fact, dict):
+                    if not isinstance(fact.get('text'), str) or not fact['text'].strip():
+                        raise ValueError(f'接力事实缺少有效正文：{cache_key} [run_id={parent["id"]}, version={parent["version"]}]')
+                    fact_sources = fact.get('sources', [])
+                    if (not isinstance(fact_sources, list) or not fact_sources
+                            or any(not isinstance(source, str) for source in fact_sources)
+                            or not set(fact_sources) <= allowed_sources):
+                        raise ValueError(f'Relay compression produced invalid sources: {cache_key} [run_id={parent["id"]}, version={parent["version"]}]')
+                    quote = fact.get('quote')
+                    if quote:
                         matched = any(
-                            compact(quote) in compact(ev[s]['text'])
-                            for s in fact_sources if s in ev and isinstance(ev[s], dict) and 'text' in ev[s]
+                            compact(quote) in compact(input_mappings.get(s, {}).get('text', ''))
+                            for s in fact_sources if s in input_mappings
                         )
-                    if not matched:
-                        fact.pop('quote', None)
-            elif isinstance(fact, str):
-                fact_srcs = re.findall(r'\[\[([a-f0-9]{24}|src_[^\]]+)\]\]', fact)
-                if fact_srcs and not set(fact_srcs) <= allowed_sources:
-                    raise ValueError(f"Relay compression produced invalid sources: {fact_srcs}")
+                        if not matched and hasattr(ev, '__contains__'):
+                            matched = any(
+                                compact(quote) in compact(ev[s]['text'])
+                                for s in fact_sources if s in ev and isinstance(ev[s], dict) and 'text' in ev[s]
+                            )
+                        if not matched:
+                            fact.pop('quote', None)
+                elif isinstance(fact, str):
+                    fact_srcs = re.findall(r'\[\[([a-f0-9]{24}|src_[^\]]+)\]\]', fact)
+                    if not fact_srcs or not set(fact_srcs) <= allowed_sources:
+                        raise ValueError('Relay compression produced invalid sources')
+                else:
+                    raise ValueError('接力事实必须是对象或含真实来源的字符串')
+            if not cache_hit:
+                self.workspace.put(parent['id'], parent['version'], cache_key, 'relay_reduction', saved)
 
         relay_path = f"/notes/relay_{group_id}.json"
         cited_sources = {s for f in consolidated if isinstance(f, dict) for s in f.get('sources', [])}
@@ -575,35 +611,39 @@ class ParallelAnalysis:
         )
         from .deep_backend import TaskBackend
 
-        notes = load_stage_notes(self.store, parent['id'], parent['version'])
-        if not notes:
-            return {'total_batches': 0, 'total_facts': 0, 'path': '', 'relay_compressed': False}
+        # 共享汇聚文件按任务版本串行发布，进入锁后才读取当前批次。
+        async with self.analysis_plans.lock(parent, 'aggregate:stage-notes'):
+            self.analysis_plans.guard(parent)
+            notes = load_stage_notes(self.store, parent['id'], parent['version'])
+            if not notes:
+                return {'total_batches': 0, 'total_facts': 0, 'path': '', 'relay_compressed': False}
 
-        backend = TaskBackend(self, parent['id'], parent['version'])
-        exceeds_window, total_bytes = check_notes_exceed_safe_window(notes, safe_window_bytes=SAFE_NOTE_WINDOW_BYTES)
-
-        if exceeds_window or force_relay:
-            groups = partition_notes_for_relay(notes, max_chunk_bytes=RELAY_CHUNK_MAX_BYTES)
-            relay_notes = []
-            for idx, group in enumerate(groups, 1):
-                group_id = f"{idx:05d}"
-                relay_note = await self.relay_compress_group(parent, group_id, group)
-                relay_notes.append(relay_note)
-            final_aggregated = consolidate_aggregated_note(relay_notes, is_relay=True)
-        else:
+            backend = TaskBackend(self, parent['id'], parent['version'])
+            # 先确定性去重并移除无引用原文，再判断实际汇聚内容是否需要模型压缩。
             final_aggregated = consolidate_aggregated_note(notes, is_relay=False)
+            exceeds_window, _ = check_notes_exceed_safe_window([final_aggregated], safe_window_bytes=SAFE_NOTE_WINDOW_BYTES)
 
-        agg_path = "/notes/aggregated.json"
-        write_res = backend.write(agg_path, json.dumps(final_aggregated, ensure_ascii=False, indent=2))
-        if write_res.error:
-            raise ProviderFailure(f"Failed to write aggregated notes to {agg_path}: {write_res.error}")
+            if exceeds_window or force_relay:
+                groups = partition_notes_for_relay(notes, max_chunk_bytes=RELAY_CHUNK_MAX_BYTES)
+                relay_notes = []
+                for idx, group in enumerate(groups, 1):
+                    group_id = f"{idx:05d}"
+                    relay_note = await self.relay_compress_group(parent, group_id, group)
+                    relay_notes.append(relay_note)
+                final_aggregated = consolidate_aggregated_note(relay_notes, is_relay=True)
+                final_aggregated['total_batches'] = len(notes)
 
-        return {
-            'path': agg_path,
-            'total_batches': final_aggregated['total_batches'],
-            'total_facts': final_aggregated['total_facts'],
-            'relay_compressed': final_aggregated['relay_compressed'],
-        }
+            agg_path = "/notes/aggregated.json"
+            write_res = backend.write(agg_path, json.dumps(final_aggregated, ensure_ascii=False, indent=2))
+            if write_res.error:
+                raise ProviderFailure(f"Failed to write aggregated notes to {agg_path}: {write_res.error}")
+
+            return {
+                'path': agg_path,
+                'total_batches': final_aggregated['total_batches'],
+                'total_facts': final_aggregated['total_facts'],
+                'relay_compressed': final_aggregated['relay_compressed'],
+            }
 
     async def synthesize_global_report(self, parent_or_id, version: int = None, plan: dict = None) -> dict:
         """Stage 2 Reduce 2: 全局长报告统稿与日历/引文治理核验。"""

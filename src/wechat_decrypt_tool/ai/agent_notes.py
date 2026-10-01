@@ -212,36 +212,87 @@ REPORT_SYNTHESIZER_SYSTEM_PROMPT = """你是一位资深微信群聊数据分析
 """
 
 
+class StageNoteCorruptedError(ValueError):
+    """持久化笔记损坏；定位信息不包含聊天正文或字段值。"""
+    def __init__(self, piece_id, run_id, version, reason):
+        super().__init__(f'Corrupted stage note in agent_piece: {piece_id} '
+                         f'[run_id={run_id}, version={version}]: {reason}')
+
+
+def stage_note_payload(body_raw, piece_id, run_id, version):
+    """解析既有裸字典与虚拟文件包装，损坏记录不得参与恢复或统计。"""
+    try:
+        wrapper = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
+    except json.JSONDecodeError as exc:
+        raise StageNoteCorruptedError(piece_id, run_id, version, 'invalid wrapper JSON') from exc
+    if not isinstance(wrapper, dict):
+        raise StageNoteCorruptedError(piece_id, run_id, version, 'wrapper must be an object')
+    content = wrapper['content'] if 'content' in wrapper else wrapper
+    try:
+        note = json.loads(content) if isinstance(content, str) else content
+    except json.JSONDecodeError as exc:
+        raise StageNoteCorruptedError(piece_id, run_id, version, 'invalid content JSON') from exc
+    if not isinstance(note, dict):
+        raise StageNoteCorruptedError(piece_id, run_id, version, 'content must be an object')
+    return note
+
+
 def load_stage_notes(store, run_id: str, version: int = 1) -> list[dict]:
     """从 SQLite agent_piece 中按顺序读取所有 /notes/batch_*.json。"""
     conn_ctx = store.connection() if hasattr(store, 'connection') else store.store.connection()
     with conn_ctx as db:
         rows = db.execute(
             "SELECT id, body FROM agent_piece "
-            "WHERE run_id=? AND version=? AND kind='deep_file' AND id LIKE 'file:/notes/batch_%.json' "
+            "WHERE run_id=? AND version=? AND kind='deep_file' AND id GLOB 'file:/notes/batch_*.json' "
             "ORDER BY id",
             (run_id, version)
         ).fetchall()
     notes = []
     for piece_id, body_raw in rows:
-        try:
-            wrapper = json.loads(body_raw) if isinstance(body_raw, str) else body_raw
-            if not isinstance(wrapper, dict):
-                raise ValueError(f"Corrupted stage note in agent_piece: {piece_id} (wrapper is not a dict)")
-            if 'content' in wrapper:
-                content = wrapper['content']
-                note = json.loads(content) if isinstance(content, str) else content
-            else:
-                note = wrapper
-            if not isinstance(note, dict):
-                raise ValueError(f"Corrupted stage note in agent_piece: {piece_id} (note content is not a dict)")
-            note['file_path'] = piece_id.removeprefix('file:')
-            notes.append(note)
-        except Exception as exc:
-            if isinstance(exc, ValueError) and f"Corrupted stage note in agent_piece: {piece_id}" in str(exc):
-                raise
-            raise ValueError(f"Corrupted stage note in agent_piece: {piece_id}") from exc
-    notes.sort(key=lambda n: n.get('batch_index', 0))
+        note = stage_note_payload(body_raw, piece_id, run_id, version)
+        for field, minimum in (('batch_index', 1), ('messages_count', 0)):
+            if type(note.get(field)) is not int or note[field] < minimum:
+                raise StageNoteCorruptedError(piece_id, run_id, version, f'{field} must be an integer >= {minimum}')
+        for field in ('sources', 'facts'):
+            if not isinstance(note.get(field), list):
+                raise StageNoteCorruptedError(piece_id, run_id, version, f'{field} must be a list')
+        if any(not isinstance(source, str) for source in note['sources']):
+            raise StageNoteCorruptedError(piece_id, run_id, version, 'sources must contain strings')
+        for field in ('scope_handle', 'cursor', 'committed_at'):
+            if field in note and not isinstance(note[field], str):
+                raise StageNoteCorruptedError(piece_id, run_id, version, f'{field} must be a string')
+        note['file_path'] = piece_id.removeprefix('file:')
+        notes.append(note)
+    # 不同范围各自从第一批开始，最新游标按实际提交时间确定。
+    notes.sort(key=lambda n: (n.get('committed_at', ''), n['batch_index'], n['file_path']))
+    return notes
+
+
+def load_legacy_stage_notes(store, run_id, version):
+    """读取已知的旧版扁平发现或累计笔记格式，不将损坏记录投影为零事实。"""
+    with store.connection() as db:
+        rows = db.execute("SELECT id,body FROM agent_piece WHERE run_id=? AND version=? "
+                          "AND kind='stage_note' ORDER BY id", (run_id, version)).fetchall()
+    notes = []
+    for index, (piece_id, body_raw) in enumerate(rows, 1):
+        body = stage_note_payload(body_raw, piece_id, run_id, version)
+        if 'items' in body:
+            facts = body['items']
+        elif isinstance(body.get('notes'), dict):
+            facts = body['notes'].get('items')
+        else:
+            raise StageNoteCorruptedError(piece_id, run_id, version, 'missing items or notes.items')
+        covered = body.get('covered')
+        if not isinstance(facts, list) or any(not isinstance(fact, dict) for fact in facts):
+            raise StageNoteCorruptedError(piece_id, run_id, version, 'items must be a list of objects')
+        if not isinstance(covered, list) or any(not isinstance(item, dict) or not isinstance(item.get('source'), str) for item in covered):
+            raise StageNoteCorruptedError(piece_id, run_id, version, 'covered must contain objects with string sources')
+        cursor = body.get('cursor', '')
+        if not isinstance(cursor, str):
+            raise StageNoteCorruptedError(piece_id, run_id, version, 'cursor must be a string')
+        notes.append({'file_path': piece_id, 'batch_index': index, 'cursor': cursor,
+                      'messages_count': len(covered), 'facts': facts,
+                      'sources': [item['source'] for item in covered]})
     return notes
 
 
@@ -443,4 +494,3 @@ def compose_synthesis_context(notes: list[dict], run: dict, originals: dict) -> 
         'unresolved_items': list(dict.fromkeys(unresolved_items)),
         'source_mappings': compact_sources,
     }
-

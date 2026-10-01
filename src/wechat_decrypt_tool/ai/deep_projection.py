@@ -67,76 +67,31 @@ class DeepProjection:
             run_id = run_or_id
             version = version or 1
 
-        with self.store.connection() as db:
-            rows = db.execute(
-                "SELECT id, body FROM agent_piece WHERE run_id=? AND version=? AND kind='deep_file' AND id LIKE 'file:/notes/batch_%.json' ORDER BY id",
-                (run_id, version)
-            ).fetchall()
-        if not rows:
-            with self.store.connection() as db:
-                stage_rows = db.execute(
-                    "SELECT id, body FROM agent_piece WHERE run_id=? AND version=? AND kind='stage_note' ORDER BY id",
-                    (run_id, version)
-                ).fetchall()
-            if not stage_rows:
-                return {'count': 0, 'total_facts': 0, 'covered_ranges': [], 'latest_cursor': ''}
-            covered_ranges = []
-            total_facts = 0
-            latest_cursor = ''
-            for idx, (piece_id, piece_body) in enumerate(stage_rows, 1):
-                try:
-                    body = json.loads(piece_body)
-                    items = body.get('items', [])
-                    covered = body.get('covered', [])
-                    total_facts += len(items)
-                    sources = [c.get('source') for c in covered if isinstance(c, dict) and c.get('source')]
-                    cursor = body.get('cursor', '')
-                    if cursor:
-                        latest_cursor = cursor
-                    covered_ranges.append({
-                        'path': piece_id.removeprefix('file:') if piece_id.startswith('file:') else piece_id,
-                        'batch_index': idx,
-                        'cursor': cursor,
-                        'messages_count': len(covered),
-                        'facts_count': len(items),
-                        'facts': items,
-                        'sources': sources,
-                        'start_source': sources[0] if sources else None,
-                        'end_source': sources[-1] if sources else None,
-                        'committed_at': '',
-                    })
-                except Exception as exc:
-                    logger.warning("解析 stage_note 行失败 [piece_id=%s]: %s", piece_id, exc)
-                    continue
-            return {'count': len(stage_rows), 'total_facts': total_facts, 'covered_ranges': covered_ranges, 'latest_cursor': latest_cursor}
+        from .agent_notes import load_stage_notes, load_legacy_stage_notes
+        batch_notes = load_stage_notes(self.store, run_id, version)
+        if not batch_notes:
+            # 仅在没有新版批次时展示旧版已提交发现；新版损坏已经由入口明确阻断。
+            batch_notes = load_legacy_stage_notes(self.store, run_id, version)
 
-        batch_notes = []
         total_facts = 0
         covered_ranges = []
-        for piece_id, piece_body in rows:
-            try:
-                wrapper = json.loads(piece_body)
-                raw_content = wrapper.get('content', piece_body)
-                note = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
-                batch_notes.append(note)
-                facts = note.get('facts', [])
-                sources = note.get('sources', [])
-                total_facts += len(facts)
-                covered_ranges.append({
-                    'path': piece_id.removeprefix('file:'),
-                    'batch_index': note.get('batch_index', len(batch_notes)),
-                    'cursor': note.get('cursor', ''),
-                    'messages_count': note.get('messages_count', len(sources)),
-                    'facts_count': len(facts),
-                    'facts': facts,
-                    'sources': sources,
-                    'start_source': note.get('start_source') or (sources[0] if sources else None),
-                    'end_source': note.get('end_source') or (sources[-1] if sources else None),
-                    'committed_at': note.get('committed_at', ''),
-                })
-            except Exception as exc:
-                logger.warning("解析 batch_note 行失败 [piece_id=%s]: %s", piece_id, exc)
-                continue
+        for note in batch_notes:
+            facts = note['facts']
+            sources = note['sources']
+            total_facts += len(facts)
+            covered_ranges.append({
+                'path': note['file_path'],
+                'batch_index': note['batch_index'],
+                'scope_handle': note.get('scope_handle', ''),
+                'cursor': note.get('cursor', ''),
+                'messages_count': note['messages_count'],
+                'facts_count': len(facts),
+                'facts': facts,
+                'sources': sources,
+                'start_source': note.get('start_source') or (sources[0] if sources else None),
+                'end_source': note.get('end_source') or (sources[-1] if sources else None),
+                'committed_at': note.get('committed_at', ''),
+            })
 
         latest_cursor = batch_notes[-1].get('cursor', '') if batch_notes else ''
         return {'count': len(batch_notes), 'total_facts': total_facts, 'covered_ranges': covered_ranges, 'latest_cursor': latest_cursor}

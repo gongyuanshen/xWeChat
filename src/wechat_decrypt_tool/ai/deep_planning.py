@@ -440,30 +440,7 @@ class PlannedWork:
         plan.update(closed=True, synthesis=synthesis, sources=sources, gaps=gaps)
         self.save(parent, plan)
 
-        # Wire note aggregation so that parallel analysis produces /notes/aggregated.json
-        from .agent_notes import load_stage_notes, consolidate_aggregated_note, check_notes_exceed_safe_window
-        from .deep_backend import TaskBackend
-        notes = load_stage_notes(self.service.store, parent['id'], parent['version'])
-        if notes:
-            backend = TaskBackend(self.service, parent['id'], parent['version'])
-            agg_file = backend.read('/notes/aggregated.json')
-            if agg_file.error or not agg_file.file_data:
-                exceeds, _ = check_notes_exceed_safe_window(notes)
-                if exceeds and hasattr(self.service, 'aggregate_stage_notes'):
-                    try:
-                        loop = asyncio.get_running_loop()
-                    except RuntimeError:
-                        loop = None
-                    if loop and loop.is_running():
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                            pool.submit(asyncio.run, self.service.aggregate_stage_notes(parent)).result()
-                    else:
-                        asyncio.run(self.service.aggregate_stage_notes(parent))
-                else:
-                    agg_note = consolidate_aggregated_note(notes)
-                    backend.write('/notes/aggregated.json', json.dumps(agg_note, ensure_ascii=False, indent=2))
-
+        # 当前批次在主模型下一次调用前统一汇聚；关闭计划只提交已验证的整合结论。
         return {'saved': True, 'gaps': gaps, 'instruction': '按实际证据回答；全量要求仍须通过独立覆盖校验'}
 
     def ready(self, parent):

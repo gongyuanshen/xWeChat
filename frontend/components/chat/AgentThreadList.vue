@@ -2,7 +2,7 @@
   <nav class="agent-thread-list" aria-label="AI 会话列表">
     <header><strong><MessageCircleMore :size="16" :stroke-width="1.8" aria-hidden="true" />AI 助手</strong><button type="button" class="agent-thread-new" aria-label="新对话" title="新对话" @click="$emit('new')"><SquarePen :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
     <label class="agent-thread-search"><Search :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-model="query" aria-label="搜索 AI 会话" placeholder="搜索会话" /></label>
-    <div class="agent-thread-list-heading"><span>最近的会话</span><button type="button" aria-label="刷新会话列表" :disabled="loading" @click="$emit('refresh')"><component :is="loading ? LoaderCircle : RotateCw" :class="loading ? 'agent-icon-spin' : undefined" :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
+    <div class="agent-thread-list-heading"><span>当前聊天的对话</span><button type="button" aria-label="刷新会话列表" :disabled="loading" @click="$emit('refresh')"><component :is="loading ? LoaderCircle : RotateCw" :class="loading ? 'agent-icon-spin' : undefined" :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
     <p v-if="error" class="agent-thread-error" role="alert">{{ error }}</p>
     <div class="agent-thread-items" :aria-busy="loading">
       <p v-if="loading && !items.length" class="agent-thread-empty" role="status">正在加载会话…</p>
