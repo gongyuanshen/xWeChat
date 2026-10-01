@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.routing import APIRoute
@@ -17,10 +17,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator
 
 from ..ai.messages import read_messages
+from ..ai.model_selection import SelectedModel, selected_model
 from ..ai.providers import ProviderFailure
 from ..ai.service import AIService, get_ai_service
 from ..logging_config import get_logger
 from ..wechat_ui_bridge import (
+    ImageSendReceipt,
     SendReceipt,
     WeChatBridge,
     WeChatBridgeError,
@@ -58,6 +60,30 @@ class SendChatResponse(BaseModel):
     timestamp: float
 
 
+class SendImageRequest(BaseModel):
+    account: str = Field(..., min_length=1, description="当前登录微信账号/目录名")
+    username: str = Field(..., min_length=1, description="目标联系人或群聊 username")
+    display_name: Optional[str] = Field(None, description="目标展示名称，优先作为会话搜索标题")
+    image_path: str = Field(..., min_length=1, description="单张本地 JPG/JPEG/PNG 图片的绝对路径")
+
+    @field_validator("account", "username", "image_path")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("字段不能为空或纯空白字符")
+        return value
+
+
+class SendImageResponse(BaseModel):
+    success: bool
+    session: str
+    image_name: str
+    image_format: Literal["JPEG", "PNG"]
+    image_size_bytes: int
+    duration_ms: float
+    timestamp: float
+
+
 class WeChatStatusResponse(BaseModel):
     running: bool
     pid: Optional[int] = None
@@ -71,6 +97,7 @@ class SuggestReplyRequest(BaseModel):
     username: str = Field(..., min_length=1, description="联系人或群聊 username")
     display_name: Optional[str] = Field(None, description="联系人或群聊展示名")
     count: int = Field(default=10, ge=1, le=20, description="读取最近消息数量上下文 (1-20)")
+    selected_model: Optional[SelectedModel] = Field(None, description="点击建议时的顶部 AI 模型选择；未传时使用已保存的选择")
 
     @field_validator("account", "username")
     @classmethod
@@ -129,6 +156,26 @@ async def send_chat_message(
     )
 
 
+@router.post("/chat/send/image", response_model=SendImageResponse, summary="向指定微信会话发送单张本地图片")
+async def send_chat_image(
+    req: SendImageRequest,
+    bridge: WeChatBridge = Depends(get_wechat_bridge),
+) -> SendImageResponse:
+    """The bridge validates the file; success confirms local submission only."""
+    session_title = (
+        req.display_name.strip()
+        if req.display_name and req.display_name.strip()
+        else req.username.strip()
+    )
+    receipt: ImageSendReceipt = await bridge.send_image(session_title=session_title, image_path=req.image_path)
+    return SendImageResponse(
+        success=receipt.success, session=receipt.session_title,
+        image_name=receipt.image_name, image_format=receipt.image_format,
+        image_size_bytes=receipt.image_size_bytes,
+        duration_ms=receipt.duration_ms, timestamp=receipt.timestamp,
+    )
+
+
 @router.get("/chat/send/status", response_model=WeChatStatusResponse, summary="探测微信客户端及窗口状态")
 @router.get("/chat/status", response_model=WeChatStatusResponse, include_in_schema=False)
 async def get_send_status(
@@ -156,7 +203,7 @@ async def suggest_chat_reply(
     Generate an AI reply suggestion based on recent chat history:
     1. Read recent messages via read_messages.
     2. Fail-fast with HTTP 400 if history is empty.
-    3. Resolve default model via service.models.resolve(); fail-fast with HTTP 422 if unconfigured.
+    3. Resolve the same selected model as the AI conversation; fail-fast if unavailable.
     4. Format multi-turn conversation transcript with sender differentiation.
     5. Invoke LLM client with concise Chinese conversational instructions.
     6. Return suggestion draft, context count, and model used.
@@ -191,21 +238,27 @@ async def suggest_chat_reply(
             detail={"code": "NO_CHAT_HISTORY", "message": "该会话暂无历史消息，无法生成回复建议"},
         )
 
-    # Resolve AI model
+    # Use the global AI conversation selection, including its native reasoning settings.
     try:
-        profile = service.models.resolve()
+        choice = req.selected_model.model_dump() if req.selected_model is not None else selected_model(service.store)
+        if not choice.get("profile_id"):
+            raise ProviderFailure("未选择可用的 AI 模型，请在顶部 AI 中选择模型，或前往设置 → AI 服务配置")
+        profile = service.models.resolve_turn(
+            choice["profile_id"], choice.get("model_id", ""), choice.get("reasoning_effort"),
+            choice.get("thinking_mode"), choice.get("thinking_budget"),
+        )
         if not profile or not profile.get("model"):
-            raise ProviderFailure("未配置默认文本 AI 模型")
+            raise ProviderFailure("所选 AI 模型配置缺少模型名称，请前往设置 → AI 服务检查配置")
     except ProviderFailure as exc:
         raise HTTPException(
             status_code=422,
-            detail={"code": "AI_MODEL_NOT_CONFIGURED", "message": "未配置默认 AI 模型，请前往设置配置"},
+            detail={"code": "AI_MODEL_NOT_CONFIGURED", "message": str(exc)},
         ) from exc
     except Exception as exc:
-        logger.warning("Model resolve failed: %s", exc)
+        logger.exception("Failed to resolve AI model for suggest_reply: account=%s username=%s", req.account, req.username)
         raise HTTPException(
-            status_code=422,
-            detail={"code": "AI_MODEL_NOT_CONFIGURED", "message": "未配置默认 AI 模型，请前往设置配置"},
+            status_code=500,
+            detail={"code": "AI_MODEL_RESOLVE_FAILED", "message": "读取 AI 模型配置失败，请查看后端日志"},
         ) from exc
 
     # Build chat transcript

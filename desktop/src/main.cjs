@@ -34,6 +34,7 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { Worker } = require("worker_threads");
+const { chooseChatImage } = require("./chat-image-picker.cjs");
 const {
   cleanupOutputDirectoryBackup,
   getDefaultOutputDirPath,
@@ -2883,6 +2884,15 @@ function registerWindowIpc() {
         canceled: true,
         filePaths: [],
       };
+    }
+  });
+
+  ipcMain.handle("dialog:chooseImage", async (event) => {
+    try {
+      return await chooseChatImage({ event, parentWindow: mainWindow, dialog, nativeImage });
+    } catch (err) {
+      logMain(`[main] dialog:chooseImage failed: ${err?.stack || err}`);
+      throw err;
     }
   });
 

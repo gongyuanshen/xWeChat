@@ -1,7 +1,7 @@
 <template>
   <div
     class="message-input-workspace flex flex-col shrink-0 border-t border-[var(--app-border,#e5e7eb)] bg-[var(--chat-page-bg,#ffffff)] dark:bg-[#1e1e1e] relative select-text"
-    :style="{ height: `${inputHeight}px` }"
+    :style="{ height: `${inputHeight}px`, minHeight: selectedImage?.confirmation ? '260px' : selectedImage ? '200px' : undefined }"
   >
     <!-- Top Draggable Resizer Handle -->
     <div
@@ -42,6 +42,18 @@
       </button>
     </div>
 
+    <div v-if="selectedImage?.confirmation" role="status" class="chat-input-image-pending mx-3 my-1 p-2 rounded border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 text-xs shrink-0">
+      <p>图片发送结果待核对：请在微信「{{ selectedImage.display_name || selectedImage.username }}」中检查对应的新图片，避免重复发送。</p>
+      <div class="flex flex-wrap gap-3 mt-1">
+        <button type="button" class="chat-input-image-confirm underline disabled:opacity-40" :disabled="!imageTargetMatches || isSending" @click="confirmImageSent">已在微信确认发送</button>
+        <button type="button" class="chat-input-image-retry-ready underline disabled:opacity-40" :disabled="!imageTargetMatches || isSending" @click="allowImageRetry">已核对未发送，允许重试</button>
+      </div>
+      <details class="mt-1 max-h-20 overflow-y-auto">
+        <summary class="cursor-pointer">查看原因</summary>
+        <p class="break-words">{{ selectedImage.confirmation.code }}：{{ selectedImage.confirmation.message }}</p>
+      </details>
+    </div>
+
     <!-- Action Toolbar -->
     <div class="chat-input-toolbar flex items-center justify-between px-3 py-1 text-xs border-b border-gray-100 dark:border-gray-800/80 select-none shrink-0">
       <div class="flex items-center gap-2">
@@ -63,6 +75,18 @@
 
         <button
           type="button"
+          class="chat-input-btn-image inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          :disabled="!canPickImage"
+          :aria-busy="isSelectingImage"
+          title="选择 PNG 或 JPEG 图片（Windows 桌面版）"
+          @click="handlePickImage"
+        >
+          <span>▧</span>
+          <span>{{ isSelectingImage ? '选图中...' : '图片' }}</span>
+        </button>
+
+        <button
+          type="button"
           class="chat-input-btn-clear inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           :disabled="!canClear"
           title="清空输入框与错误提示"
@@ -80,6 +104,14 @@
 
     <!-- Textarea & Send Button -->
     <div class="chat-input-body flex-1 flex flex-col min-h-0 relative px-3 py-1.5">
+      <div v-if="selectedImage" class="flex items-center gap-2 mb-1 shrink-0 text-xs">
+        <img :src="selectedImage.previewDataUrl" :alt="selectedImage.name" class="chat-input-image-preview w-12 h-10 object-contain rounded border border-gray-200 dark:border-gray-700" />
+        <div class="min-w-0 flex-1">
+          <div class="truncate">{{ selectedImage.name }}</div>
+          <div class="text-gray-500 truncate">{{ imageTargetMatches ? `发送给 ${selectedImage.display_name || selectedImage.username}` : '图片属于原会话，请切回原会话或移除图片' }}</div>
+        </div>
+        <button type="button" class="chat-input-image-remove px-2 py-1 text-gray-500 disabled:opacity-40" :disabled="isSending || isSelectingImage" aria-label="移除图片" @click="removeImage">移除</button>
+      </div>
       <textarea
         ref="textareaRef"
         v-model="draftText"
@@ -93,7 +125,15 @@
         @compositionend="isComposing = false"
       />
 
-      <div class="chat-input-footer flex items-center justify-end pt-1 pb-0.5 shrink-0">
+      <div class="chat-input-footer flex items-center justify-end gap-2 pt-1 pb-0.5 shrink-0">
+        <button
+          v-if="selectedImage"
+          type="button"
+          class="chat-input-btn-send-image px-3 py-1.5 rounded-md text-xs font-medium border border-[#07c160] text-[#07c160] disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="!canSendImage"
+          :aria-busy="isSending"
+          @click="handleSendImage"
+        >发送图片</button>
         <button
           type="button"
           class="chat-input-btn-send inline-flex items-center justify-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-medium bg-[#07c160] hover:bg-[#06ad56] text-white shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -147,9 +187,12 @@ const inputHeight = ref(DEFAULT_HEIGHT)
 const textareaRef = ref(null)
 const draftText = ref('')
 const isSending = ref(false)
+const isSelectingImage = ref(false)
+const selectedImage = ref(null)
 const isGeneratingAiReply = ref(false)
 const isComposing = ref(false)
 const errorInfo = ref(null)
+const aiView = useState('chat-agent-ui', () => ({ selected: {}, drafts: {}, pinned: {} }))
 
 // Computed helpers to extract data from props.state safely
 const account = computed(() => {
@@ -180,8 +223,12 @@ const placeholderText = computed(() => {
 })
 
 const canSend = computed(() => {
-  return hasAccount.value && hasContact.value && !isSending.value && !!draftText.value.trim()
+  return hasAccount.value && hasContact.value && !isSending.value && !isSelectingImage.value && !!draftText.value.trim()
 })
+
+const canPickImage = computed(() => hasAccount.value && hasContact.value && !isSending.value && !isSelectingImage.value && !selectedImage.value?.confirmation)
+const imageTargetMatches = computed(() => selectedImage.value?.account === account.value && selectedImage.value?.username === contactUsername.value)
+const canSendImage = computed(() => canPickImage.value && !!selectedImage.value && imageTargetMatches.value)
 
 const canAiSuggest = computed(() => {
   return hasAccount.value && hasContact.value && !isSending.value && !isGeneratingAiReply.value
@@ -292,6 +339,87 @@ const handleSend = async () => {
   }
 }
 
+const showImageError = (err) => {
+  const code = err.code || err.data?.code || (typeof err.detail === 'object' ? err.detail?.code : '') || 'IMAGE_SEND_ERROR'
+  const message = err.message || err.detail || err.data?.detail || String(err)
+  errorInfo.value = {
+    code: String(code),
+    message: typeof message === 'object' ? (message.message || message.detail || JSON.stringify(message)) : String(message)
+  }
+}
+
+const handlePickImage = async () => {
+  if (!canPickImage.value) return
+  const target = { account: account.value, username: contactUsername.value, display_name: contactDisplayName.value || null }
+  isSelectingImage.value = true
+  errorInfo.value = null
+  try {
+    const desktop = window.wechatDesktop
+    if (desktop?.platform !== 'win32' || typeof desktop.chooseImage !== 'function') {
+      throw Object.assign(new Error('图片发送仅支持 Windows 桌面版，请使用桌面应用选择图片'), { code: 'IMAGE_SEND_UNSUPPORTED' })
+    }
+    const result = await desktop.chooseImage()
+    if (result.canceled) return
+    if (account.value !== target.account || contactUsername.value !== target.username) {
+      throw Object.assign(new Error('选图期间会话已切换，请在当前会话重新选择图片'), { code: 'IMAGE_TARGET_CHANGED' })
+    }
+    selectedImage.value = { ...result, ...target }
+  } catch (err) {
+    showImageError(err)
+  } finally {
+    isSelectingImage.value = false
+  }
+}
+
+const removeImage = () => {
+  if (isSending.value || isSelectingImage.value) return
+  selectedImage.value = null
+}
+
+const confirmImageSent = () => {
+  if (!selectedImage.value?.confirmation || !imageTargetMatches.value || isSending.value) return
+  // User acknowledgement only; no backend success is manufactured and no resend occurs.
+  selectedImage.value = null
+  if (typeof props.state?.refreshSelectedMessages === 'function') {
+    props.state.refreshSelectedMessages()
+  }
+}
+
+const allowImageRetry = () => {
+  if (!selectedImage.value?.confirmation || !imageTargetMatches.value || isSending.value) return
+  delete selectedImage.value.confirmation
+}
+
+const handleSendImage = async () => {
+  if (!canSendImage.value) return
+  const image = selectedImage.value
+  isSending.value = true
+  errorInfo.value = null
+  try {
+    const receipt = await getApi().sendChatImage({
+      account: image.account,
+      username: image.username,
+      display_name: image.display_name,
+      image_path: image.path
+    })
+    if (receipt?.success !== true) {
+      throw Object.assign(new Error('后端未确认图片发送成功，图片已保留，请检查微信后再决定是否重试'), { code: 'WECHAT_SEND_UNCONFIRMED' })
+    }
+    selectedImage.value = null
+    if (account.value === image.account && contactUsername.value === image.username && typeof props.state?.refreshSelectedMessages === 'function') {
+      props.state.refreshSelectedMessages()
+    }
+  } catch (err) {
+    showImageError(err)
+    if (errorInfo.value.code === 'WECHAT_SEND_UNCONFIRMED') {
+      selectedImage.value.confirmation = errorInfo.value
+      errorInfo.value = null
+    }
+  } finally {
+    isSending.value = false
+  }
+}
+
 // AI Reply Suggestion Handler
 const handleAiSuggest = async () => {
   if (!canAiSuggest.value) return
@@ -300,11 +428,13 @@ const handleAiSuggest = async () => {
 
   try {
     const api = getApi()
+    const choice = aiView.value.modelSelection?.choice
     const res = await api.getAiSuggestedReply({
       account: account.value,
       username: contactUsername.value,
       display_name: contactDisplayName.value || null,
-      count: 10
+      count: 10,
+      ...(choice?.profile_id ? { selected_model: { ...choice } } : {})
     })
 
     if (res?.suggestion) {

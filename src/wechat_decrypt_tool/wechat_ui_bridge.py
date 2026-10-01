@@ -11,11 +11,15 @@ import asyncio
 import ctypes
 from dataclasses import dataclass
 import hashlib
+import io
+import json
 import logging
+from pathlib import Path
 import sys
 import time
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Literal, Optional, Union
 
+from PIL import Image, UnidentifiedImageError
 import psutil
 
 if sys.platform == "win32":
@@ -152,6 +156,19 @@ class SendReceipt:
 
 
 @dataclass
+class ImageSendReceipt:
+    """Confirmed local image submission; not a server-delivery receipt."""
+
+    success: bool
+    session_title: str
+    image_name: str
+    image_format: Literal["JPEG", "PNG"]
+    image_size_bytes: int
+    duration_ms: float
+    timestamp: float
+
+
+@dataclass
 class WeChatStatus:
     running: bool
     pid: Optional[int]
@@ -186,8 +203,13 @@ class WeChatRateLimiter:
         self._session_cache: dict[str, float] = {}
 
     @staticmethod
-    def compute_message_key(session: str, content: str) -> str:
-        """MD5 key for duplicate idempotency: MD5("{session}:{content}")."""
+    def compute_message_key(
+        session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+    ) -> str:
+        """Keep legacy text keys; image fingerprints use a distinct namespace."""
+        if message_kind == "image":
+            payload = json.dumps([session, content], ensure_ascii=False).encode("utf-8")
+            return "image:" + hashlib.sha256(payload).hexdigest()
         payload = f"{session}:{content}".encode("utf-8")
         return hashlib.md5(payload).hexdigest()
 
@@ -200,7 +222,9 @@ class WeChatRateLimiter:
         for s in [s for s, ts in self._session_cache.items() if ts < cutoff_session]:
             del self._session_cache[s]
 
-    def check_and_record(self, session: str, content: str) -> None:
+    def check_and_record(
+        self, session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+    ) -> None:
         """Enforce rate limits and record timestamps atomically.
 
         Raises:
@@ -210,7 +234,7 @@ class WeChatRateLimiter:
         self._prune(now)
 
         # 1. Check duplicate message within 3.0 seconds
-        msg_key = self.compute_message_key(session, content)
+        msg_key = self.compute_message_key(session, content, message_kind=message_kind)
         last_msg = self._msg_cache.get(msg_key)
         if last_msg is not None and (now - last_msg) < self.duplicate_window_s:
             rem = self.duplicate_window_s - (now - last_msg)
@@ -229,17 +253,22 @@ class WeChatRateLimiter:
         self._msg_cache[msg_key] = now
         self._session_cache[session] = now
 
-    def rollback_message(self, session: str, content: str, rollback_session: bool = True) -> None:
+    def rollback_message(
+        self, session: str, content: str, rollback_session: bool = True,
+        *, message_kind: Literal["text", "image"] = "text",
+    ) -> None:
         """Roll back idempotency cache if send fails due to OS/UI error."""
-        msg_key = self.compute_message_key(session, content)
+        msg_key = self.compute_message_key(session, content, message_kind=message_kind)
         self._msg_cache.pop(msg_key, None)
         if rollback_session:
             self._session_cache.pop(session, None)
 
-    def retain_uncertain_message(self, session: str, content: str) -> None:
+    def retain_uncertain_message(
+        self, session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+    ) -> None:
         """Start duplicate protection at the uncertain result, not before UI waits."""
         now = self._clock()
-        self._msg_cache[self.compute_message_key(session, content)] = now
+        self._msg_cache[self.compute_message_key(session, content, message_kind=message_kind)] = now
         self._session_cache[session] = now
 
     def reset(self) -> None:
@@ -741,6 +770,23 @@ class WeChatBridge:
         locked = self._check_window_locked(hwnd)
         return WeChatStatus(running=True, pid=pid, window_found=True, hwnd=hwnd, locked=locked)
 
+    def _prepare_send_window(self) -> int:
+        """Shared desktop/window preflight; callers own their rate reservation."""
+        if self._is_workstation_locked():
+            raise WeChatLockedError("Windows桌面处于锁屏状态，无法投递按键与消息")
+        pid = self._find_main_process_pid()
+        if not pid:
+            raise WeChatProcessNotFoundError()
+        hwnd = self._find_main_window_hwnd(pid)
+        if not hwnd or not (self.win32gui and self.win32gui.IsWindow(hwnd)):
+            raise WeChatWindowNotFoundError()
+        if self._check_window_locked(hwnd):
+            raise WeChatLockedError("微信客户端处于锁定状态，请在电脑端解锁微信后重试")
+        if self._is_window_hung(hwnd):
+            raise WeChatSendTimeoutError("微信主窗口无响应，发送超时")
+        self._activate_window(hwnd)
+        return hwnd
+
     async def send_message(self, session_title: str, content: str) -> SendReceipt:
         """
         Send text message to target WeChat session:
@@ -768,36 +814,8 @@ class WeChatBridge:
         # 3. Concurrency Serialization
         t_start = time.perf_counter()
         async with self._get_lock():
-            # 4. Check workstation / desktop lock
-            if self._is_workstation_locked():
-                self.rate_limiter.rollback_message(session, content)
-                raise WeChatLockedError("Windows桌面处于锁屏状态，无法投递按键与消息")
-
-            # 5. Check process
-            pid = self._find_main_process_pid()
-            if not pid:
-                self.rate_limiter.rollback_message(session, content)
-                raise WeChatProcessNotFoundError()
-
-            # 6. Check window
-            hwnd = self._find_main_window_hwnd(pid)
-            if not hwnd or not (self.win32gui and self.win32gui.IsWindow(hwnd)):
-                self.rate_limiter.rollback_message(session, content)
-                raise WeChatWindowNotFoundError()
-
-            # 7. Check locked window ("微信已锁定")
-            if self._check_window_locked(hwnd):
-                self.rate_limiter.rollback_message(session, content)
-                raise WeChatLockedError("微信客户端处于锁定状态，请在电脑端解锁微信后重试")
-
-            # 8. Check hung window
-            if self._is_window_hung(hwnd):
-                self.rate_limiter.rollback_message(session, content)
-                raise WeChatSendTimeoutError("微信主窗口无响应，发送超时")
-
-            # 9. Activate window & verify foreground
             try:
-                self._activate_window(hwnd)
+                hwnd = self._prepare_send_window()
             except WeChatBridgeError:
                 self.rate_limiter.rollback_message(session, content)
                 raise
@@ -829,6 +847,99 @@ class WeChatBridge:
             duration_ms=duration_ms,
             timestamp=time.time(),
         )
+
+    @staticmethod
+    def _validate_image_path(image_path: str) -> tuple[Path, Literal["JPEG", "PNG"], int, str]:
+        """Validate the file once at the send boundary and fingerprint source bytes."""
+        if not isinstance(image_path, str) or not image_path.strip():
+            raise WeChatBridgeError("图片路径不能为空", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
+        path = Path(image_path)
+        if not path.is_absolute():
+            raise WeChatBridgeError("图片路径必须为本地绝对路径", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
+        try:
+            path = path.resolve(strict=True)
+            if not path.is_file():
+                raise WeChatBridgeError("图片路径必须指向文件", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
+            data = path.read_bytes()
+        except FileNotFoundError as exc:
+            raise WeChatBridgeError("图片文件不存在", code="WECHAT_IMAGE_FILE_NOT_FOUND", status_code=404) from exc
+        except (OSError, ValueError) as exc:
+            raise WeChatBridgeError("图片文件无法读取，请检查路径和文件权限", code="WECHAT_IMAGE_FILE_UNREADABLE", status_code=400) from exc
+
+        expected_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}.get(path.suffix.lower())
+        if expected_format is None:
+            raise WeChatBridgeError("仅支持 JPG、JPEG 或 PNG 图片", code="WECHAT_IMAGE_FORMAT_UNSUPPORTED", status_code=400)
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image_format = image.format
+                if image_format != expected_format:
+                    raise WeChatBridgeError("图片真实格式与扩展名不一致，或不是 JPEG/PNG", code="WECHAT_IMAGE_FORMAT_UNSUPPORTED", status_code=400)
+                image.verify()
+            # verify() checks container integrity; load() also decodes pixels,
+            # exposing truncated JPEG data before touching the client.
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+        except (UnidentifiedImageError, OSError, SyntaxError, ValueError, Image.DecompressionBombError) as exc:
+            raise WeChatBridgeError("图片内容损坏或无法完整解码", code="WECHAT_IMAGE_INVALID", status_code=400) from exc
+        return path, image_format, len(data), hashlib.sha256(data).hexdigest()
+
+    async def send_image(self, session_title: str, image_path: str) -> ImageSendReceipt:
+        """Send one validated image through the Qt client, sharing text serialization."""
+        session = str(session_title or "").strip()
+        if not session:
+            raise WeChatSessionNotFoundError("会话名称不能为空")
+        path, image_format, image_size, fingerprint = self._validate_image_path(image_path)
+        self.rate_limiter.check_and_record(session, fingerprint, message_kind="image")
+        t_start = time.perf_counter()
+        try:
+            async with self._get_lock():
+                try:
+                    hwnd = self._prepare_send_window()
+                    if not self.win32gui.GetClassName(hwnd).lower().startswith("qt"):
+                        raise WeChatBridgeError(
+                            "图片发送目前仅适配 Windows 微信 4.x Qt 客户端",
+                            code="WECHAT_IMAGE_SEND_UNSUPPORTED", status_code=501,
+                        )
+                except Exception:
+                    self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
+                    raise
+                self._send_qt_image(hwnd, session, str(path), fingerprint)
+        except asyncio.CancelledError:
+            # The only async wait is lock acquisition, before any UI submission.
+            self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
+            raise
+        return ImageSendReceipt(
+            success=True, session_title=session, image_name=path.name,
+            image_format=image_format, image_size_bytes=image_size,
+            duration_ms=round((time.perf_counter() - t_start) * 1000.0, 2),
+            timestamp=time.time(),
+        )
+
+    def _send_qt_image(self, hwnd: int, session: str, image_path: str, fingerprint: str) -> None:
+        ui = None
+        try:
+            import uiautomation as auto
+            from .wechat_qt_ui import WeChatQtUI
+
+            with auto.UIAutomationInitializerInThread():
+                ui = WeChatQtUI(hwnd, auto, self.send_timeout_s)
+                ui.send_image(session, image_path, window_api=self.win32gui, process_api=self.win32process)
+        except Exception as exc:
+            attempted = ui is not None and ui.submission_attempted
+            if attempted:
+                self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
+            else:
+                self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
+            stage = ui.stage if ui is not None else "initialize"
+            logger.exception("WeChat image UIA failed: hwnd=%s stage=%s submitted=%s", hwnd, stage, attempted)
+            if isinstance(exc, WeChatBridgeError):
+                raise
+            raise WeChatBridgeError(
+                f"微信图片 UI Automation 操作失败（阶段: {stage}）；请检查客户端状态和后台异常日志"
+                + ("；发送结果不确定，请勿直接重发" if attempted else ""),
+                code="WECHAT_SEND_UNCONFIRMED" if attempted else "WECHAT_UIA_ERROR",
+                status_code=504 if attempted else 502,
+            ) from exc
 
     def _send_qt_message(self, hwnd: int, session: str, content: str) -> None:
         ui = None

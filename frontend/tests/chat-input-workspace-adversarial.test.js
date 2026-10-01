@@ -31,6 +31,8 @@ describe('MessageInputWorkspace Adversarial Stress Suite', () => {
     vi.stubGlobal('ref', ref)
     vi.stubGlobal('computed', computed)
     vi.stubGlobal('useApi', () => mockApi)
+    const aiView = ref({ selected: {}, drafts: {}, pinned: {} })
+    vi.stubGlobal('useState', () => aiView)
     localStorage.clear()
   })
 

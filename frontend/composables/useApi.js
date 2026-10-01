@@ -273,6 +273,18 @@ export const useApi = () => {
     })
   }
 
+  const sendChatImage = async (data = {}) => {
+    return await request('/chat/send/image', {
+      method: 'POST',
+      body: {
+        account: data.account,
+        username: data.username,
+        display_name: data.display_name ?? null,
+        image_path: data.image_path
+      }
+    })
+  }
+
   const getAiSuggestedReply = async (data = {}) => {
     return await request('/chat/suggest_reply', {
       method: 'POST',
@@ -280,7 +292,8 @@ export const useApi = () => {
         account: data.account,
         username: data.username,
         display_name: data.display_name ?? null,
-        count: data.count ?? 10
+        count: data.count ?? 10,
+        ...(data.selected_model ? { selected_model: data.selected_model } : {})
       }
     })
   }
@@ -1179,6 +1192,7 @@ export const useApi = () => {
     listChatMessages,
     getChatMessageRaw,
     sendChatMessage,
+    sendChatImage,
     getAiSuggestedReply,
     getChatSendStatus,
     getChatRealtimeStatus,

@@ -5,6 +5,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import MessageInputWorkspace from '../components/chat/MessageInputWorkspace.vue'
 import ConversationPane from '../components/chat/ConversationPane.vue'
 import { useApi } from '../composables/useApi'
+import { agentModelSelection } from '../lib/agent-model-selection'
 
 const createDeferred = () => {
   let resolve, reject
@@ -17,8 +18,11 @@ const createDeferred = () => {
 
 describe('MessageInputWorkspace & useApi Chat Suite', () => {
   let mockApi
+  let aiView
 
   beforeEach(() => {
+    aiView = ref({ selected: {}, drafts: {}, pinned: {} })
+    vi.stubGlobal('useState', () => aiView)
     mockApi = {
       sendChatMessage: vi.fn().mockResolvedValue({
         success: true,
@@ -304,6 +308,31 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
     expect(textarea.element.value).toBe('好的，下午两点准时参加。')
   })
 
+  it.each(['pending', 'failed'])('AI 建议使用顶部当前模型，即使保存状态为 %s', async status => {
+    const save = createDeferred()
+    const request = vi.fn(() => save.promise)
+    const selection = agentModelSelection(aiView.value, request)
+    const oldChoice = { profile_id: 'old-service', model_id: 'old-model' }
+    selection.loaded({ profiles: [{ id: 'old-service' }], selected_model: oldChoice }, selection.beginLoad())
+    const choice = { profile_id: 'new-service', model_id: 'new-model', reasoning_effort: 'high', thinking_budget: null }
+    const saving = selection.choose(choice)
+    await flushPromises()
+    if (status === 'failed') {
+      save.reject(new Error('save failed'))
+      await saving
+      expect(selection.state.notice).toContain('未保存')
+    } else expect(selection.state.pending).toBe(1)
+    const state = reactive({ selectedAccount: 'test-account', selectedContact: { username: 'friend', name: '好友' } })
+    const wrapper = mount(MessageInputWorkspace, { props: { state, api: mockApi } })
+    await wrapper.find('.chat-input-btn-ai').trigger('click')
+    await flushPromises()
+    expect(mockApi.getAiSuggestedReply).toHaveBeenCalledWith(expect.objectContaining({
+      selected_model: { profile_id: 'new-service', model_id: 'new-model', reasoning_effort: 'high' },
+    }))
+    if (status === 'pending') { save.resolve(choice); await saving }
+    wrapper.unmount()
+  })
+
   it('10. Debug-First / Let-It-Fail：发送异常时严格保留草稿绝不丢失，并展示真实后端错误码和提示', async () => {
     mockApi.sendChatMessage.mockRejectedValueOnce({
       code: 'WECHAT_NOT_RUNNING',
@@ -426,7 +455,8 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
       account: 'acc1',
       username: 'user1',
       display_name: 'Name1',
-      count: 10
+      count: 10,
+      selected_model: { profile_id: 'service', model_id: 'model', thinking_mode: 'disabled' }
     })
     expect(mockFetch).toHaveBeenCalledWith('/chat/suggest_reply', expect.objectContaining({
       baseURL: 'http://127.0.0.1:10392/api',
@@ -435,7 +465,8 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
         account: 'acc1',
         username: 'user1',
         display_name: 'Name1',
-        count: 10
+        count: 10,
+        selected_model: { profile_id: 'service', model_id: 'model', thinking_mode: 'disabled' }
       }
     }))
   })
