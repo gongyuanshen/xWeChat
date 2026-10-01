@@ -98,6 +98,14 @@ from ..session_last_message import (
 from ..sns_realtime_autosync import SNS_REALTIME_AUTOSYNC
 from ..sqlite_diagnostics import collect_sqlite_diagnostics, format_sqlite_diagnostics
 from ..source_fallback import build_source_fallback_meta
+from ..anti_revoke import (
+    format_revoked_message_as_chat_item,
+    get_revoked_messages_list,
+    get_revoked_messages_map,
+    parse_revoke_xml,
+    process_revocation_event,
+    save_messages_to_archive,
+)
 from .chat_contacts import _load_enterprise_contact_info
 from ..wcdb_realtime import (
     WCDBRealtimeError,
@@ -2283,6 +2291,24 @@ def _sync_chat_realtime_messages_for_table(
         inserted = 0
         backfilled = 0
         if new_rows:
+            try:
+                native_self_u = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
+                save_messages_to_archive(
+                    account_dir=account_dir,
+                    account_name=account_dir.name,
+                    username=username,
+                    rows=new_rows,
+                    self_username=native_self_u,
+                )
+            except Exception as e:
+                logger.exception(
+                    "[anti_revoke] Failed to archive realtime messages account=%s username=%s: %s",
+                    account_dir.name,
+                    username,
+                    e,
+                )
+                raise
+
             if not name2id_synced:
                 stage = "upsert_name2id_fallback"
                 _best_effort_upsert_output_name2id_rows(
@@ -3271,9 +3297,34 @@ def _append_full_messages_from_rows(
         location_poiname = ""
         location_label = ""
 
+        revoked_server_id = ""
+        revoked_local_id = 0
+        message_revoke_time = 0
         if local_type == 10000:
             render_type = "system"
             content_text = _parse_system_message_content(raw_text)
+            if "revokemsg" in raw_text.lower():
+                try:
+                    parsed_rev = parse_revoke_xml(raw_text)
+                    if parsed_rev:
+                        revoked_server_id = str(parsed_rev.get("newmsgid") or "")
+                        message_revoke_time = int(parsed_rev.get("revoketime") or create_time or 0)
+                        revoked = process_revocation_event(
+                            account_dir=account_dir,
+                            account_name=account_dir.name,
+                            username=username,
+                            xml_text=raw_text,
+                            revoke_time=create_time or int(time.time()),
+                            server_id=str(r["server_id"] or "0"),
+                            local_id=local_id,
+                        )
+                        if revoked is not None:
+                            revoked_server_id = str(revoked["server_id"] or "")
+                            revoked_local_id = int(revoked["local_id"] or 0)
+                            message_revoke_time = int(revoked["revoke_time"])
+                except Exception as e:
+                    logger.exception("[anti_revoke] process_revocation_event failed account=%s user=%s local_id=%s: %s", account_dir.name, username, local_id, e)
+                    raise
         elif local_type == 49:
             parsed = _parse_app_message(raw_text)
             render_type = str(parsed.get("renderType") or "text")
@@ -3645,6 +3696,9 @@ def _append_full_messages_from_rows(
                 "locationLng": location_lng,
                 "locationPoiname": location_poiname,
                 "locationLabel": location_label,
+                "revokedServerId": revoked_server_id,
+                "revokedLocalId": revoked_local_id,
+                "revokeTime": message_revoke_time,
                 "_rawText": raw_text if local_type in (10000, 266287972401) else "",
             }
         )
@@ -5418,9 +5472,34 @@ def _collect_chat_messages(
                 location_poiname = ""
                 location_label = ""
 
+                revoked_server_id = ""
+                revoked_local_id = 0
+                message_revoke_time = 0
                 if local_type == 10000:
                     render_type = "system"
                     content_text = _parse_system_message_content(raw_text)
+                    if "revokemsg" in raw_text.lower():
+                        try:
+                            parsed_rev = parse_revoke_xml(raw_text)
+                            if parsed_rev:
+                                revoked_server_id = str(parsed_rev.get("newmsgid") or "")
+                                message_revoke_time = int(parsed_rev.get("revoketime") or create_time or 0)
+                                revoked = process_revocation_event(
+                                    account_dir=account_dir,
+                                    account_name=account_dir.name,
+                                    username=username,
+                                    xml_text=raw_text,
+                                    revoke_time=create_time or int(time.time()),
+                                    server_id=str(r["server_id"] or "0"),
+                                    local_id=local_id,
+                                )
+                                if revoked is not None:
+                                    revoked_server_id = str(revoked["server_id"] or "")
+                                    revoked_local_id = int(revoked["local_id"] or 0)
+                                    message_revoke_time = int(revoked["revoke_time"])
+                        except Exception as e:
+                            logger.exception("[anti_revoke] process_revocation_event failed account=%s user=%s local_id=%s: %s", account_dir.name, username, local_id, e)
+                            raise
                 elif local_type == 49:
                     parsed = _parse_app_message(raw_text)
                     render_type = str(parsed.get("renderType") or "text")
@@ -5789,6 +5868,9 @@ def _collect_chat_messages(
                         "locationLng": location_lng,
                         "locationPoiname": location_poiname,
                         "locationLabel": location_label,
+                        "revokedServerId": revoked_server_id,
+                        "revokedLocalId": revoked_local_id,
+                        "revokeTime": message_revoke_time,
                         "_rawText": raw_text if local_type in (10000, 266287972401) else "",
                     }
                 )
@@ -6324,6 +6406,82 @@ def get_chat_message_anchor(
     return resp
 
 
+def _merge_anti_revoke_into_messages(
+    merged: list[dict[str, Any]],
+    *,
+    account_dir: Path,
+    username: str,
+    want_types: Optional[set[str]] = None,
+) -> None:
+    try:
+        revoked_map = get_revoked_messages_map(account_dir, username)
+        revoked_list = get_revoked_messages_list(account_dir, username)
+    except Exception as e:
+        logger.exception(
+            "[anti_revoke] Failed to read revoked messages account=%s user=%s: %s",
+            account_dir.name,
+            username,
+            e,
+        )
+        raise
+
+    if not revoked_map and not revoked_list:
+        return
+
+    seen_non_system_servers: set[str] = set()
+    seen_non_system_locals: set[int] = set()
+
+    for m in merged:
+        sid = str(m.get("serverIdStr") or m.get("serverId") or "").strip()
+        lid = int(m.get("localId") or 0)
+        m_type = int(m.get("type") or 0)
+        is_system = (m_type == 10000 or m.get("renderType") == "system")
+
+        if not is_system:
+            if sid and sid != "0":
+                seen_non_system_servers.add(sid)
+            if lid > 0 and sid in ("", "0"):
+                seen_non_system_locals.add(lid)
+
+            match = None
+            if sid and sid != "0":
+                match = revoked_map.get(f"server:{sid}")
+            elif lid > 0:
+                local_match = revoked_map.get(f"local:{lid}")
+                if local_match is not None:
+                    match_sid = str(local_match.get("server_id") or "").strip()
+                    if match_sid in ("", "0"):
+                        match = local_match
+
+            if match is not None:
+                m["isRevoked"] = True
+                m["revokeTime"] = int(match.get("revoke_time") or m.get("createTime") or 0)
+
+    for rev_row in revoked_list:
+        rsid = str(rev_row.get("server_id") or "").strip()
+        rlid = int(rev_row.get("local_id") or 0)
+        if rsid and rsid != "0":
+            already_present = rsid in seen_non_system_servers
+        else:
+            already_present = rlid > 0 and rlid in seen_non_system_locals
+        if already_present:
+            continue
+
+        chat_item = format_revoked_message_as_chat_item(rev_row, account_dir)
+        if not chat_item:
+            continue
+        if want_types is not None:
+            rt_key = _normalize_render_type_key(chat_item.get("renderType"))
+            if rt_key not in want_types:
+                continue
+
+        merged.append(chat_item)
+        if rsid and rsid != "0":
+            seen_non_system_servers.add(rsid)
+        if rlid > 0 and rsid in ("", "0"):
+            seen_non_system_locals.add(rlid)
+
+
 @router.get("/api/chat/messages", summary="获取会话消息列表")
 def list_chat_messages(
     request: Request,
@@ -6546,6 +6704,21 @@ def list_chat_messages(
                 raw_rows = raw_rows[: int(scan_take)] if int(scan_take) > 0 else []
                 norm_rows = [_normalize_realtime_message_item(r) for r in raw_rows if isinstance(r, dict)]
 
+            native_self_u = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
+            if norm_rows:
+                try:
+                    save_messages_to_archive(
+                        account_dir=account_dir,
+                        account_name=account_dir.name,
+                        username=username,
+                        rows=norm_rows,
+                        my_rowid=my_rowid_realtime if used_exec_query else None,
+                        self_username=native_self_u,
+                    )
+                except Exception as e:
+                    logger.exception("[anti_revoke] Failed to archive realtime rows account=%s user=%s: %s", account_dir.name, username, e)
+                    raise
+
             merged = []
             sender_usernames = []
             quote_usernames = []
@@ -6565,8 +6738,22 @@ def list_chat_messages(
                 my_rowid=my_rowid_realtime if used_exec_query else None,
                 resource_conn=resource_conn,
                 resource_chat_id=resource_chat_id,
-                self_username=_wcdb_resolve_account_native_wxid(account_dir, rt_conn),
+                self_username=native_self_u,
             )
+
+            if merged:
+                try:
+                    save_messages_to_archive(
+                        account_dir=account_dir,
+                        account_name=account_dir.name,
+                        username=username,
+                        rows=merged,
+                        my_rowid=my_rowid_realtime if used_exec_query else None,
+                        self_username=native_self_u,
+                    )
+                except Exception as e:
+                    logger.exception("[anti_revoke] Failed to update archive realtime rows account=%s user=%s: %s", account_dir.name, username, e)
+                    raise
 
             if progressive_filter:
                 break
@@ -7212,12 +7399,19 @@ def list_chat_messages(
         merged = deduped
 
     _postprocess_transfer_messages(merged)
+    _merge_anti_revoke_into_messages(
+        merged,
+        account_dir=account_dir,
+        username=username,
+        want_types=want_types,
+    )
 
-    def sort_key(m: dict[str, Any]) -> tuple[int, int, int]:
+    def sort_key(m: dict[str, Any]) -> tuple[int, int, int, int]:
         sseq = int(m.get("sortSeq") or 0)
         cts = int(m.get("createTime") or 0)
         lid = int(m.get("localId") or 0)
-        return (cts, sseq, lid)
+        is_sys = 1 if (m.get("renderType") == "system" or int(m.get("type") or 0) == 10000) else 0
+        return (cts, sseq, lid, is_sys)
 
     merged.sort(key=sort_key, reverse=True)
     next_scan_offset: Optional[int] = None
@@ -7956,7 +8150,8 @@ async def _search_chat_messages_via_fts(
     stem_to_path = {p.stem: p for p in db_paths}
 
     groups: dict[tuple[Path, str, str], list[int]] = {}
-    ordered_keys: list[tuple[Path, str, str, int]] = []
+    ordered_keys: list[tuple[Any, str, str, int]] = []
+    hit_by_key: dict[tuple[Any, str, str, int], dict[str, Any]] = {}
     for r in rows:
         conv_username = str(r["username"] or "").strip()
         db_stem = str(r["db_stem"] or "").strip()
@@ -7966,12 +8161,29 @@ async def _search_chat_messages_via_fts(
             continue
         db_path = stem_to_path.get(db_stem)
         if db_path is None:
+            payload_str = str(r["payload_json"] if "payload_json" in r.keys() else "")
+            if payload_str:
+                try:
+                    payload_hit = json.loads(payload_str)
+                    if not payload_hit.get("conversationUsername"):
+                        payload_hit["conversationUsername"] = conv_username
+                    if not payload_hit.get("username"):
+                        payload_hit["username"] = conv_username
+                    key4 = (Path(db_stem), table_name, conv_username, local_id)
+                    snippet_src = (
+                        str(payload_hit.get("content") or "").strip()
+                        or str(payload_hit.get("title") or "").strip()
+                    )
+                    payload_hit["snippet"] = _make_snippet(snippet_src, tokens)
+                    hit_by_key[key4] = payload_hit
+                    ordered_keys.append(key4)
+                except Exception:
+                    pass
             continue
         key4 = (db_path, table_name, conv_username, local_id)
         groups.setdefault((db_path, table_name, conv_username), []).append(local_id)
         ordered_keys.append(key4)
 
-    hit_by_key: dict[tuple[Path, str, str, int], dict[str, Any]] = {}
     self_username = _wcdb_resolve_account_native_wxid(account_dir)
 
     for (db_path, table_name, conv_username), local_ids in groups.items():
@@ -8248,6 +8460,28 @@ async def _search_chat_messages_via_fts(
                 sender_contact_rows=contact_rows,
                 wcdb_display_names=wcdb_display_names,
             )
+
+    rev_map = get_revoked_messages_map(account_dir, username)
+    for h in hits:
+        # The archive is authoritative even when an older index payload still
+        # carries a revoked flag or the current confirmed set is empty.
+        h["isRevoked"] = False
+        h.pop("revokeTime", None)
+        if int(h.get("type") or 0) == 10000 or h.get("renderType") == "system":
+            continue
+        sid = str(h.get("serverIdStr") or h.get("serverId") or "").strip()
+        lid = int(h.get("localId") or 0)
+        conv = str(h.get("conversationUsername") or h.get("username") or username or "").strip()
+        m = None
+        if sid and sid != "0":
+            m = rev_map.get(f"server:{sid}")
+        elif lid > 0 and conv:
+            m = rev_map.get(f"local:{conv}:{lid}")
+            if m is not None and str(m.get("server_id") or "0").strip() != "0":
+                m = None
+        if m is not None:
+            h["isRevoked"] = True
+            h["revokeTime"] = int(m.get("revoke_time") or h.get("createTime") or 0)
 
     response = {
         "status": "success",

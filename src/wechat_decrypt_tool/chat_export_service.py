@@ -28,6 +28,11 @@ import requests
 
 from .account_identity import resolve_account_self_rowid, resolve_account_self_username
 from .account_source_policy import account_prefers_decrypted_snapshot
+from .anti_revoke import (
+    get_anti_revoke_db_path,
+    get_revoked_messages_map,
+    get_revoked_messages_list,
+)
 from .chat_helpers import (
     _decode_message_content,
     _decode_sqlite_text,
@@ -4438,6 +4443,99 @@ class _Row:
     is_sent: bool
     packed_info_data: Any = None
     msg_source: Any = None
+    is_revoked: bool = False
+    revoke_time: int = 0
+    extra_json: str = "{}"
+
+
+def _merge_anti_revoke_into_row_stream(
+    row_stream: Iterable[_Row],
+    *,
+    account_dir: Path,
+    conv_username: str,
+    start_time: Optional[int],
+    end_time: Optional[int],
+    local_types: Optional[set[int]] = None,
+) -> Iterable[_Row]:
+    revoked_map = get_revoked_messages_map(account_dir, conv_username)
+    revoked_list = get_revoked_messages_list(account_dir, conv_username)
+
+    def sort_key(r: _Row) -> tuple[int, int, int]:
+        return (int(r.create_time or 0), int(r.sort_seq or 0), int(r.local_id or 0))
+
+    if not revoked_map and not revoked_list:
+        yield from row_stream
+        return
+
+    deleted_rows: list[_Row] = []
+    for rev_row in revoked_list:
+        ct = int(rev_row.get("create_time") or 0)
+        if start_time is not None and ct < int(start_time):
+            continue
+        if end_time is not None and ct > int(end_time):
+            continue
+        lt = int(rev_row.get("local_type") or 1)
+        if local_types is not None and lt not in local_types:
+            continue
+        rlid = int(rev_row.get("local_id") or 0)
+        rsid_str = str(rev_row.get("server_id") or "").strip()
+        rsid = int(rsid_str) if rsid_str.isdigit() else 0
+        deleted_rows.append(
+            _Row(
+                db_stem="anti_revoke",
+                table_name="revoked_messages",
+                local_id=rlid,
+                server_id=rsid,
+                local_type=lt,
+                sort_seq=int(rev_row.get("sort_seq") or 0),
+                create_time=ct,
+                raw_text=str(rev_row.get("content") or ""),
+                sender_username=str(rev_row.get("sender_username") or ""),
+                is_sent=bool(rev_row.get("is_sent")),
+                packed_info_data=rev_row.get("packed_info_data"),
+                msg_source=None,
+                is_revoked=True,
+                revoke_time=int(rev_row.get("revoke_time") or ct),
+                extra_json=str(rev_row.get("extra_json") or "{}"),
+            )
+        )
+    deleted_rows.sort(key=sort_key)
+
+    def tagged_stream() -> Iterable[_Row]:
+        for r in row_stream:
+            sid = str(r.server_id or 0).strip()
+            lid = int(r.local_id or 0)
+            if int(r.local_type or 0) != 10000:
+                match = None
+                if sid and sid != "0":
+                    match = revoked_map.get(f"server:{sid}")
+                elif lid > 0:
+                    match = revoked_map.get(f"local:{lid}")
+                    if match is not None and str(match.get("server_id") or "0") != "0":
+                        match = None
+                if match is not None:
+                    r.is_revoked = True
+                    r.revoke_time = int(match.get("revoke_time") or r.create_time or 0)
+                    if not getattr(r, "extra_json", "") or r.extra_json == "{}":
+                        r.extra_json = str(match.get("extra_json") or "{}")
+            yield r
+
+    seen_non_sys_servers: set[str] = set()
+    seen_non_sys_locals: set[int] = set()
+    for r in heapq.merge(tagged_stream(), deleted_rows, key=sort_key):
+        sid = str(r.server_id or 0).strip()
+        lid = int(r.local_id or 0)
+        is_sys = (int(r.local_type or 0) == 10000)
+        if not is_sys:
+            if sid and sid != "0":
+                if sid in seen_non_sys_servers:
+                    continue
+                seen_non_sys_servers.add(sid)
+            elif lid > 0:
+                if lid in seen_non_sys_locals:
+                    continue
+                seen_non_sys_locals.add(lid)
+        yield r
 
 
 def _iter_rows_for_conversation(
@@ -4454,7 +4552,7 @@ def _iter_rows_for_conversation(
     if source == "realtime":
         if rt_conn is None:
             rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-        return _iter_realtime_rows_for_conversation(
+        base_stream = _iter_realtime_rows_for_conversation(
             rt_conn=rt_conn,
             account_dir=account_dir,
             conv_username=conv_username,
@@ -4462,6 +4560,14 @@ def _iter_rows_for_conversation(
             end_time=end_time,
             local_types=local_types,
             checkpoint=checkpoint,
+        )
+        return _merge_anti_revoke_into_row_stream(
+            base_stream,
+            account_dir=account_dir,
+            conv_username=conv_username,
+            start_time=start_time,
+            end_time=end_time,
+            local_types=local_types,
         )
 
     db_paths = _iter_message_db_paths(account_dir)
@@ -4621,7 +4727,14 @@ def _iter_rows_for_conversation(
             for stream in streams:
                 stream.close()
 
-    return merged_rows()
+    return _merge_anti_revoke_into_row_stream(
+        merged_rows(),
+        account_dir=account_dir,
+        conv_username=conv_username,
+        start_time=start_time,
+        end_time=end_time,
+        local_types=local_types,
+    )
 
 
 def _incremental_row_key(row: _Row) -> tuple[int, int, int, int, str, str]:
@@ -5210,6 +5323,60 @@ def _parse_message_for_export(
                     d = _extract_xml_tag_text(content_text, "des")
                     content_text = t or d or _infer_message_brief_by_local_type(local_type)
 
+    extra_raw = getattr(row, "extra_json", "")
+    extra_meta: dict[str, Any] = {}
+    if extra_raw and isinstance(extra_raw, str) and extra_raw != "{}":
+        try:
+            extra_meta = json.loads(extra_raw)
+        except Exception:
+            extra_meta = {}
+    elif isinstance(extra_raw, dict):
+        extra_meta = extra_raw
+
+    if extra_meta:
+        if not image_md5 and extra_meta.get("imageMd5"):
+            image_md5 = str(extra_meta["imageMd5"])
+            if image_md5 not in image_md5_candidates:
+                image_md5_candidates.append(image_md5)
+        if not native_voice_transcript and extra_meta.get("voiceTranscript"):
+            native_voice_transcript = str(extra_meta["voiceTranscript"])
+        if not video_md5 and extra_meta.get("videoMd5"):
+            video_md5 = str(extra_meta["videoMd5"])
+        if not video_thumb_md5 and extra_meta.get("videoThumbMd5"):
+            video_thumb_md5 = str(extra_meta["videoThumbMd5"])
+        if not emoji_md5 and extra_meta.get("emojiMd5"):
+            emoji_md5 = str(extra_meta["emojiMd5"])
+        if not file_md5 and extra_meta.get("fileMd5"):
+            file_md5 = str(extra_meta["fileMd5"])
+        if not file_size and extra_meta.get("fileSize"):
+            file_size = str(extra_meta["fileSize"])
+        if not title and extra_meta.get("title"):
+            title = str(extra_meta["title"])
+        if not url and extra_meta.get("url"):
+            url = str(extra_meta["url"])
+        if not link_type and extra_meta.get("linkType"):
+            link_type = str(extra_meta["linkType"])
+        if not link_style and extra_meta.get("linkStyle"):
+            link_style = str(extra_meta["linkStyle"])
+        if not quote_title and extra_meta.get("quoteTitle"):
+            quote_title = str(extra_meta["quoteTitle"])
+        if not quote_content and extra_meta.get("quoteContent"):
+            quote_content = str(extra_meta["quoteContent"])
+        if not quote_username and extra_meta.get("quoteUsername"):
+            quote_username = str(extra_meta["quoteUsername"])
+        if not quote_server_id and extra_meta.get("quoteServerId"):
+            quote_server_id = str(extra_meta["quoteServerId"])
+        if not amount and extra_meta.get("amount"):
+            amount = str(extra_meta["amount"])
+        if not transfer_status and extra_meta.get("transferStatus"):
+            transfer_status = str(extra_meta["transferStatus"])
+        if not voice_length and extra_meta.get("voiceLength"):
+            voice_length = str(extra_meta["voiceLength"])
+        if extra_meta.get("renderType") and (render_type == "text" or render_type == "unknown"):
+            render_type = str(extra_meta["renderType"])
+        if (not content_text or content_text in ("[链接]", "[引用]", "[聊天记录]", "[文件]")) and extra_meta.get("content"):
+            content_text = str(extra_meta["content"])
+
     if not content_text:
         content_text = _infer_message_brief_by_local_type(local_type)
 
@@ -5282,6 +5449,8 @@ def _parse_message_for_export(
         "locationLng": location_lng,
         "locationPoiname": location_poiname,
         "locationLabel": location_label,
+        "isRevoked": bool(getattr(row, "is_revoked", False)),
+        "revokeTime": int(getattr(row, "revoke_time", 0) or 0),
     }
 
 
@@ -5553,6 +5722,13 @@ def _write_conversation_json(
                     job=job,
                 )
 
+                if msg.get("isRevoked"):
+                    c = str(msg.get("content") or "").strip()
+                    if not c:
+                        c = str(_infer_message_brief_by_local_type(int(msg.get("type") or 1)))
+                    if not c.startswith("【已撤回】"):
+                        msg["content"] = f"【已撤回】{c}"
+
                 if not first:
                     tw.write(",\n")
                 tw.write("    " + json.dumps(msg, ensure_ascii=False))
@@ -5627,12 +5803,18 @@ def _write_conversation_excel(**kwargs: Any) -> int:
                 ).strip()
             if not content:
                 content = json.dumps(message, ensure_ascii=False, default=str, sort_keys=True)
+            is_revoked = bool(message.get("isRevoked"))
+            if is_revoked and not content.startswith("【已撤回】"):
+                content = f"【已撤回】{content}"
+            msg_type = str(message.get("renderType") or message.get("type") or "")
+            if is_revoked and not msg_type.startswith("【已撤回】"):
+                msg_type = f"【已撤回】{msg_type}"
             rows.append(
                 [
                     str(index),
                     str(message.get("createTimeText") or message.get("createTime") or message.get("timestamp") or ""),
                     str(message.get("senderDisplayName") or message.get("senderUsername") or ""),
-                    str(message.get("renderType") or message.get("type") or ""),
+                    msg_type,
                     content,
                     str(message.get("localId") or ""),
                     str(message.get("serverId") or ""),
@@ -7000,6 +7182,11 @@ def _write_conversation_html(
                 )
 
                 # Message body
+                is_revoked = bool(msg.get("isRevoked"))
+                revoked_flex_cls = "flex items-end gap-1.5 " + ("flex-row-reverse" if is_sent else "flex-row")
+                if is_revoked:
+                    tw.write(f'                  <div class="{esc_attr(revoked_flex_cls)}">\n')
+
                 bubble_dir_cls = "bg-[#95EC69] text-black bubble-tail-r" if is_sent else "bg-white text-gray-800 bubble-tail-l"
                 bubble_base_cls = "px-3 py-2 text-sm max-w-sm relative msg-bubble whitespace-pre-wrap break-words leading-relaxed"
                 bubble_unknown_cls = (
@@ -7622,6 +7809,10 @@ def _write_conversation_html(
                         content = f"[{str(msg.get('type') or 'unknown')}] 消息"
                     tw.write(f'                  <div class="{esc_attr(bubble_unknown_cls + " " + bubble_dir_cls)}">{render_text_with_emojis(content)}</div>\n')
 
+                if is_revoked:
+                    tw.write('                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 border border-red-200/60 dark:bg-red-950/40 dark:text-red-400 dark:border-red-800/50 flex-shrink-0 select-none">已撤回</span>\n')
+                    tw.write('                  </div>\n')
+
                 tw.write("                </div>\n")
                 tw.write("              </div>\n")
                 tw.write("            </div>\n")
@@ -7887,6 +8078,11 @@ def _format_message_line_txt(*, msg: dict[str, Any]) -> str:
 
     rt = str(msg.get("renderType") or "text")
     content = str(msg.get("content") or "").strip()
+    if msg.get("isRevoked"):
+        if not content:
+            content = str(_infer_message_brief_by_local_type(int(msg.get("type") or 1)))
+        if not content.startswith("【已撤回】"):
+            content = f"【已撤回】{content}"
     extra = ""
     if rt == "link":
         title = str(msg.get("title") or "").strip()

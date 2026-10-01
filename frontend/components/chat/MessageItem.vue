@@ -75,7 +75,15 @@
             {{ message.fullTime }}
           </div>
 
-          <MessageContent :message="message" :state="state" />
+          <div class="flex items-end gap-1.5" :class="message.isSent ? 'flex-row-reverse' : 'flex-row'">
+            <MessageContent :message="message" :state="state" />
+            <span
+              v-if="message.isRevoked"
+              class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-50 text-red-600 border border-red-200/60 dark:bg-red-950/40 dark:text-red-400 dark:border-red-800/50 flex-shrink-0 select-none"
+            >
+              已撤回
+            </span>
+          </div>
 
           <ContactProfileCard
             v-if="isMentionContactProfileCardForMessage && isMentionContactProfileCardForMessage(message)"

@@ -2361,52 +2361,97 @@ export const useChatMessages = ({
     trace.log('refreshCurrentMessageMedia:end')
   }
 
-  const mergeRealtimeMessages = (existing, rawMessages) => {
+  const mergeRealtimeMessages = (existing, rawMessages, { authoritative = false } = {}) => {
     const input = (Array.isArray(rawMessages) ? rawMessages : [rawMessages])
       .filter((message) => message && typeof message === 'object')
     if (!input.length) return { changed: false, messages: existing, addedCount: 0 }
 
     loadLargeImagePreferences()
-    const latest = hydrateQuoteImageUrls(dedupeMessagesById(input.map(normalizeMessage)), existing)
+    // A revoke notice can replace the database row of its original message.
+    // Keep those two timeline entries distinct even when both IDs are equal.
+    const isSystem = (message) => message.renderType === 'system' || Number(message.type) === 10000
+    const idKey = (message) => `${isSystem(message) ? 'system' : 'message'}:${message.id || ''}`
+    const serverKey = (message) => {
+      const serverId = String(message.serverIdStr || message.serverId || '').trim()
+      return serverId && serverId !== '0' ? `${isSystem(message) ? 'system' : 'message'}:${serverId}` : ''
+    }
+    const latest = hydrateQuoteImageUrls(input.map(normalizeMessage), existing)
     const latestById = new Map(
       latest
-        .map((message) => [String(message?.id || ''), message])
-        .filter(([id]) => !!id)
+        .filter((message) => !!message.id)
+        .map((message) => [idKey(message), message])
     )
     const latestByServerId = new Map(
       latest
-        .map((message) => [String(message?.serverIdStr || message?.serverId || '').trim(), message])
-        .filter(([serverId]) => !!serverId && serverId !== '0')
+        .map((message) => [serverKey(message), message])
+        .filter(([key]) => !!key)
     )
     let existingChanged = false
     const updatedExisting = existing.map((message) => {
-      const incoming = latestById.get(String(message?.id || ''))
-        || latestByServerId.get(String(message?.serverIdStr || message?.serverId || '').trim())
+      const incoming = latestByServerId.get(serverKey(message)) || latestById.get(idKey(message))
       if (!incoming) return message
-      const updated = mergeWechatNativeVoiceTranscript(message, incoming)
+      if (serverKey(message) && serverKey(incoming) && serverKey(message) !== serverKey(incoming)) return message
+      let updated = mergeWechatNativeVoiceTranscript(message, incoming)
+      if (!isSystem(message) && (authoritative || incoming.isRevoked) && incoming.isRevoked !== !!updated.isRevoked) {
+        updated = { ...updated, isRevoked: incoming.isRevoked, revokeTime: incoming.isRevoked ? incoming.revokeTime : 0 }
+      }
       if (updated !== message) existingChanged = true
       return updated
     })
 
-    const seenIds = new Set(updatedExisting.map((message) => String(message?.id || '')))
+    const seenIds = new Set(updatedExisting.map(idKey))
     const seenServerIds = new Set(
       updatedExisting
-        .map((message) => String(message?.serverIdStr || message?.serverId || '').trim())
-        .filter((serverId) => !!serverId && serverId !== '0')
+        .map(serverKey)
+        .filter(Boolean)
     )
     const newOnes = []
     for (const message of latest) {
-      const id = String(message?.id || '')
-      const serverId = String(message?.serverIdStr || message?.serverId || '').trim()
-      if (!id || seenIds.has(id) || (serverId && serverId !== '0' && seenServerIds.has(serverId))) continue
+      const id = idKey(message)
+      const serverId = serverKey(message)
+      if (!message.id || seenIds.has(id) || (serverId && seenServerIds.has(serverId))) continue
       seenIds.add(id)
-      if (serverId && serverId !== '0') seenServerIds.add(serverId)
+      if (serverId) seenServerIds.add(serverId)
       newOnes.push(message)
+    }
+
+    const combined = [...updatedExisting, ...newOnes]
+    for (const msg of latest) {
+      if (!isSystem(msg)) continue
+      const revServerId = String(msg.revokedServerId || '').trim()
+      const revLocalId = Number(msg.revokedLocalId || 0)
+      if ((!revServerId || revServerId === '0') && revLocalId <= 0) continue
+      for (let i = 0; i < combined.length; i++) {
+        const target = combined[i]
+        if (isSystem(target)) continue
+        const targetServerId = String(target.serverIdStr || target.serverId || '').trim()
+        const hasRevServerId = !!revServerId && revServerId !== '0'
+        const hasTargetServerId = !!targetServerId && targetServerId !== '0'
+        const match = hasRevServerId || hasTargetServerId
+          ? hasRevServerId && hasTargetServerId && targetServerId === revServerId
+          : revLocalId > 0 && Number(target.localId || 0) === revLocalId
+        if (match && !target.isRevoked) {
+          combined[i] = { ...target, isRevoked: true, revokeTime: msg.revokeTime || msg.createTime || 0 }
+          existingChanged = true
+        }
+      }
+    }
+
+    // Mirror the backend archive ID when the native row now belongs to the
+    // system notice, so Vue can render both entries with distinct keys.
+    const systemIds = new Set(combined.filter(isSystem).map((message) => message.id))
+    for (let i = 0; i < combined.length; i++) {
+      const message = combined[i]
+      if (isSystem(message) || !systemIds.has(message.id)) continue
+      const serverId = String(message.serverIdStr || message.serverId || '').trim()
+      const originalId = serverId && serverId !== '0' ? serverId : message.localId
+      combined[i] = { ...message, id: `anti_revoke:${selectedContact.value.username}:${originalId}` }
+      existingChanged = true
     }
 
     return {
       changed: newOnes.length > 0 || existingChanged,
-      messages: hydrateQuoteImageUrls([...updatedExisting, ...newOnes]),
+      messages: hydrateQuoteImageUrls(combined),
       addedCount: newOnes.length
     }
   }
@@ -2487,7 +2532,7 @@ export const useChatMessages = ({
       const response = await api.listChatMessages(params)
       if (selectedContact.value?.username !== username) return
 
-      const merged = mergeRealtimeMessages(existing, response?.messages || [])
+      const merged = mergeRealtimeMessages(existing, response?.messages || [], { authoritative: true })
       if (!merged.changed) return
       allMessages.value = {
         ...allMessages.value,

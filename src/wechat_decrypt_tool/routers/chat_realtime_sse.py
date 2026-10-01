@@ -413,6 +413,10 @@ async def stream_chat_realtime_messages(
                                 "cursor": local_id,
                                 "ts": int(time.time() * 1000),
                                 "message": message,
+                                "isRevoked": bool(message.get("isRevoked")),
+                                "revokeTime": int(message.get("revokeTime") or 0),
+                                "revokedServerId": str(message.get("revokedServerId") or ""),
+                                "revokedLocalId": int(message.get("revokedLocalId") or 0),
                                 **metadata,
                             }
                             yield _sse_data(

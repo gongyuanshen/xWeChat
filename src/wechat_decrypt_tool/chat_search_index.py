@@ -1,4 +1,5 @@
 import os
+import hashlib
 import json
 import sqlite3
 import threading
@@ -7,6 +8,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .account_identity import resolve_account_self_rowid
+from .anti_revoke import (
+    format_revoked_message_as_chat_item,
+    get_all_revoked_messages,
+    get_anti_revoke_db_path,
+    get_revoked_messages_map,
+)
 from .chat_helpers import (
     _decode_sqlite_text,
     _quote_ident,
@@ -244,6 +251,14 @@ def get_chat_search_index_status(account_dir: Path, *, source: Optional[str] = N
         and index_mtime_ns > 0
         and source_latest_mtime_ns > index_mtime_ns
     )
+    # Committed revoke changes can live only in WAL. Compare the confirmed
+    # records themselves; archive writes and read-side checkpoints are not
+    # evidence that a message's revoke status changed.
+    stale_for_anti_revoke = bool(
+        inspect.get("ready")
+        and (get_anti_revoke_db_path(account_dir).exists() or "anti_revoke_signature" in meta)
+        and meta.get("anti_revoke_signature") != _anti_revoke_signature(get_all_revoked_messages(account_dir))
+    )
     # A completed, schema-compatible index remains usable when newer messages
     # arrive.  Freshness is advisory: rebuilding a multi-GB index is expensive,
     # and a live SQLite WAL will normally become newer again soon after a build.
@@ -252,6 +267,7 @@ def get_chat_search_index_status(account_dir: Path, *, source: Optional[str] = N
     ready = (
         bool(inspect.get("ready"))
         and actual_source == desired_source
+        and not stale_for_anti_revoke
     )
     up_to_date = bool(ready and not stale_for_source_data)
     with _BUILD_LOCK:
@@ -268,6 +284,7 @@ def get_chat_search_index_status(account_dir: Path, *, source: Optional[str] = N
             "desiredSource": desired_source,
             "staleForSource": bool(inspect.get("ready")) and actual_source != desired_source,
             "staleForSourceData": stale_for_source_data,
+            "staleForAntiRevoke": stale_for_anti_revoke,
             "indexMtimeNs": index_mtime_ns,
             "sourceLatestMtimeNs": source_latest_mtime_ns,
             "sourceLatestPath": source_latest_path,
@@ -586,6 +603,7 @@ _INDEX_PAYLOAD_KEYS = (
     "db",
     "table",
     "username",
+    "conversationUsername",
     "localId",
     "serverId",
     "serverIdStr",
@@ -606,6 +624,8 @@ _INDEX_PAYLOAD_KEYS = (
     "locationPoiname",
     "locationLabel",
     "source",
+    "isRevoked",
+    "revokeTime",
 )
 
 
@@ -681,6 +701,16 @@ def _hit_to_index_payload(hit: dict[str, Any], *, source: str) -> dict[str, Any]
     return payload
 
 
+def _anti_revoke_signature(rows: list[dict[str, Any]]) -> str:
+    fields = (
+        "account", "username", "server_id", "local_id", "is_revoked",
+        "revoke_time", "create_time", "sort_seq", "sender_username", "is_sent",
+        "local_type", "content", "extra_json",
+    )
+    records = sorted(tuple(str(row.get(field, "")) for field in fields) for row in rows)
+    return hashlib.sha256(json.dumps(records, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
 def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -> None:
     key = _account_key(account_dir)
     started = time.time()
@@ -744,6 +774,12 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
             )
 
             completed_conversations: set[str] = set()
+            all_revoked = get_all_revoked_messages(account_dir)
+            anti_revoke_signature = _anti_revoke_signature(all_revoked)
+            revoked_map = get_revoked_messages_map(account_dir)
+            indexed_servers: set[str] = set()
+            indexed_locals: set[tuple[str, int]] = set()
+
             for db_path in db_paths:
                 _update_build_state(key, currentDb=str(db_path.name))
                 msg_conn = sqlite3.connect(str(db_path))
@@ -820,6 +856,30 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                             except Exception:
                                 continue
 
+                            sid = str(hit.get("serverIdStr") or hit.get("serverId") or "").strip()
+                            lid = int(hit.get("localId") or 0)
+                            conv_user = str(hit.get("conversationUsername") or conv_username or "").strip()
+                            hit_type = int(hit.get("type") or 0)
+                            is_sys = (hit_type == 10000 or hit.get("renderType") == "system")
+                            if not is_sys:
+                                if sid and sid != "0":
+                                    indexed_servers.add(sid)
+                                elif lid > 0 and conv_user:
+                                    indexed_locals.add((conv_user, lid))
+
+                            match = None
+                            if not is_sys:
+                                if sid and sid != "0":
+                                    match = revoked_map.get(f"server:{sid}")
+                                elif lid > 0 and conv_user:
+                                    match = revoked_map.get(f"local:{conv_user}:{lid}")
+                                    if match is not None and str(match.get("server_id") or "0") != "0":
+                                        match = None
+
+                            if match is not None:
+                                hit["isRevoked"] = True
+                                hit["revokeTime"] = int(match.get("revoke_time") or hit.get("createTime") or 0)
+
                             hay_items = [
                                 str(hit.get("content") or ""),
                                 str(hit.get("title") or ""),
@@ -828,6 +888,8 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                                 str(hit.get("quoteContent") or ""),
                                 str(hit.get("amount") or ""),
                             ]
+                            if hit.get("isRevoked"):
+                                hay_items.insert(0, "【已撤回】")
                             haystack = "\n".join([x for x in hay_items if x.strip()])
                             if not haystack.strip():
                                 continue
@@ -882,6 +944,76 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                 finally:
                     msg_conn.close()
 
+            for rev_row in all_revoked:
+                rsid = str(rev_row.get("server_id") or "").strip()
+                rlid = int(rev_row.get("local_id") or 0)
+                rev_user = str(rev_row.get("username") or "").strip()
+                if (
+                    rsid in indexed_servers if rsid and rsid != "0"
+                    else rlid > 0 and rev_user and (rev_user, rlid) in indexed_locals
+                ):
+                    continue
+
+                chat_item = format_revoked_message_as_chat_item(rev_row, account_dir)
+                conv_username = str(chat_item.get("conversationUsername") or rev_user or "").strip()
+                if not conv_username:
+                    continue
+                sess_info = sessions.get(conv_username, {"is_hidden": 0, "is_official": 0})
+                hay_items = [
+                    "【已撤回】",
+                    str(chat_item.get("content") or ""),
+                    str(chat_item.get("title") or ""),
+                    str(chat_item.get("url") or ""),
+                    str(chat_item.get("quoteTitle") or ""),
+                    str(chat_item.get("quoteContent") or ""),
+                    str(chat_item.get("amount") or ""),
+                ]
+                haystack = "\n".join([x for x in hay_items if x.strip()])
+                token_text = _to_char_token_text(haystack)
+                if not token_text:
+                    continue
+                _update_single_char_token_stats(token_doc_counts, token_text)
+
+                batch.append(
+                    (
+                        token_text,
+                        conv_username,
+                        str(chat_item.get("renderType") or ""),
+                        int(chat_item.get("createTime") or 0),
+                        int(chat_item.get("sortSeq") or 0),
+                        int(chat_item.get("localId") or 0),
+                        int(chat_item.get("serverId") or 0),
+                        int(chat_item.get("type") or 1),
+                        "anti_revoke",
+                        "revoked_messages",
+                        str(chat_item.get("senderUsername") or ""),
+                        int(sess_info.get("is_hidden") or 0),
+                        int(sess_info.get("is_official") or 0),
+                        _json_dumps_compact(_hit_to_index_payload(chat_item, source="anti_revoke")),
+                    )
+                )
+                if rsid and rsid != "0":
+                    indexed_servers.add(rsid)
+                elif rlid > 0 and conv_username:
+                    indexed_locals.add((conv_username, rlid))
+
+                if len(batch) >= insert_batch_size:
+                    flushed, next_rowid = _flush_index_batch(
+                        conn_fts,
+                        insert_fts_sql=insert_sql,
+                        insert_meta_sql=insert_meta_sql,
+                        batch=batch,
+                        next_rowid=next_rowid,
+                    )
+                    indexed += flushed
+                    elapsed = max(0.001, time.time() - started)
+                    _update_build_state(
+                        key,
+                        indexedMessages=int(indexed),
+                        messagesPerSec=round(indexed / elapsed, 1),
+                        uniqueSearchTokens=len(token_doc_counts),
+                    )
+
             if batch:
                 flushed, next_rowid = _flush_index_batch(
                     conn_fts,
@@ -926,6 +1058,11 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                 "INSERT INTO meta(key, value) VALUES(?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("source", source_norm),
+            )
+            conn_fts.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                ("anti_revoke_signature", anti_revoke_signature),
             )
             conn_fts.commit()
         finally:

@@ -287,11 +287,11 @@ def _resolve_msg_table_name(conn: sqlite3.Connection, username: str) -> Optional
     expected_chat = f"chat_{md5_hex}".lower()
 
     rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    names = [r[0] for r in rows if r and r[0]]
+    names = [_decode_sqlite_text(r[0]) for r in rows if r and r[0]]
 
     for name in names:
-        if str(name).lower() == expected:
-            return str(name)
+        if name.lower() == expected:
+            return name
 
     for name in names:
         if str(name).lower() == expected_chat:
