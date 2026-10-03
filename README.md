@@ -22,11 +22,15 @@
 
 ---
 
-## 📖 项目简介
+## 📖 项目简介与血缘说明
 
 **WeChatDataAnalysis** 是一个面向 Windows 平台的个人本地微信数据分析与交互实验工具。本项目纯粹源于个人对客户端架构、本地数据库处理以及端侧 AI 模型的学习研究兴趣，旨在提供一个轻量、纯本地、私密的聊天数据浏览与分析环境。
 
 所有数据均在使用者本机解密与处理，不依赖任何第三方远程后端服务，充分保障个人数据隐私与安全。
+
+### 🧬 项目衍生与技术来源
+- **基础项目**：本项目是在 [LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)（微信4.x数据解密并生成年度总结）的基础上进行的**二次开发**。在此基础上净化了冗余代码，移除了商业化/收费引流机制与非 Windows 跨平台依赖，专注于打造一个简洁干净的纯 Windows 个人本地娱乐与学习版本。
+- **AI 画像与意图洞察**：项目中的 **AI 聊天画像与意图洞察** 核心功能，是基于开源项目 [tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)（微信聊天分析工具，支持本地 Laya 与 API 模型，提供意图识别、情绪感知、人物画像、群聊画像、好感度分析和 MBTI 聊天推测）进行深度集成与二次开发实现。
 
 ---
 
@@ -45,6 +49,7 @@
 - **消息搜索与定位**：支持按关键词、时间范围在本地会话中快速检索消息，并定位至上下文。
 
 ### 3. 🧠 AI 聊天画像与意图洞察 (Chat Insights)
+> *注：本模块核心功能基于开源项目 [tswawa/WechatVibe](https://github.com/tswawa/WechatVibe) 进行深度集成与本地化适配。*
 - **本地离线 Laya 模型**：支持在 CPU 端直接加载轻量级 Laya 分类模型，实现**零网络消耗、无需 API Key、完全离线**的情绪与意图识别。
 - **云端大模型 API 模式**：兼容主流大模型接口，提供更细腻的长篇人物画像分析。
 - **微观消息标签**：在单条消息旁显示紧凑的情绪与意图标签，并提供溯源依据展示。
@@ -155,10 +160,15 @@ npm run dist
 
 ---
 
-## 💖 致谢
+## 💖 致谢与开源基石
 
-感谢以下优秀开源项目与技术分享者为本项目提供的灵感与参考：
+本项目离不开开源社区的先驱工作，在此特别感谢以下基石项目与技术分享者：
 
+### 核心上游与功能基石
+- **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**：微信 4.x 数据解密与分析工具，本项目二次开发的底层基础项目。
+- **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**：微信聊天分析工具，本项目 AI 聊天画像、情绪感知、意图识别与 MBTI 推测功能的直接来源与核心基石。
+
+### 灵感与技术参考
 - [H3CoF6](https://github.com/H3CoF6)
 - [echotrace](https://github.com/ycccccccy/echotrace)
 - [WeFlow](https://github.com/hicccc77/WeFlow)
