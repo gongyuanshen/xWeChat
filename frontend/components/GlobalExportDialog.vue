@@ -212,6 +212,7 @@
 <script setup>
 import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { formatBytes } from '~/lib/format-bytes'
 
 const props = defineProps({
   open: { type: Boolean, default: false }
@@ -303,20 +304,6 @@ const statusClass = (status) => {
   if (status === 'error') return 'bg-red-100 text-red-700'
   if (status === 'cancelled') return 'bg-gray-100 text-gray-600'
   return 'bg-gray-100 text-gray-600'
-}
-
-const formatBytes = (value) => {
-  const bytes = Number(value)
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let size = bytes
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  const digits = size >= 100 || index === 0 ? 0 : size >= 10 ? 1 : 2
-  return `${size.toFixed(digits)} ${units[index]}`
 }
 
 const buildExportTimestamp = () => {

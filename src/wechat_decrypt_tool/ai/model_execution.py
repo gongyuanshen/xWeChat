@@ -13,6 +13,7 @@ class CallPolicy:
     constrain_thinking: bool = False
     split_on_failure: bool = True
     auxiliary: bool = False
+    strict_output: bool = False
 
 
 call_policy = ContextVar('ai_call_policy', default=CallPolicy())

@@ -22,6 +22,7 @@ from ..ai.providers import ProviderFailure
 from ..ai.service import AIService, get_ai_service
 from ..logging_config import get_logger
 from ..wechat_ui_bridge import (
+    FileSendReceipt,
     ImageSendReceipt,
     SendReceipt,
     WeChatBridge,
@@ -80,6 +81,29 @@ class SendImageResponse(BaseModel):
     image_name: str
     image_format: Literal["JPEG", "PNG"]
     image_size_bytes: int
+    duration_ms: float
+    timestamp: float
+
+
+class SendFileRequest(BaseModel):
+    account: str = Field(..., min_length=1, description="当前登录微信账号/目录名")
+    username: str = Field(..., min_length=1, description="目标联系人或群聊 username")
+    display_name: Optional[str] = Field(None, description="目标展示名称，优先作为会话搜索标题")
+    file_path: str = Field(..., min_length=1, description="单个本地普通文件的绝对路径；JPG/JPEG/PNG 使用图片接口")
+
+    @field_validator("account", "username", "file_path")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("字段不能为空或纯空白字符")
+        return value
+
+
+class SendFileResponse(BaseModel):
+    success: bool
+    session: str
+    file_name: str
+    file_size_bytes: int
     duration_ms: float
     timestamp: float
 
@@ -167,11 +191,33 @@ async def send_chat_image(
         if req.display_name and req.display_name.strip()
         else req.username.strip()
     )
-    receipt: ImageSendReceipt = await bridge.send_image(session_title=session_title, image_path=req.image_path)
+    receipt: ImageSendReceipt = await bridge.send_image(
+        session_title=session_title, image_path=req.image_path,
+        account=req.account.strip(), username=req.username.strip(),
+    )
     return SendImageResponse(
         success=receipt.success, session=receipt.session_title,
         image_name=receipt.image_name, image_format=receipt.image_format,
         image_size_bytes=receipt.image_size_bytes,
+        duration_ms=receipt.duration_ms, timestamp=receipt.timestamp,
+    )
+
+
+@router.post("/chat/send/file", response_model=SendFileResponse, summary="向指定微信会话发送单个本地文件")
+async def send_chat_file(
+    req: SendFileRequest,
+    bridge: WeChatBridge = Depends(get_wechat_bridge),
+) -> SendFileResponse:
+    """The bridge validates the file; success confirms local submission only."""
+    session_title = (
+        req.display_name.strip()
+        if req.display_name and req.display_name.strip()
+        else req.username.strip()
+    )
+    receipt: FileSendReceipt = await bridge.send_file(session_title=session_title, file_path=req.file_path)
+    return SendFileResponse(
+        success=receipt.success, session=receipt.session_title,
+        file_name=receipt.file_name, file_size_bytes=receipt.file_size_bytes,
         duration_ms=receipt.duration_ms, timestamp=receipt.timestamp,
     )
 

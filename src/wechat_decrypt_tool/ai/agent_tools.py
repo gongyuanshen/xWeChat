@@ -36,7 +36,8 @@ def normalize(account, username, raw, name=''):
     if not anchor:
         return None
     timestamp = int(raw.get('createTime') or raw.get('create_time') or 0)
-    identity = message_identity(raw.get('serverIdStr') or raw.get('serverId') or raw.get('server_id'), anchor, timestamp)
+    identity = message_identity(raw.get('serverIdStr') or raw.get('serverId') or raw.get('server_id'),
+                                anchor, timestamp, raw.get('type') or raw.get('local_type'))
     return {'source': hashlib.sha256(f'{account}:{username}:{identity}'.encode()).hexdigest()[:24], 'identity': identity,
             'anchor': anchor, 'username': username, 'name': name or raw.get('conversationName') or username,
             'time': timestamp,
@@ -79,6 +80,45 @@ class ChatTools:
 
     async def group_people(self, account, usernames, people):
         return await asyncio.to_thread(group_people_directory, account, usernames, people)
+
+    @foreground_read
+    async def latest(self, account, usernames, start, end, *, sender=None, kind=None, offsets=None, limit=20, checkpoint=None):
+        """读取全局最新一批；偏移只提交实际入选的筛选后消息。"""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_READ_MESSAGES:
+            raise ValueError(f'每批消息数量必须是 1 到 {MAX_READ_MESSAGES} 的整数')
+        offsets = offsets or {}
+        usernames = sorted(set(usernames))
+        if any(not isinstance(offsets.get(u, 0), int) or isinstance(offsets.get(u, 0), bool) or
+               offsets.get(u, 0) < 0 for u in usernames):
+            raise ValueError('消息分页偏移必须是非负整数')
+        from .messages import iter_message_pages
+
+        def collect():
+            candidates, warnings = [], []
+            more = False
+            next_offsets = {u: offsets.get(u, 0) for u in usernames}
+            for username in usernames:
+                if checkpoint:
+                    checkpoint()
+                stream = iter_message_pages(account, username, start, end, descending=True,
+                    message_kind=kind, sender_id=sender, page_offset=next_offsets[username], page_size=limit + 1,
+                    max_batch_chars=float('inf'), checkpoint=checkpoint)
+                try:
+                    page = next(stream)
+                    more = more or page['has_more']
+                    if page.get('warning'):
+                        warnings.append(page['warning'])
+                    for order, message in enumerate(page['messages']):
+                        message['name'] = page.get('name') or username
+                        candidates.append((-message['time'], username, order, message))
+                finally:
+                    stream.close()
+            selected = sorted(candidates, key=lambda x: x[:3])[:limit]
+            for _, username, _, _ in selected:
+                next_offsets[username] += 1
+            return {'messages': [x[3] for x in selected], 'has_more': more or len(candidates) > limit,
+                'next_offsets': next_offsets, 'warning': '；'.join(dict.fromkeys(warnings))}
+        return await asyncio.to_thread(collect)
 
     async def live_search_segments(self, account, usernames, start, end):
         """固定本次查询的会话顺序，先查最近活跃会话；仅连接只读实时源。"""
@@ -191,7 +231,7 @@ class ChatTools:
                                      'selected': len(heap), 'boundary': heap[0][0] if heap else None})
                     continue
                 def selection_key(row):
-                    identity = message_identity(row.server_id, f'{row.db_stem}:{row.table_name}:{row.local_id}', row.create_time)
+                    identity = message_identity(row.server_id, f'{row.db_stem}:{row.table_name}:{row.local_id}', row.create_time, row.local_type)
                     source = hashlib.sha256(f'{account}:{username}:{identity}'.encode()).hexdigest()[:24]
                     return row.create_time, source
                 # 指定发言人时必须先筛人再取 N；不能在各群前 N 条上事后过滤。

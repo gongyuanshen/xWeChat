@@ -2,7 +2,7 @@
   <section class="agent-compaction" :aria-label="label">
     <div v-if="active" class="compaction-progress" role="status" aria-live="polite">
       <div class="compaction-divider"><span><FileText :size="16" :stroke-width="1.8" aria-hidden="true" />{{ label }}</span></div>
-      <p>{{ beforeUsage ? `当前已用 ${beforeUsage} · ` : '' }}{{ job.reason === 'context-overflow' ? '请求超出容量，正在整理较早对话' : '正在整理较早对话' }}</p>
+      <p>{{ beforeUsage }} · {{ job.reason === 'context-overflow' ? '请求超出容量，正在整理较早对话' : '正在整理较早对话' }}</p>
       <p>原文已保留，完成后自动继续</p>
       <Ellipsis class="compaction-pulse" :size="16" :stroke-width="1.8" aria-hidden="true" />
     </div>
@@ -14,7 +14,7 @@
           <p v-if="job.error_message" role="alert">{{ job.error_message }}</p>
         </template>
         <template v-else>
-          <p v-if="usage" class="compaction-usage">上下文用量 {{ usage }}</p>
+          <p v-if="usage" class="compaction-usage">上下文估算用量 {{ usage }}</p>
           <p v-if="loading" role="status">正在读取摘要…</p>
           <p v-else-if="error" role="alert">{{ error }} <button type="button" @click="load">重试</button></p>
           <template v-else-if="result?.summary"><p class="compaction-summary-label">压缩摘要</p><div class="compaction-summary">{{ result.summary }}</div></template>
@@ -39,12 +39,14 @@ const label = computed(() => active.value ? '正在压缩上下文' : job.value.
 const expanded = computed({ get: () => !!props.viewState[key.value], set: value => { props.viewState[key.value] = value } })
 const result = ref(null), loading = ref(false), error = ref('')
 const percent = (value, window) => Number.isFinite(value) && window > 0 ? `${(value / window * 100).toFixed(1)}%` : ''
-const beforeUsage = computed(() => percent(job.value.before, job.value.model_window))
+const beforeUsage = computed(() => job.value.model_window > 0
+  ? `当前估算已用 ${percent(job.value.before, job.value.model_window)}`
+  : `当前估算 ${job.value.before.toLocaleString()} 预算单位 · 模型上下文窗口未知`)
 const usage = computed(() => {
   const data = result.value || job.value
   if (!Number.isFinite(data.before) || !Number.isFinite(data.after)) return ''
   // 百分比沿用本次压缩时保存的窗口；旧记录不借用当前模型的容量。
-  return data.model_window > 0 ? `${percent(data.before, data.model_window)} → ${percent(data.after, data.model_window)}` : `${data.before.toLocaleString()} → ${data.after.toLocaleString()} Token`
+  return data.model_window > 0 ? `${percent(data.before, data.model_window)} → ${percent(data.after, data.model_window)}` : `${data.before.toLocaleString()} → ${data.after.toLocaleString()} 预算单位（模型上下文窗口未知）`
 })
 let revision = 0
 const load = async () => {

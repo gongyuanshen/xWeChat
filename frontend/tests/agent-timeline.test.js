@@ -149,7 +149,7 @@ describe('Agent 执行对话流',()=>{
     expect(w.findAll('.agent-stage-row').at(-1).text()).toContain('已完成 · 4秒')
     w.unmount()
   })
-  it('等待首个工具与折叠历史时持续显示思考状态和真实计时', async () => {
+  it('等待首个工具显示思考，工具执行时展示当前操作与真实计时', async () => {
     const r = {...base(),timeline:[],stage:'理解问题与读取范围',stage_started_at:100,read_count:0,usage:{calls:1}}
     const w = setup({run:r,now:105000})
     expect(w.find('.agent-process-toggle').attributes('aria-expanded')).toBe('false')
@@ -168,8 +168,8 @@ describe('Agent 执行对话流',()=>{
     expect(w.find('.agent-process-body').isVisible()).toBe(true)
     await w.find('.agent-process-toggle').trigger('click')
     await w.setProps({run:{...r,stage:'搜索聊天记录',stage_started_at:108,timeline:base().timeline,read_count:8}})
-    expect(w.find('.agent-stream-status').text()).toBe('思考中')
-    expect(w.find('.agent-live-step time').text()).toBe('1秒')
+    expect(w.find('.agent-stream-status').text()).toBe('读取后续消息')
+    expect(w.find('.agent-live-step time').text()).toBe('6秒')
     expect(w.find('.agent-live-hint').exists()).toBe(false)
     expect(w.find('.agent-process').isVisible()).toBe(false)
     await w.setProps({run:{...r,status:'completed',answer:'结果'}})
@@ -263,7 +263,7 @@ describe('Agent 执行对话流',()=>{
     expect(w.find('.agent-process-toggle').attributes('aria-expanded')).toBe('false')
     expect(w.find('.agent-process').element.style.display).toBe('none')
     expect(w.find('.agent-stream-status').isVisible()).toBe(true)
-    expect(w.find('.agent-stream-status').text()).toBe('思考中')
+    expect(w.find('.agent-stream-status').text()).toBe('读取后续消息')
     w.unmount()
   })
   it('按顺序显示工具和关键进展，完成后保留可见并支持一键收起',async()=>{

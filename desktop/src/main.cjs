@@ -34,7 +34,9 @@ const net = require("net");
 const os = require("os");
 const path = require("path");
 const { Worker } = require("worker_threads");
-const { chooseChatImage } = require("./chat-image-picker.cjs");
+const { crc32 } = require("node:zlib");
+const { chooseChatImage, chooseChatFile, importChatAttachments, disposeChatAttachmentTemps } = require("./chat-image-picker.cjs");
+const chatAttachmentTempDirectories = new Set();
 const {
   cleanupOutputDirectoryBackup,
   getDefaultOutputDirPath,
@@ -2232,22 +2234,6 @@ async function captureRegionToPngBuffer(wc, options = {}) {
 // PNG 内部已经是 deflate，再压一遍几乎不省体积，所以直接 store：
 // 少一个依赖（desktop/package.json 的运行依赖仅保留 ffmpeg-static），
 // 产物依然是标准合法 zip。文件都是几 MB 级别，不需要 zip64。
-const ZIP_CRC32_TABLE = (() => {
-  const table = new Int32Array(256);
-  for (let i = 0; i < 256; i += 1) {
-    let c = i;
-    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-    table[i] = c;
-  }
-  return table;
-})();
-
-function zipCrc32(buf) {
-  let c = -1;
-  for (let i = 0; i < buf.length; i += 1) c = (c >>> 8) ^ ZIP_CRC32_TABLE[(c ^ buf[i]) & 0xff];
-  return (c ^ -1) >>> 0;
-}
-
 // zip 用的是 MS-DOS 时间格式：秒只有 5 位（2 秒精度），年份从 1980 起算。
 function toDosDateTime(date) {
   const year = date.getFullYear();
@@ -2273,7 +2259,7 @@ function buildStoreZipBuffer(entries, when = new Date()) {
     const nameBuf = Buffer.from(String(entry?.name || ""), "utf8");
     const data = Buffer.isBuffer(entry?.data) ? entry.data : Buffer.from(entry?.data || "");
     if (!nameBuf.length) throw new Error("zip 条目缺少文件名");
-    const crc = zipCrc32(data);
+    const crc = crc32(data);
 
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0); // local file header signature
@@ -2896,6 +2882,25 @@ function registerWindowIpc() {
     }
   });
 
+  ipcMain.handle("dialog:chooseFile", async (event) => {
+    try {
+      return await chooseChatFile({ event, parentWindow: mainWindow, dialog, nativeImage });
+    } catch (err) {
+      logMain(`[main] dialog:chooseFile failed: ${err?.stack || err}`);
+      throw err;
+    }
+  });
+
+  ipcMain.handle('chat:importAttachments', async (event, entries) => {
+    try {
+      return await importChatAttachments({ event, parentWindow: mainWindow, entries, nativeImage,
+        tempRoot: app.getPath('temp'), tempDirectories: chatAttachmentTempDirectories });
+    } catch (err) {
+      logMain(`[main] chat:importAttachments failed: ${err?.stack || err}`);
+      throw err;
+    }
+  });
+
   ipcMain.handle("dialog:chooseArchive", async (_event, options) => {
     try {
       return await dialog.showOpenDialog({
@@ -3059,6 +3064,13 @@ app.on("will-quit", () => {
   } catch {}
   // 导出到一半退出时，临时目录里可能还躺着几十 MB 的 PNG
   disposeAllWrappedBatches();
+  // Keep pasted files alive for pending sends and explicit retries until the app exits.
+  try {
+    disposeChatAttachmentTemps(chatAttachmentTempDirectories);
+  } catch (err) {
+    logMain(`[main] chat attachment cleanup failed: ${err?.stack || err}`);
+    console.error(err);
+  }
 });
 
 app.on("before-quit", () => {

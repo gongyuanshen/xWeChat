@@ -1,11 +1,12 @@
 <template>
   <component :is="expandable ? 'details' : 'div'" class="agent-tool" :class="[`is-${status}`, { 'is-grouped': grouped }]" :open="expandable ? expanded : undefined" @toggle="expanded = $event.target.open">
-    <component :is="expandable ? 'summary' : 'div'" class="agent-tool-heading">
+    <component :is="expandable ? 'summary' : 'div'" class="agent-tool-heading" :class="{ 'has-progress': headingDetail }">
       <component v-if="status !== 'running'" :is="icon" :size="16" :stroke-width="1.8" aria-hidden="true" />
       <span class="agent-tool-title"><span class="agent-tool-label" :class="{ 'agent-shimmer': status === 'running' }">{{ label }}</span><small v-if="first.query" class="agent-tool-query" :title="first.query">{{ first.query }}</small><small v-if="grouped" class="agent-tool-count">{{ items.length }} 次</small></span>
       <span v-if="status !== 'completed'" class="agent-tool-outcome">{{ groupOutcome }}</span>
       <span v-else class="agent-tool-summary">{{ summary }}</span>
       <ChevronRight v-if="expandable" class="agent-tool-chevron" :size="16" :stroke-width="1.8" aria-hidden="true" />
+      <small v-if="headingDetail" class="agent-tool-progress">{{ headingDetail }}</small>
     </component>
     <div v-if="expandable" class="agent-tool-detail" :class="{ 'agent-tool-timeline': grouped }">
       <section v-for="(item, index) in items" :key="item.id" class="agent-tool-attempt">
@@ -83,8 +84,21 @@ const recovered = computed(() => {
 const effectiveItems = computed(() => props.items.filter(item => !recovered.value.has(item.id)))
 // 未恢复的失败、运行或暂停仍显露，不能被另一页的成功掩盖。
 const status = computed(() => ['running', 'failed', 'paused', 'cancelled', 'interrupted', 'superseded'].find(status => effectiveItems.value.some(item => item.status === status)) || effectiveItems.value[0]?.status)
+const headingDetail = computed(() => {
+  if (status.value === 'running') {
+    const current = [...props.items].reverse().find(item => item.status === 'running')
+    if (current.detail) return current.detail
+    const progress = current.result?.progress
+    if (!progress) return ''
+    return progress.phase === 'completed'
+      ? `已处理${progress.label}；共 ${progress.completed_units} 个片段`
+      : `${progress.phase === 'analyzing' ? '正在识别' : '正在提取'}${progress.label}；已处理 ${progress.completed_units} 个片段`
+  }
+  return status.value === 'completed' && first.value.action === 'analyze_media'
+    ? [...new Set(props.items.map(item => item.result?.coverage).filter(Boolean))].join('；') : ''
+})
 const icon = computed(() => status.value === 'failed' ? CircleAlert : status.value !== 'completed' ? CirclePause : first.value.action?.includes('search') ? Search : first.value.action === 'analyze_media' ? Images : FileText)
-const toolLabel = action => ({ compact_context: '整理上下文', select_chat_scope: '确定查询范围', commit_findings: '保存分析发现', search_messages: '搜索聊天记录', read_messages: '读取聊天记录', read_context: '读取消息上下文', analyze_media: '分析媒体', find_conversations: '查找会话', search_material: '搜索附件内容', read_material: '读取附件', read_results: '读取分析结果' }[action] || '工具调用')
+const toolLabel = action => ({ compact_context: '整理上下文', select_chat_scope: '确定查询范围', commit_findings: '保存分析发现', search_messages: '搜索聊天记录', read_messages: '读取聊天记录', list_files: '查找最新文件', read_context: '读取消息上下文', analyze_media: '分析媒体', find_conversations: '查找会话', search_material: '搜索附件内容', read_material: '读取附件', read_results: '读取分析结果' }[action] || '工具调用')
 const label = computed(() => first.value.action === 'compact_context' ? '整理上下文' : ['search_messages', 'read_context'].includes(first.value.action) ? toolLabel(first.value.action) : (first.value.text || toolLabel(first.value.action)).replace(/^(核对|读取)了/, '$1'))
 const outcome = status => ({ completed: '已完成', running: '进行中', failed: '失败', paused: '已暂停', cancelled: '已停止', interrupted: '已中断', superseded: '已调整' }[status] || '')
 const groupOutcome = computed(() => status.value !== 'running' && grouped.value && props.items.some(item => item.status === 'completed') && props.items.some(item => item.status !== 'completed') ? '部分完成' : outcome(status.value))
@@ -128,3 +142,8 @@ const summary = computed(() => {
 const date = value => value != null ? new Date(value * 1000).toLocaleString() : '不限'
 const retrievalLabel = item => item.result?.data_source === 'realtime_keyword' ? '实时关键词回查 · 无关原文仅在本机过滤' : item.result?.retrieval_mode === 'hybrid' ? '智能检索：关键词＋语义（按意思查找）' : item.result?.retrieval_mode === 'keyword' ? '已退回关键词检索 · 展开查看原因' : item.status === 'running' ? '正在确认检索方式' : '此步骤未记录实际检索方式'
 </script>
+
+<style scoped>
+.agent-tool-heading.has-progress { flex-wrap:wrap; }
+.agent-tool-progress { flex-basis:100%; color:var(--ag-muted); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+</style>

@@ -73,9 +73,11 @@ async def start_services():
             event('runtime.component.missing', level=logging.WARNING, component=package, error=error)
     from .service import get_ai_service
     from .agent_service import get_agent_service
+    from .insights import get_insight_service
     from ..local_search.service import get_local_search
     get_ai_service().store.recover_interrupted_usage()
     get_ai_service().start()
+    get_insight_service().start()
     await get_agent_service().start()
     await get_local_search().start()
     _start_store_maintenance((('summary', get_ai_service().store), ('search', get_local_search().store)))
@@ -85,9 +87,10 @@ async def start_services():
 async def stop_services():
     from .service import get_ai_service
     from .agent_service import get_agent_service
+    from .insights import get_insight_service
     from ..local_search.service import get_local_search
     _stop_store_maintenance()
-    for name, factory in (('search',get_local_search),('summary',get_ai_service),('agent',get_agent_service)):
+    for name, factory in (('search',get_local_search),('insights',get_insight_service),('summary',get_ai_service),('agent',get_agent_service)):
         try:
             await factory().stop()
         except Exception as error:

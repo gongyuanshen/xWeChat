@@ -563,10 +563,12 @@ class AIService:
         import sqlite3
         was_deleted = account in self.deleted_accounts
         self.deleted_accounts.add(account)
-        from . import agent_service
+        from . import agent_service, insights
         try:
             if agent_service._agent is not None:
                 agent_service._agent.cancel_account(account)
+            if insights._insights is not None:
+                insights._insights.cancel_account(account)
         except Exception:
             if not was_deleted:
                 self.deleted_accounts.discard(account)

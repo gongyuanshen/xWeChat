@@ -1,0 +1,26 @@
+The question wording and relationship weights in ai/insight_local.py are adapted
+from tswawa/WechatVibe (Apache License 2.0):
+https://github.com/tswawa/WechatVibe
+electron/laya/catalog.ts, style.ts, personality.ts and options.ts.
+Original notices and full Apache-2.0 license are retained in
+wechatvibe-LICENSE.txt. This integration is independent and is not endorsed by
+WechatVibe, Laya, Convai Innovations, Tencent or WeChat.
+
+Changes: Python adaptation, existing application's six-axis field names,
+Chinese broad-label presentation, explicit 50% message-label display threshold,
+per-message source preservation, target-scoped statistical summaries with
+unknown MBTI axes, no fabricated empty-input score or model-failure fallback.
+It is not a port of WechatVibe's complete fine-grained label catalogue.
+
+ai/insight_local_fine.py additionally adapts the generic-v9 intent catalogue,
+candidate retrieval expressions and selection flow from:
+https://github.com/tswawa/WechatVibe/blob/78446c00dc0d0e014a5a51f86ab000d5848051fe/electron/laya/general-intent.ts
+and the emotion/intent decision separation from local-message-insights.ts and
+laya/options.ts at the same revision. Original source uses Apache-2.0.
+
+Changes: Python implementation, display names limited to four characters,
+additional emotion and intent candidates, model-only label selection, strict
+probability validation, complete context and explicit weak-portrait prior,
+source-bound labels and versioned raw question/answer records. Candidate cues
+retrieve choices only; they never determine displayed labels or probabilities.
+This module does not copy the separate 547-intent hierarchical catalogue.

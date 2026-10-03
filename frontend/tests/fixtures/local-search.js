@@ -8,6 +8,8 @@ import '../../assets/css/ai-settings.css'
 // 独立交互验收页，只使用虚构数据，不连接用户账号或模型服务。
 Object.assign(globalThis,{ref,computed,process:{client:false},useApiBase:()=>'/unused',useRoute:()=>({params:{username:'team'}}),useSettingsDialog:()=>({focusTarget:ref(new URLSearchParams(location.search).has('models') ? '' : 'local-search')})})
 const modelMetadata = { id:'preview-model', name:'演示模型', source:'models.dev', provider_id:'deepseek', provider_name:'DeepSeek', logo_url:'https://models.dev/logos/deepseek.svg', vision:false, tool_call:true, reasoning:true, temperature:true, structured_output:true, attachment:false, open_weights:true, modalities:{input:['text'],output:['text']}, limit:{context:128000,output:8192}, cost:{input:0.28,output:0.42,cache_read:0.028}, knowledge:'2025-01', release_date:'2025-01-01',last_updated:'2026-09-09' }
+const usagePreview = new URLSearchParams(location.search).has('usage')
+const usageRows = ['success', 'failed', 'running'].map((status, index) => ({ id:`synthetic-call-${index}`, account:'synthetic', model:'合成测试模型', status, started_at:1000 + index, usage_known:status === 'success', usage:status === 'success' ? {input_tokens:150,output_tokens:25} : {} }))
 const models=[
 {id:'bge-small-zh',name:'BGE Small 中文',description:'轻量中文，适合低配置电脑',recommended:true,repo:'Xenova/bge-small-zh-v1.5',revision:'75c43b069aac4d136ba6bc1122f995fedcfd2781',license:'MIT',size:95401750,downloaded:true},
 {id:'bge-base-zh',name:'BGE Base 中文',description:'中文进阶，资源占用更高',repo:'Xenova/bge-base-zh-v1.5',revision:'71e50dc531959f9e04ebf190ea25b00261a0a186',license:'MIT',size:407503264,downloaded:false},
@@ -59,7 +61,16 @@ globalThis.useAiApi=()=>({request:async(path,options={})=>{
   if(path.startsWith('/local-search/index/pause')){jobs[0].status='paused';jobs[0].updated=Date.now()/1000}
   if(path.startsWith('/local-search/index/resume')){jobs[0].status='done';jobs[0].finished=Date.now()/1000}
   if(path.startsWith('/local-search/models/') && path.includes('/download')){const m=models.find(x=>path.includes(x.id));m.job={status:'running',stage:'downloading',bytes:0,total:m.size};setTimeout(()=>{m.downloaded=true;m.job={status:'done',stage:'done'}},1500)}
-  if(path==='/settings')return {profiles:[{id:'preview',name:'日常对话',provider:'deepseek',model:'preview-model',protocol:'openai',base_url:'https://api.deepseek.com/v1',vision:false,context_window:128000,model_metadata:modelMetadata}],presets:[],defaults:{text:'preview'}}
+  if(usagePreview && path==='/usage')return {calls:3,input_tokens:150,output_tokens:25,failed_calls:1,unknown_usage_calls:2}
+  if(usagePreview && path.startsWith('/usage/records')) {
+    if(options?.method==='DELETE') {
+      const id=path.split('/')[3], rows=usageRows.filter(row=>!row.history_hidden && row.status!=='running' && (!id || row.id===id))
+      rows.forEach(row=>{row.history_hidden=true})
+      return {removed:rows.length}
+    }
+    return usageRows.filter(row=>!row.history_hidden)
+  }
+  if(path==='/settings')return {profiles:usagePreview?[]:[{id:'preview',name:'日常对话',provider:'deepseek',model:'preview-model',protocol:'openai',base_url:'https://api.deepseek.com/v1',vision:false,context_window:128000,model_metadata:modelMetadata}],presets:[],defaults:{text:'preview'}}
   if(path==='/models')return {models:['preview-model'],model_details:[modelMetadata]}
   return []
 }})

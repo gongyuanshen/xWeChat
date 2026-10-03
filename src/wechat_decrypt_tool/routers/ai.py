@@ -224,7 +224,23 @@ def usage():
 
 @router.get("/usage/records")
 def usage_records(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
-    return get_ai_service().store.list("usage", limit=limit, offset=offset)
+    return get_ai_service().store.list_usage_records(limit=limit, offset=offset)
+
+
+@router.delete("/usage/records/{id}")
+def remove_usage_record(id: str):
+    store = get_ai_service().store
+    record = store.get("usage", id)
+    if record is None:
+        raise HTTPException(404, "调用明细不存在")
+    if record.get("status") == "running":
+        raise HTTPException(409, "运行中的调用明细不能移除")
+    return {"removed": store.hide_usage_records(id)}
+
+
+@router.delete("/usage/records")
+def clear_usage_records():
+    return {"removed": get_ai_service().store.hide_usage_records()}
 
 
 @router.get("/conversations")

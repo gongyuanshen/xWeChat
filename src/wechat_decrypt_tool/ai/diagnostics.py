@@ -27,7 +27,7 @@ _IDS = {'trace_id', 'operation_id', 'parent_operation_id', 'execution_id', 'call
 _LABELS = {'phase', 'status', 'reason_code', 'error_type', 'error_module', 'error_category', 'provider',
            'protocol', 'model', 'purpose', 'mode', 'action', 'data_source', 'actual_device',
            'strategy', 'runtime', 'platform', 'arch', 'suffix', 'file', 'finish_reason',
-           'validation_status', 'kind', 'component', 'method', 'route', 'origin', 'stage_code'}
+           'validation_status', 'kind', 'component', 'method', 'route', 'origin', 'stage_code', 'timeout_phase'}
 _COUNTS = {'duration_ms', 'queue_ms', 'request_ms', 'first_token_ms', 'attempt', 'http_status',
            'errno', 'winerror', 'pid', 'exit_code', 'revision', 'profile_revision', 'version',
            'scope_revision', 'offset', 'next_offset', 'chat_index', 'start', 'end', 'count',
@@ -37,6 +37,7 @@ _COUNTS = {'duration_ms', 'queue_ms', 'request_ms', 'first_token_ms', 'attempt',
            'device_id', 'batch_size', 'input_budget', 'material_budget', 'previous_budget', 'index', 'level',
            'cached_count', 'failed_count', 'matches', 'omitted', 'event_id', 'after',
            'elapsed_ms', 'suppressed_count', 'dropped_count', 'queued', 'text_chars',
+           'timeout_seconds', 'received_chunks', 'last_response_ms',
            'models', 'tools', 'media', 'seconds', 'keyword_count', 'semantic_count', 'merge_level', 'sqlite_errorcode'}
 _FLAGS = {'cached', 'usage_known', 'response_received', 'has_more', 'using_fallback',
           'enabled', 'incremental', 'rebuild', 'resume', 'complete', 'changed', 'notify',

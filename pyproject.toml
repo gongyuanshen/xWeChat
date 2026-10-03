@@ -87,6 +87,7 @@ include = [
     "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.wasm",
     "src/wechat_decrypt_tool/native/weflow_wasm/sns_image_fixture.json",
     "src/wechat_decrypt_tool/resources/*.json",
+    "src/wechat_decrypt_tool/resources/licenses/*.txt",
 ]
 
 [tool.uv]

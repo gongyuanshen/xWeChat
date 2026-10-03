@@ -145,6 +145,21 @@ def init_anti_revoke_db(db_path: Path) -> None:
                     "[anti_revoke] Removed replacement-system metadata from %s archived originals in %s",
                     repaired_count, db_path,
                 )
+            # Older archives preferred XML's transfer hash over the local resource
+            # identifier. Rebuild this derived field from the preserved source bytes.
+            image_repairs = 0
+            for row_id, packed_info in conn.execute(
+                "SELECT id, packed_info_data FROM revoked_messages WHERE local_type = 3 AND packed_info_data IS NOT NULL"
+            ).fetchall():
+                local_md5 = _extract_md5_from_packed_info(packed_info)
+                if local_md5:
+                    image_repairs += conn.execute(
+                        "UPDATE revoked_messages SET extra_json = json_set(extra_json, '$.imageMd5', ?) "
+                        "WHERE id = ? AND json_extract(extra_json, '$.imageMd5') IS NOT ?",
+                        (local_md5, row_id, local_md5),
+                    ).rowcount
+            if image_repairs:
+                logger.info("[anti_revoke] Repaired %s archived image resource identifiers in %s", image_repairs, db_path)
             # Purge any corrupt system rows or previous placeholder bubbles created by older versions
             conn.execute(
                 """
@@ -240,14 +255,16 @@ def _extract_extra_metadata_from_row(
         return extra
 
     if local_type == 3:
-        md5 = _extract_xml_attr(raw_text, "md5") or _extract_xml_tag_text(raw_text, "md5")
+        # Match normal chat parsing: packed metadata identifies the cached local
+        # image; the XML hash can identify a different transfer representation.
+        md5 = _extract_md5_from_packed_info(packed_info_data)
+        if not md5:
+            md5 = _extract_xml_attr(raw_text, "md5") or _extract_xml_tag_text(raw_text, "md5")
         if not md5:
             for k in ["cdnthumbmd5", "cdnmidimgmd5", "cdnbigimgmd5", "hdmd5", "imgmd5", "filemd5"]:
                 md5 = _extract_xml_attr(raw_text, k) or _extract_xml_tag_text(raw_text, k)
                 if md5:
                     break
-        if not md5 and packed_info_data:
-            md5 = _extract_md5_from_packed_info(packed_info_data)
         if md5:
             extra["imageMd5"] = md5
 
@@ -417,7 +434,7 @@ def save_messages_to_archive(
                     "renderType",
                 ):
                     val = r.get(k)
-                    if val and k not in extra:
+                    if val and (k not in extra or k == "imageMd5"):
                         extra[k] = val
             extra_json_str = json.dumps(extra, ensure_ascii=False) if extra else "{}"
 
@@ -464,6 +481,16 @@ def save_messages_to_archive(
                         row_id,
                     ),
                 )
+                # The second, normalized pass may resolve message_resource.db.
+                # Preserve that identifier on later raw XML-only replays.
+                if local_type == 3:
+                    resolved_md5 = (r.get("imageMd5") if isinstance(r, dict) else "") or _extract_md5_from_packed_info(packed_info_data)
+                    if resolved_md5:
+                        conn.execute(
+                            "UPDATE revoked_messages SET extra_json = json_set(extra_json, '$.imageMd5', ?) "
+                            "WHERE id = ? AND json_extract(extra_json, '$.imageMd5') IS NOT ?",
+                            (resolved_md5, row_id, resolved_md5),
+                        )
             else:
                 conn.execute(
                     """

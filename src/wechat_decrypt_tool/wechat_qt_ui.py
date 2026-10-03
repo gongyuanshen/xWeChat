@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 import logging
+from pathlib import Path
 
 from comtypes import COMError
 
@@ -126,43 +127,42 @@ class WeChatQtUI:
                 if c.ControlTypeName == "ListItemControl" and c.Name == "图片"
                 and c.ClassName == "mmui::ChatBubbleReferItemView"}
 
-    def _image_draft(self, edit) -> tuple[str, str, int]:
+    def _file_ids(self, message_list, file_name: str) -> set[tuple[int, ...]]:
+        """Completed local file cards observed on Weixin 4.1.15.13.
+
+        Uploading cards contain extra progress/status lines. Neither those nor
+        plain text mentioning the filename constitute a completed file card.
+        This is local UI evidence, not a server-delivery acknowledgement.
+        """
+        matches = set()
+        for item in message_list.GetChildren():
+            if item.ControlTypeName != "ListItemControl" or item.ClassName != "mmui::ChatBubbleItemView":
+                continue
+            lines = _text(item.Name).split("\n")
+            if len(lines) == 4 and lines[:2] == ["文件", file_name] and lines[2] and lines[3] == "微信电脑版":
+                matches.add(tuple(item.GetRuntimeId()))
+        return matches
+
+    def _attachment_draft(self, edit, kind: str) -> tuple[str, str, int]:
         value = edit.GetValuePattern()
         text = edit.GetTextPattern()
         if value is None or text is None:
-            raise WeChatBridgeError("微信输入框未提供图片草稿核验接口",
-                                    code="WECHAT_IMAGE_DRAFT_UNCONFIRMED", status_code=502)
+            raise WeChatBridgeError("微信输入框未提供附件草稿核验接口",
+                                    code=f"WECHAT_{kind.upper()}_DRAFT_UNCONFIRMED", status_code=502)
         return value.Value, text.DocumentRange.GetText(-1), len(text.DocumentRange.GetChildren())
 
-    def send_image(self, session: str, image_path: str, *, window_api, process_api) -> None:
-        """Stage one validated image using the observed native file dialog.
-
-        Weixin 4.1.15.13 inserts one U+FFFC object in its editor. Local
-        Draft clearing and a new picture are observable, but this UIA version
-        exposes neither message direction nor image content. These observations
-        are reported as unconfirmed rather than fabricated successful delivery.
-        No clipboard, blind keystrokes, alternate route or automatic resend.
-        """
-        edit = self.prepare_session(session)
-        self.stage = "image_prepare"
-        if self._image_draft(edit) != ("", "", 0):
-            raise WeChatBridgeError("微信输入框已有文字或图片草稿，请先处理后重试",
-                                    code="WECHAT_DRAFT_CONFLICT", status_code=409)
-        messages = self.root.ListControl(AutomationId="chat_message_list")
-        if not messages.Exists(0):
-            raise WeChatBridgeError("微信消息列表不可用，无法核实图片发送结果",
-                                    code="WECHAT_MESSAGE_LIST_NOT_FOUND", status_code=502)
-        before = self._image_ids(messages)
+    def _select_attachment(self, session: str, path: str, *, kind: str, window_api, process_api) -> None:
+        """Select one path in WeChat's owned native picker; never submit a chat."""
         panel = self.root.GroupControl(AutomationId="chat_message_page")
         file_button = panel.ButtonControl(Name="发送文件")
         self._wait(lambda: file_button.Exists(0) and file_button.IsEnabled and not file_button.IsOffscreen,
                    WeChatBridgeError("微信发送文件按钮不可用",
-                                     code="WECHAT_IMAGE_BUTTON_NOT_FOUND", status_code=502))
+                                     code=f"WECHAT_{kind.upper()}_BUTTON_NOT_FOUND", status_code=502))
         if window_api.GetForegroundWindow() != self.hwnd or not self.locate_input(session):
-            raise WeChatBridgeError("选择图片前微信前台或会话发生变化",
+            raise WeChatBridgeError("选择附件前微信前台或会话发生变化",
                                     code="WECHAT_SEND_STATE_CHANGED", status_code=409)
         file_button.Click(simulateMove=False, waitTime=0)
-        self.stage = "image_file_dialog"
+        self.stage = f"{kind}_file_dialog"
         main_pid = process_api.GetWindowThreadProcessId(self.hwnd)[1]
 
         def owned_dialog():
@@ -175,10 +175,13 @@ class WeChatQtUI:
 
         dialog_hwnd = self._wait(owned_dialog, WeChatBridgeError(
             "未找到属于微信主窗口的文件选择框",
-            code="WECHAT_IMAGE_DIALOG_NOT_FOUND", status_code=502))
+            code=f"WECHAT_{kind.upper()}_DIALOG_NOT_FOUND", status_code=502))
         dialog = self.automation.ControlFromHandle(dialog_hwnd)
         filename = dialog.EditControl(AutomationId="1148")
-        open_button = dialog.SplitButtonControl(AutomationId="1")
+        # The same native Open control has been observed as Button and SplitButton;
+        # bind its dialog-scoped ID and the two supported UIA types in one query.
+        open_button = dialog.Control(AutomationId="1", Compare=lambda c, d:
+                                     c.ControlTypeName in ("ButtonControl", "SplitButtonControl"))
         # The native dialog becomes foreground before its child controls finish
         # initialization. Wait for readiness within the existing send deadline.
         self._wait(
@@ -186,18 +189,33 @@ class WeChatQtUI:
             and filename.Exists(0) and filename.IsEnabled
             and open_button.Exists(0) and open_button.IsEnabled,
             WeChatBridgeError("微信文件选择框的文件名或打开控件在超时内未就绪",
-                              code="WECHAT_IMAGE_DIALOG_NOT_FOUND", status_code=502),
+                              code=f"WECHAT_{kind.upper()}_DIALOG_NOT_FOUND", status_code=502),
         )
-        self._write(filename, image_path)
-        if owned_dialog() != dialog_hwnd or not self._session_matches(session):
-            raise WeChatBridgeError("打开图片前文件选择框或目标会话发生变化",
+        self._write(filename, path)
+        if (owned_dialog() != dialog_hwnd or not self._session_matches(session)
+                or filename.GetValuePattern().Value != path):
+            raise WeChatBridgeError("打开附件前文件选择框、路径或目标会话发生变化",
                                     code="WECHAT_SEND_STATE_CHANGED", status_code=409)
         open_button.Click(simulateMove=False, waitTime=0)
+
+    def send_image(self, session: str, image_path: str, *, window_api, process_api, receipt) -> None:
+        """Confirm UI submission together with a new outgoing live message."""
+        edit = self.prepare_session(session)
+        self.stage = "image_prepare"
+        if self._attachment_draft(edit, "image") != ("", "", 0):
+            raise WeChatBridgeError("微信输入框已有文字或附件草稿，请先处理后重试",
+                                    code="WECHAT_DRAFT_CONFLICT", status_code=409)
+        messages = self.root.ListControl(AutomationId="chat_message_list")
+        if not messages.Exists(0):
+            raise WeChatBridgeError("微信消息列表不可用，无法核实图片发送结果",
+                                    code="WECHAT_MESSAGE_LIST_NOT_FOUND", status_code=502)
+        self._select_attachment(session, image_path, kind="image", window_api=window_api, process_api=process_api)
+        panel = self.root.GroupControl(AutomationId="chat_message_page")
         self.stage = "image_draft"
 
         def prepared():
             current = self.locate_input(session)
-            return current is not None and self._image_draft(current) == ("\ufffc", "\ufffc", 0)
+            return current is not None and self._attachment_draft(current, "image") == ("\ufffc", "\ufffc", 0)
 
         self._wait(prepared, WeChatBridgeError(
             "未确认微信输入框包含一张图片；请核对客户端草稿",
@@ -205,6 +223,8 @@ class WeChatQtUI:
         button = panel.ButtonControl(Name="发送")
         self._wait(lambda: button.Exists(0) and button.IsEnabled and not button.IsOffscreen,
                    WeChatBridgeError("微信发送按钮不可用", code="WECHAT_SEND_BUTTON_NOT_FOUND", status_code=502))
+        receipt.capture()
+        before = self._image_ids(messages)
         if window_api.GetForegroundWindow() != self.hwnd or not prepared():
             raise WeChatBridgeError("发送图片前微信前台、会话或草稿发生变化",
                                     code="WECHAT_SEND_STATE_CHANGED", status_code=409)
@@ -214,19 +234,61 @@ class WeChatQtUI:
 
         def confirmed():
             current = self.locate_input(session)
-            return (current is not None and self._image_draft(current) == ("", "", 0)
-                    and len(self._image_ids(messages) - before) == 1)
+            return (current is not None and self._attachment_draft(current, "image") == ("", "", 0)
+                    and len(self._image_ids(messages) - before) == 1
+                    and receipt.confirmed())
 
         self._wait(confirmed, WeChatBridgeError(
-            "未确认图片草稿清空及一条新图片消息出现；请核对客户端，避免重复发送",
+            "未同时确认图片草稿清空、新图片及实时消息的出站发送方向；请核对微信，避免重复发送",
             code="WECHAT_SEND_UNCONFIRMED", status_code=504))
-        # A generic picture may be incoming. The observed Qt provider exposes
-        # no sender and its rectangle spans the whole row, so this adapter has
-        # no evidence to attribute the new picture to our outbound submission.
-        raise WeChatBridgeError(
-            "微信图片草稿已清空且出现新图片，但客户端未提供发送方向，无法确认出站图片；"
-            "请在微信核对对应的新图片，避免重复发送",
-            code="WECHAT_SEND_UNCONFIRMED", status_code=504)
+
+    def send_file(self, session: str, file_path: str, *, window_api, process_api) -> None:
+        """Stage a local file through the same native picker used for images."""
+        edit = self.prepare_session(session)
+        self.stage = "file_prepare"
+        if self._attachment_draft(edit, "file") != ("", "", 0):
+            raise WeChatBridgeError("微信输入框已有文字或附件草稿，请先处理后重试",
+                                    code="WECHAT_DRAFT_CONFLICT", status_code=409)
+        messages = self.root.ListControl(AutomationId="chat_message_list")
+        if not messages.Exists(0):
+            raise WeChatBridgeError("微信消息列表不可用，无法核实文件发送结果",
+                                    code="WECHAT_MESSAGE_LIST_NOT_FOUND", status_code=502)
+        # Include unfinished old cards too: an earlier upload completing now is
+        # not evidence for this submission.
+        before = {tuple(item.GetRuntimeId()) for item in messages.GetChildren()}
+        self._select_attachment(session, file_path, kind="file", window_api=window_api, process_api=process_api)
+        self.stage = "file_draft"
+
+        def prepared():
+            current = self.locate_input(session)
+            return current is not None and self._attachment_draft(current, "file") == ("\ufffc", "\ufffc", 0)
+
+        # Observed with a 139-byte TXT in Weixin 4.1.15.13: the single file is
+        # represented by one object character, with no exposed embedded children.
+        self._wait(prepared, WeChatBridgeError(
+            "未确认微信输入框包含一个文件；请核对客户端草稿",
+            code="WECHAT_FILE_DRAFT_UNCONFIRMED", status_code=502))
+        panel = self.root.GroupControl(AutomationId="chat_message_page")
+        button = panel.ButtonControl(Name="发送")
+        self._wait(lambda: button.Exists(0) and button.IsEnabled and not button.IsOffscreen,
+                   WeChatBridgeError("微信发送按钮不可用", code="WECHAT_SEND_BUTTON_NOT_FOUND", status_code=502))
+        if window_api.GetForegroundWindow() != self.hwnd or not prepared():
+            raise WeChatBridgeError("发送文件前微信前台、会话或草稿发生变化",
+                                    code="WECHAT_SEND_STATE_CHANGED", status_code=409)
+        self.stage = "file_confirm"
+        self.submission_attempted = True
+        button.Click(simulateMove=False, waitTime=0)
+
+        def confirmed():
+            current = self.locate_input(session)
+            current_messages = self.root.ListControl(AutomationId="chat_message_list")
+            return (current is not None and self._attachment_draft(current, "file") == ("", "", 0)
+                    and current_messages.Exists(0)
+                    and len(self._file_ids(current_messages, Path(file_path).name) - before) == 1)
+
+        self._wait(confirmed, WeChatBridgeError(
+            "未确认文件草稿清空及对应的新文件卡片完成上传；请在微信核对，避免重复发送",
+            code="WECHAT_SEND_UNCONFIRMED", status_code=504))
 
     def send_text(self, session: str, content: str) -> None:
         edit = self.prepare_session(session)

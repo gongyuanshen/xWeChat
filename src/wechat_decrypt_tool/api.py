@@ -132,6 +132,8 @@ app.add_middleware(ChatRequestPerfMiddleware, logger=request_logger)
 
 from .routers.ai import router as _ai_router
 app.include_router(_ai_router)
+from .routers.ai_insights import router as _ai_insights_router
+app.include_router(_ai_insights_router)
 from .routers.ai_agent import router as _ai_agent_router
 app.include_router(_ai_agent_router)
 from .routers.local_search import router as _local_search_router

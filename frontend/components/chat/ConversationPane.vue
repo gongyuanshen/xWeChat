@@ -1,7 +1,7 @@
 <template>
   <div class="conversation-pane flex-1 flex flex-col min-h-0 min-w-0">
     <div v-if="selectedContact" class="flex-1 flex flex-col min-h-0 min-w-0 relative">
-      <div class="chat-header" :class="{ 'chat-header-ai': aiSidebarOpen }">
+      <div class="chat-header" :class="{ 'chat-header-ai': aiSidebarOpen || insightsPanelOpen }">
         <div class="flex min-w-0 items-center gap-3">
           <h2 class="chat-header-title flex min-w-0 items-center gap-1.5 text-base font-medium">
             <span class="min-w-0 truncate" :class="{ 'privacy-blur': privacyMode }">{{ selectedContact.name }}</span>
@@ -18,6 +18,7 @@
               class="h-4 w-4 shrink-0"
             >
           </h2>
+          <span v-if="recognitionHeader" class="recognition-mood" :class="{ 'privacy-blur': privacyMode }" :title="recognitionHeader.detail">{{ recognitionHeader.title }}：{{ recognitionHeader.label }}</span>
           <button
             v-if="groupAnnouncement"
             type="button"
@@ -35,6 +36,7 @@
         </div>
         <div class="ml-auto flex shrink-0 items-center gap-2">
           <button type="button" class="header-btn-icon" :class="{ 'header-btn-icon-active': aiSidebarOpen }" aria-label="AI 助手" title="AI 助手" :aria-pressed="aiSidebarOpen" @click="toggleAiSidebar">AI</button>
+          <button type="button" class="header-btn-icon w-auto whitespace-nowrap px-2" :class="{ 'header-btn-icon-active': insightsPanelOpen }" aria-label="聊天画像" title="聊天画像" :aria-pressed="insightsPanelOpen" @click="state.toggleInsightsPanel">画像</button>
           <button
             type="button"
             class="header-btn-icon"
@@ -191,7 +193,7 @@
 </template>
 
 <script>
-import { defineComponent } from 'vue'
+import { defineComponent, toRef } from 'vue'
 import MessageList from '~/components/chat/MessageList.vue'
 import MessageInputWorkspace from '~/components/chat/MessageInputWorkspace.vue'
 
@@ -203,13 +205,18 @@ export default defineComponent({
   },
   setup(props) {
     return {
-      ...props.state
+      ...props.state,
+      insightsPanelOpen: toRef(props.state, 'insightsPanelOpen'),
+      recognitionHeader: toRef(props.state, 'recognitionHeader')
     }
   }
 })
 </script>
 
 <style scoped>
+.recognition-mood { color: var(--app-text-secondary, #75877c); font-size: 11px; max-width: 260px; overflow-wrap: anywhere; }
+.chat-header { height: auto; min-height: 56px; flex-wrap: wrap; gap: 8px; }
+.chat-header > div:last-child { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 /* 侧栏打开后给工具栏单独一行，保留聊天内容空间，避免会话名被挤成竖排。 */
 @media (min-width: 1001px) and (max-width: 1440px) {
   .chat-header-ai { height: auto; min-height: 56px; flex-shrink: 0; flex-wrap: wrap; gap: 4px; padding-top: 8px; padding-bottom: 8px; }

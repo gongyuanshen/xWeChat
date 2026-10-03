@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 
 from langchain_core.tools import tool
@@ -42,6 +43,7 @@ class ScopeError(ValueError):
 
 
 ScopeTime = Annotated[StrictStr | StrictInt, Field(description='ISO 日期时间或 Unix 秒整数（也可用整数字符串），不是毫秒；省略时使用默认边界')]
+MEDIA_PROGRESS = ContextVar('deep_media_progress', default=None)
 
 
 class FindingInput(BaseModel):
@@ -104,7 +106,7 @@ class ChatGateway:
         states = [{**s, 'read_complete': self.scope_covered(s, states,
             analyzed=s['complete_required'] and s['mode'] != 'statistics', ignore_warnings=True)} for s in states]
         return [{'scope_handle': s['handle'], 'names': s.get('names', {}), 'mode': s['mode'],
-            'time_range': {k: s[k] for k in ('start', 'end')},
+            'time_range': {k: s[k] for k in ('start', 'end')}, 'read_order': s.get('read_order', 'asc'),
             'read_complete': s['read_complete'], 'complete_required': s['complete_required'],
             'statistics_complete': s['mode'] == 'statistics' and s['read_complete'] and not s.get('warnings'),
             'analysis_complete': s['mode'] != 'statistics' and s['complete_required'] and s['read_complete'] and not s['pending_page'] and not s.get('warnings'),
@@ -305,7 +307,8 @@ class ChatGateway:
                         raise ValueError(f'用户明确要求最近 {int(requested_count[1])} 条消息，请将 message_count 设为 {int(requested_count[1])}，不要省略或改变条数。')
                     raise ValueError('message_count 是用户明确要求的最近消息总数，不是分页大小。当前要求未指定该条数，请省略此参数以读取全部范围。')
             spec = {'conversations': selected, **interval, 'sender': sender, 'complete_required': complete or mode == 'statistics', 'mode': mode,
-                'message_count': message_count}
+                'message_count': message_count,
+                'read_order': 'asc' if complete or mode == 'statistics' or message_count else 'desc'}
             handle = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()[:24]
             state = self.get('scope:' + handle) or {**spec, 'handle': handle, 'conversation_index': 0, 'cursor': '',
                 'read_complete': False, 'pending_page': '', 'pages': 0, 'committed_pages': 0}
@@ -323,7 +326,9 @@ class ChatGateway:
                 from .deep_backend import TaskBackend
                 self.put('file:/skills/wechat-analysis.md', 'deep_file', TaskBackend.file_data(ANALYSIS_GUIDE))
             result = {'scope_handle': handle, 'conversation_count': len(selected), 'names': [allowed[u]['name'] for u in selected[:8]],
-                'time_range': interval, 'complete_required': spec['complete_required'],
+                'time_range': interval, 'complete_required': spec['complete_required'], 'read_order': spec['read_order'],
+                **({'file_lookup_tool': 'list_files', 'instruction': '普通读取从最新消息开始。查找文件先 list_files，再 analyze_media 读取目标文件；不必翻完聊天历史。'}
+                   if not spec['complete_required'] and not message_count else {}),
                 **({'analysis_guide': '/skills/wechat-analysis.md'} if spec['complete_required'] else {})}
             if (run.get('subtask_plan_version') == 1 and not run.get('parent_run_id') and complete
                     and mode != 'statistics' and not state.get('pending_page') and not state.get('read_complete')):
@@ -366,6 +371,9 @@ class ChatGateway:
         if state.get('message_count'):
             result = await self.recent_page(state, capacity, probe_budget=probe_budget)
             username = None
+        elif state.get('read_order') == 'desc':
+            result = await self.latest_page(state, capacity, probe_budget=probe_budget)
+            username = None
         elif hasattr(self.service.tools, 'time_window'):
             options = {'probe_budget': probe_budget} if probe_budget is not None else {}
             result = await self.service.read_time(self.id, username, state['start'], state['end'], capacity, state['cursor'], **options)
@@ -383,7 +391,7 @@ class ChatGateway:
             following['cursor'] = str(cursor)
         else:
             following.update(conversation_index=state['conversation_index'] + 1, cursor='')
-            following['read_complete'] = bool(state.get('message_count')) or following['conversation_index'] >= len(state['conversations'])
+            following['read_complete'] = username is None or following['conversation_index'] >= len(state['conversations'])
         return result, following
 
     async def read_next(self, handle):
@@ -414,7 +422,7 @@ class ChatGateway:
                 following = {**following, 'prefetch_index': state.get('prefetch_index', 0) + 1}
             else:
                 result, following = await self.fetch_page(state, batch_capacity)
-            if state.get('message_count'):
+            if state.get('message_count') or state.get('read_order') == 'desc':
                 username = None
             self.guard()
             def permitted(m):
@@ -636,6 +644,10 @@ class ChatGateway:
             saved = {'sources': [m['source'] for m in result['messages']], 'warning': result.get('warning', '')}
             self.put(key, 'deep_recent', saved)
         position, char_offset = (json.loads(state['cursor']) if state['cursor'] else [0, 0])
+        return self.material_page(saved, position, char_offset, capacity, probe_budget=probe_budget)
+
+    def material_page(self, saved, position, char_offset, capacity, *, probe_budget=None):
+        """从已保存的有限候选集分片；最近 N 条和倒序检索共用，不截断原文。"""
         messages, originals, used = [], [], 2
         while position < len(saved['sources']):
             original = self.guard()['evidence'][saved['sources'][position]]
@@ -666,6 +678,28 @@ class ChatGateway:
         more = position < len(saved['sources'])
         return {'messages': messages, 'originals': originals, 'has_more': more,
             'next_cursor': json.dumps([position, char_offset]) if more else None, 'warning': saved['warning']}
+
+    async def latest_page(self, state, capacity, *, kind=None, probe_budget=None):
+        run = self.guard()
+        cursor = json.loads(state['cursor']) if state.get('cursor') else {}
+        batch_size = 1 if kind == 'file' else 20
+        key = cursor.get('batch') or 'latest-batch:' + hashlib.sha256(
+            json.dumps([state['handle'], kind, batch_size, cursor.get('offsets', {})], sort_keys=True).encode()).hexdigest()[:24]
+        saved = self.get(key)
+        if saved is None:
+            result = await self.service.tools.latest(run['account'], state['conversations'], state['start'], state['end'],
+                sender=state['sender'] or None, kind=kind, offsets=cursor.get('offsets', {}), limit=batch_size, checkpoint=self.guard)
+            self.guard()
+            stored = self.save_messages(result['messages'])
+            saved = {'sources': [m['source'] for m in stored], 'warning': result.get('warning', ''),
+                'has_more': result['has_more'], 'next_offsets': result['next_offsets']}
+            self.put(key, 'deep_latest_batch', saved)
+        position, char_offset = cursor.get('position', [0, 0])
+        page = self.material_page(saved, position, char_offset, capacity, probe_budget=probe_budget)
+        following = ({'batch': key, 'position': json.loads(page['next_cursor'])} if page['has_more'] else
+            {'offsets': saved['next_offsets']} if saved['has_more'] else None)
+        return {**page, 'has_more': following is not None,
+            'next_cursor': json.dumps(following, sort_keys=True) if following is not None else None}
 
     def tools(self):
         @tool
@@ -761,8 +795,29 @@ class ChatGateway:
                 return result
 
         @tool
+        async def list_files(scope_handle: str) -> dict:
+            """按最新到最早每次返回一个真实文件附件，本地过滤文字、图片和链接。先定位再 analyze_media；确需其他文件时才继续下一页。"""
+            async with self.lock:
+                state = self.scope(scope_handle)
+                run = self.guard()
+                if state['complete_required'] or state.get('message_count') or run.get('manifest_id') or run.get('work_query'):
+                    raise ValueError('完整分析、最近 N 条或分配清单须用 read_messages 读取既定范围；文件列表不能替代覆盖要求')
+                key = 'files:' + scope_handle
+                position = self.get(key) or {'cursor': '', 'complete': False}
+                if position['complete']:
+                    return {'messages': [], 'has_more': False, 'scope_handle': scope_handle, 'order': 'newest_first',
+                        'coverage': 'files_only', 'warning': position.get('warning', '')}
+                result = await self.latest_page({**state, 'cursor': position['cursor']}, capacity(self.service, run), kind='file')
+                payload = self.save_messages(result['messages'], result['originals'])
+                warning = '；'.join(dict.fromkeys(w for w in (position.get('warning'), result.get('warning')) if w))
+                self.put(key, 'deep_file_listing', {'cursor': result['next_cursor'], 'complete': not result['has_more'], 'warning': warning})
+                return {'messages': payload, 'scope_handle': scope_handle, 'has_more': result['has_more'],
+                    'order': 'newest_first', 'coverage': 'files_only', 'warning': warning,
+                    'instruction': '仅包含真实文件附件，按最新优先。先分析符合问题的文件，证据足够即可回答；文件列表不表示读完全部聊天。'}
+
+        @tool
         async def read_messages(scope_handle: str) -> dict:
-            """读取范围下一页；完整分析每页须先 commit_findings，再继续。重试返回未提交页，不跳过原文。"""
+            """读取范围下一页：普通问题从最新往前，查文件优先 list_files；完整分析按时间正序，每页先 commit_findings 再继续。"""
             state = self.scope(scope_handle)
             if state['mode'] == 'statistics':
                 # 用户调用读取工具表达分析意图，派生同边界分析范围，不沿用统计游标。
@@ -917,13 +972,21 @@ class ChatGateway:
                 'next_text_offset': end if end < len(text) else None}], [original])}
 
         @tool
-        async def analyze_media(scope_handle: str, source: str, question: str = '') -> dict:
-            """仅当需要理解图片或附件时分析已知来源。使用本轮所选模型；不支持图片时跳过图片，仍可提取附件文字。"""
+        async def analyze_media(scope_handle: str, source: str, question: str = '',
+            analysis_mode: Literal['overview', 'full'] = 'overview', cursor_handle: str = '') -> dict:
+            """默认概览：提取有限正文，扫描件识别少量页面；文件用途/主题问题证据足够即可回答。需更多内容用返回的 next_cursor_handle 续读；明确要求全文逐图分析才选 full。不支持视觉时如实报告图片缺口。"""
             state = self.scope(scope_handle)
             run = self.guard()
             original = run['evidence'].get(source)
             if not original or not self.permits(state, original):
                 raise ValueError('附件来源不在已选范围')
+            media_cursor = None
+            if cursor_handle:
+                saved = self.get('media-cursor:' + cursor_handle)
+                if (not saved or saved['source'] != source or saved['analysis_mode'] != analysis_mode
+                        or (question and question != saved['question'])):
+                    raise ValueError('附件续读位置不属于当前来源或分析模式，请使用对应结果的续读句柄')
+                question, media_cursor = saved['question'], saved['cursor']
             if run.get('manifest_id'):
                 assigned = self.service.analysis_plans.assigned_messages(run, source)
                 if not assigned:
@@ -937,26 +1000,42 @@ class ChatGateway:
             hook = model_attempt_hook.set(lambda: self.service.spend(self.id, 'models'))
             try:
                 question = question or run.get('input_digest', '')
-                enriched = await self.service.ai.media.enrich(run['account'], original, {'media': True, 'question': question, 'skip_unsupported_images': True}, self.service.profile(run, True),
-                    self.guard, unit_callback=lambda label, cached=False: None if cached else self.service.spend(self.id, 'media'))
+                options = {'media': True, 'question': question, 'skip_unsupported_images': True, 'analysis_mode': analysis_mode}
+                if media_cursor is not None:
+                    options['media_cursor'] = media_cursor
+                enriched = await self.service.ai.media.enrich(run['account'], original, options, self.service.profile(run, True),
+                    self.guard, unit_callback=lambda label, cached=False: None if cached else self.service.spend(self.id, 'media'),
+                    progress_callback=MEDIA_PROGRESS.get())
                 self.guard()
                 # 媒体解释是派生结果，不能覆盖已经保存的原消息文本。
-                key = hashlib.sha256(json.dumps([source, question]).encode()).hexdigest()[:24]
-                body = {'source': source, 'question': question, 'analysis': enriched.get('text', ''), 'coverage': enriched.get('coverage', '')}
+                key = hashlib.sha256(json.dumps([source, question, analysis_mode, media_cursor], sort_keys=True).encode()).hexdigest()[:24]
+                detail = enriched.get('coverage_detail', {})
+                body = {'source': source, 'question': question, 'analysis_mode': analysis_mode,
+                    'analysis': enriched.get('text', ''), 'coverage': enriched.get('coverage', ''), 'coverage_detail': detail}
                 self.put('media:' + key, 'deep_media_result', body)
                 from .deep_backend import TaskBackend
                 path = '/results/media/' + key + '.json'
                 TaskBackend(self.service, self.id, self.version).write(path, json.dumps(body, ensure_ascii=False, indent=2))
                 available = body['coverage'].startswith('已分析')
+                next_handle = None
+                if detail.get('next_cursor') is not None:
+                    next_state = {'source': source, 'question': question, 'analysis_mode': analysis_mode, 'cursor': detail['next_cursor']}
+                    next_handle = hashlib.sha256(json.dumps(next_state, sort_keys=True).encode()).hexdigest()[:24]
+                    self.put('media-cursor:' + next_handle, 'deep_media_cursor', next_state)
                 result = {'source': source, 'analysis': body['analysis'][:2000], 'result_path': path,
-                    'coverage': body['coverage'], 'available': available}
+                    'analysis_truncated': len(body['analysis']) > 2000, 'analysis_mode': analysis_mode,
+                    'coverage': body['coverage'], 'coverage_detail': {k: v for k, v in detail.items() if k != 'next_cursor'},
+                    'next_cursor_handle': next_handle, 'available': available}
+                if analysis_mode == 'overview' and available:
+                    result['instruction'] = '基于已返回原文回答用途或主题，明确当前覆盖范围，不宣称已读全文；仅存在影响答案的缺口时续读。当前片段较长时先用 result_path 回查该片段完整内容。'
                 if '已跳过图片内容' in body['coverage']:
                     result['note'] = '当前模型不支持图片，已跳过图片内容'
                     result['instruction'] = '向用户说明图片已跳过；继续分析已读取文字，不重试图片，不要求切换模型，不猜测图片内容。'
                     return result
                 if not available:
                     result['note'] = body['coverage'] or '此媒体未能分析。'
-                    result['instruction'] = '此媒体内容尚未确认，不要猜测。继续根据已读文字回答并说明缺口；本机文件缺失时需用户下载后才能分析，不要反复调用。'
+                    result['instruction'] = ('当前片段没有可用正文，尚未读完文件；使用 next_cursor_handle 继续读取，不把空片段当作整个附件解析失败。'
+                        if next_handle else '此媒体内容尚未确认，不要猜测。继续根据已读文字回答并说明缺口；本机文件缺失时需用户下载后才能分析，不要反复调用。')
                 return result
             finally:
                 audit_task_id.reset(token)
@@ -984,7 +1063,7 @@ class ChatGateway:
             """读取全部分支事实后保存主模型整合结论与缺口；并不替代全量覆盖校验。"""
             return self.service.planned_work.close(self, plan_handle, synthesis, sources, gaps)
 
-        tools = [select_chat_scope, search_messages, search_live_messages, read_messages, commit_findings, read_context, count_messages, read_results, calculate_values, search_material, read_material, analyze_media]
+        tools = [select_chat_scope, search_messages, search_live_messages, list_files, read_messages, commit_findings, read_context, count_messages, read_results, calculate_values, search_material, read_material, analyze_media]
         # 构建旧检查点图时只读配置，不执行当前版本 guard；工具执行时仍逐次校验。
         run = self.service.run(self.id)
         if run.get('subtask_plan_version') == REVISION:

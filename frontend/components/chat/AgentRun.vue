@@ -27,8 +27,8 @@
       </template>
     </div>
       <div v-if="running && !(open && compacting) && !(open && run.subtasks?.running && run.stage === '执行独立子任务')" class="agent-live-step" role="status" aria-live="polite" aria-atomic="true">
-        <span class="agent-stream-status agent-shimmer">思考中</span>
-        <time aria-hidden="true">{{ duration(stageElapsed) }}</time>
+        <span class="agent-stream-status agent-shimmer">{{ activeTool ? activeTool.detail || activeTool.text || run.stage : '思考中' }}</span>
+        <time aria-hidden="true">{{ duration(activeTool ? (currentNow / 1000 - (activeTool.started_at ?? run.stage_started_at ?? currentNow / 1000)) : stageElapsed) }}</time>
       </div>
     </div>
     </ChainOfThought>
@@ -95,6 +95,7 @@ const groupedRecords = computed(() => groupTimelineTools(records.value))
 const isCompaction = item => item.kind === 'notice' && item.context_job?.id && Number.isFinite(item.context_job.before)
 const compactions = computed(() => records.value.filter(isCompaction))
 const compacting = computed(() => compactions.value.some(item => item.context_job.status === 'running' && (item.input_version ?? props.run.version) === props.run.version))
+const activeTool = computed(() => running.value ? records.value.filter(item => item.kind === 'tool' && item.status === 'running' && (item.input_version ?? props.run.version) === props.run.version).at(-1) : null)
 const firstTaskRecord = computed(() => groupedRecords.value.find(item => item.kind === 'tool' && item.action === 'task')?.id)
 const currentNow = computed(() => props.now || Date.now())
 const elapsed = computed(() => (props.run.elapsed_seconds || 0) + (running.value ? Math.max(0, currentNow.value / 1000 - (props.run.segment_started ?? currentNow.value / 1000)) : 0))

@@ -7,7 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -1075,6 +1075,7 @@ def _iter_exec_table_rows_via_keyset(
     local_types: Optional[set[int]],
     page_size: int,
     checkpoint: Optional[Checkpoint] = None,
+    descending: bool = False,
 ):
     """Yield one realtime shard in chronological, bounded pages."""
 
@@ -1091,6 +1092,8 @@ def _iter_exec_table_rows_via_keyset(
     _run_checkpoint(checkpoint)
 
     boundary: Optional[tuple[int, int, int]] = None
+    comparison = '<' if descending else '>'
+    direction = 'DESC' if descending else 'ASC'
     while True:
         where_parts: list[str] = []
         if wanted_types:
@@ -1102,19 +1105,20 @@ def _iter_exec_table_rows_via_keyset(
         if boundary is not None:
             create_time, sort_seq, local_id = boundary
             where_parts.append(
-                "(m.create_time > {0} OR "
-                "(m.create_time = {0} AND COALESCE(m.sort_seq, 0) > {1}) OR "
-                "(m.create_time = {0} AND COALESCE(m.sort_seq, 0) = {1} AND m.local_id > {2}))".format(
+                "(m.create_time {3} {0} OR "
+                "(m.create_time = {0} AND COALESCE(m.sort_seq, 0) {3} {1}) OR "
+                "(m.create_time = {0} AND COALESCE(m.sort_seq, 0) = {1} AND m.local_id {3} {2}))".format(
                     create_time,
                     sort_seq,
                     local_id,
+                    comparison,
                 )
             )
 
         statements = _select_window_candidates(
             table_name,
             where_sql=" AND ".join(where_parts) if where_parts else "1=1",
-            order_sql="m.create_time ASC, COALESCE(m.sort_seq, 0) ASC, m.local_id ASC",
+            order_sql=f"m.create_time {direction}, COALESCE(m.sort_seq, 0) {direction}, m.local_id {direction}",
             limit=size,
         )
         _run_checkpoint(checkpoint)
@@ -1139,13 +1143,13 @@ def _iter_exec_table_rows_via_keyset(
             raise RealtimeMessageReadError(
                 f"Realtime query returned malformed rows for {db_path.name}/{table_name}"
             )
-        page_rows.sort(key=_realtime_row_sort_key)
+        page_rows.sort(key=_realtime_row_sort_key, reverse=descending)
         next_boundary = (
             _to_int(_pick(page_rows[-1], "create_time", "createTime")),
             _to_int(_pick(page_rows[-1], "sort_seq", "sortSeq")),
             _to_int(_pick(page_rows[-1], "local_id", "localId")),
         )
-        if boundary is not None and next_boundary <= boundary:
+        if boundary is not None and (next_boundary >= boundary if descending else next_boundary <= boundary):
             raise RealtimeMessageReadError(
                 f"Realtime pagination did not advance for {db_path.name}/{table_name} at {boundary}"
             )
@@ -1182,6 +1186,7 @@ def _iter_resolved_rows_via_exec_paged(
     local_types: Optional[set[int]],
     page_size: int,
     checkpoint: Optional[Checkpoint] = None,
+    descending: bool = False,
 ):
     streams = [
         _iter_exec_table_rows_via_keyset(
@@ -1196,77 +1201,15 @@ def _iter_resolved_rows_via_exec_paged(
             local_types=local_types,
             page_size=page_size,
             checkpoint=checkpoint,
+            descending=descending,
         )
         for db_path, table_name in resolved
     ]
-    yield from heapq.merge(*streams, key=_realtime_row_sort_key)
-
-
-def fetch_all_rows_via_exec_paged(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    username: str,
-    db_storage_dir: Optional[Path],
-    exec_query: ExecQuery,
-    normalize_item: NormalizeItem,
-    start_time: Optional[int] = None,
-    end_time: Optional[int] = None,
-    local_types: Optional[set[int]] = None,
-    page_size: int = 1000,
-) -> RealtimeMessageBatch:
-    """Read a full conversation without creating an unbounded sidecar response."""
-
-    size = max(1, min(int(page_size or 1000), 1000))
-    resolved, candidate_count, probed, diagnostics = _resolve_tables(
-        rt_conn=rt_conn,
-        db_storage_dir=db_storage_dir,
-        username=username,
-        exec_query=exec_query,
-    )
-    authoritative = bool(candidate_count > 0 and probed == candidate_count)
-    if not resolved:
-        return RealtimeMessageBatch(
-            [],
-            False,
-            "exec_paged",
-            authoritative,
-            tables_found=0,
-            databases_probed=probed,
-            diagnostics=tuple(diagnostics),
-        )
-
-    all_rows = list(
-        _iter_resolved_rows_via_exec_paged(
-            rt_conn=rt_conn,
-            account_dir=account_dir,
-            resolved=resolved,
-            exec_query=exec_query,
-            normalize_item=normalize_item,
-            start_time=start_time,
-            end_time=end_time,
-            local_types=local_types,
-            page_size=size,
-        )
-    )
-    first = all_rows[0] if all_rows else {}
-    first_path = str(_pick(first, "_db_path") or "").strip()
-    first_db_path = Path(first_path) if first_path else None
-    first_table_name = str(_pick(first, "table_name") or "").strip()
-    first_rowid = _to_int(_pick(first, "__my_rowid", "debug_my_rowid"))
-    first_my_rowid = first_rowid if first_rowid > 0 else None
-    return RealtimeMessageBatch(
-        all_rows,
-        False,
-        "exec_paged",
-        authoritative,
-        db_path=first_db_path,
-        table_name=first_table_name,
-        my_rowid=first_my_rowid,
-        tables_found=len(resolved),
-        databases_probed=probed,
-        diagnostics=tuple(diagnostics),
-    )
+    try:
+        yield from heapq.merge(*streams, key=_realtime_row_sort_key, reverse=descending)
+    finally:
+        for stream in streams:
+            stream.close()
 
 
 def fetch_rows_via_cursor(
@@ -1345,6 +1288,7 @@ def iter_realtime_message_rows(
     local_types: Optional[set[int]] = None,
     page_size: int = 1000,
     checkpoint: Optional[Checkpoint] = None,
+    descending: bool = False,
 ):
     """Stream a full realtime conversation without waiting for full materialization.
 
@@ -1382,7 +1326,7 @@ def iter_realtime_message_rows(
     if exec_authoritative:
         if not resolved:
             return
-        for item in _iter_resolved_rows_via_exec_paged(
+        stream = _iter_resolved_rows_via_exec_paged(
             rt_conn=rt_conn,
             account_dir=account_dir,
             resolved=resolved,
@@ -1393,9 +1337,14 @@ def iter_realtime_message_rows(
             local_types=local_types,
             page_size=size,
             checkpoint=checkpoint,
-        ):
-            if matches(item):
-                yield item
+            descending=descending,
+        )
+        try:
+            for item in stream:
+                if matches(item):
+                    yield item
+        finally:
+            stream.close()
         return
 
     if resolved:
@@ -1411,7 +1360,7 @@ def iter_realtime_message_rows(
                 rt_conn.handle,
                 username,
                 batch_size=size,
-                ascending=True,
+                ascending=not descending,
                 begin_timestamp=max(0, int(start_time or 0)),
                 end_timestamp=max(0, int(end_time or 0)),
                 lite=False,
@@ -1426,6 +1375,7 @@ def iter_realtime_message_rows(
         try:
             _run_checkpoint(checkpoint)
             empty_with_more = 0
+            previous_key = None
             while True:
                 _run_checkpoint(checkpoint)
                 raw_rows, has_more = _locked_call(rt_conn, fetch_batch, rt_conn.handle, cursor)
@@ -1440,8 +1390,16 @@ def iter_realtime_message_rows(
                     if not isinstance(raw, dict):
                         continue
                     item = normalize_item(raw)
-                    if isinstance(item, dict) and matches(item):
-                        yield item
+                    if isinstance(item, dict):
+                        if descending:
+                            key = _realtime_row_sort_key(item)[:3]
+                            if previous_key is not None and key > previous_key:
+                                raise RealtimeMessageReadError(
+                                    f"Realtime cursor did not honor descending order for {username}"
+                                )
+                            previous_key = key
+                        if matches(item):
+                            yield item
                 if not has_more:
                     break
         finally:
@@ -1490,7 +1448,7 @@ def iter_realtime_message_rows(
             break
 
     if rows:
-        rows.sort(key=_realtime_row_sort_key)
+        rows.sort(key=_realtime_row_sort_key, reverse=descending)
         yield from rows
         return
 
@@ -1498,137 +1456,3 @@ def iter_realtime_message_rows(
     raise RealtimeMessageReadError(
         f"Unable to read realtime messages for {username}; refusing to export an unverified empty result: {detail}"
     )
-
-
-def read_all_realtime_message_rows(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    username: str,
-    db_storage_dir: Optional[Path],
-    exec_query: ExecQuery,
-    open_cursor: OpenCursor,
-    fetch_batch: FetchCursorBatch,
-    close_cursor: CloseCursor,
-    get_messages: GetMessages,
-    normalize_item: NormalizeItem,
-    start_time: Optional[int] = None,
-    end_time: Optional[int] = None,
-    local_types: Optional[set[int]] = None,
-    initial_take: int = 1000,
-) -> RealtimeMessageBatch:
-    diagnostics: list[str] = []
-    exec_empty: Optional[RealtimeMessageBatch] = None
-    exec_partial = False
-    try:
-        batch = fetch_all_rows_via_exec_paged(
-            rt_conn=rt_conn,
-            account_dir=account_dir,
-            username=username,
-            db_storage_dir=db_storage_dir,
-            exec_query=exec_query,
-            normalize_item=normalize_item,
-            start_time=start_time,
-            end_time=end_time,
-            local_types=local_types,
-            page_size=initial_take,
-        )
-        diagnostics.extend(batch.diagnostics)
-        if batch.tables_found > 0:
-            if batch.authoritative:
-                result = batch
-            else:
-                exec_partial = True
-                diagnostics.append("exec: one or more realtime message databases could not be probed")
-                result = None
-        else:
-            if batch.authoritative:
-                exec_empty = batch
-            result = None
-    except Exception as exc:
-        diagnostics.append(f"exec: {exc}")
-        result = None
-
-    if result is None and exec_empty is None:
-        take = max(1, int(initial_take))
-        try:
-            while True:
-                batch = fetch_rows_via_cursor(
-                    rt_conn=rt_conn,
-                    username=username,
-                    take=take,
-                    open_cursor=open_cursor,
-                    fetch_batch=fetch_batch,
-                    close_cursor=close_cursor,
-                    normalize_item=normalize_item,
-                )
-                if not batch.authoritative:
-                    break
-                if not batch.has_more:
-                    result = batch
-                    break
-                if take >= 2_000_000_000:
-                    raise RealtimeMessageReadError("Realtime conversation exceeds the supported message count.")
-                take = min(take * 2, 2_000_000_000)
-        except Exception as exc:
-            diagnostics.append(f"cursor: {exc}")
-
-    if result is None and exec_empty is None and not exec_partial:
-        rows: list[dict[str, Any]] = []
-        offset = 0
-        batch_size = max(1, int(initial_take))
-        try:
-            while True:
-                raw_rows = _locked_call(
-                    rt_conn,
-                    get_messages,
-                    rt_conn.handle,
-                    username,
-                    limit=batch_size,
-                    offset=offset,
-                )
-                if not raw_rows:
-                    break
-                for raw in raw_rows:
-                    if isinstance(raw, dict):
-                        item = normalize_item(raw)
-                        if isinstance(item, dict):
-                            rows.append(item)
-                offset += len(raw_rows)
-                if len(raw_rows) < batch_size:
-                    break
-        except Exception as exc:
-            diagnostics.append(f"native: {exc}")
-        if rows:
-            result = RealtimeMessageBatch(rows, False, "native", True)
-
-    if result is None:
-        if exec_empty is not None:
-            result = exec_empty
-        else:
-            detail = "; ".join(diagnostics[-5:]) or "no realtime reader returned an authoritative result"
-            raise RealtimeMessageReadError(
-                f"Unable to read realtime messages for {username}; refusing to export an unverified empty result: {detail}"
-            )
-
-    wanted_types = {int(value) for value in (local_types or set()) if int(value) != 0} if local_types else None
-    filtered: list[dict[str, Any]] = []
-    for item in result.rows:
-        create_time = _to_int(_pick(item, "create_time", "createTime"))
-        local_type = _to_int(_pick(item, "local_type", "localType", "type"))
-        if wanted_types and local_type not in wanted_types:
-            continue
-        if start_time is not None and create_time < int(start_time):
-            continue
-        if end_time is not None and create_time > int(end_time):
-            continue
-        filtered.append(item)
-    filtered.sort(
-        key=lambda row: (
-            _to_int(_pick(row, "create_time", "createTime")),
-            _to_int(_pick(row, "sort_seq", "sortSeq")),
-            _to_int(_pick(row, "local_id", "localId")),
-            str(_pick(row, "_db_path") or ""),
-        )
-    )
-    return replace(result, rows=filtered, has_more=False, diagnostics=tuple(dict.fromkeys(diagnostics)))

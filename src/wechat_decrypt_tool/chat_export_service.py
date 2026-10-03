@@ -1381,30 +1381,6 @@ def _minify_html_for_export(text: str) -> str:
         return str(text or "")
 
 
-def _seal_html_export_with_native(
-    *,
-    native_integrity: Any,
-    export_id: str,
-    entries: Iterable[dict[str, Any]],
-    html_assets: dict[str, Any],
-) -> dict[str, Any]:
-    try:
-        result = json.loads(
-            str(
-                native_integrity.seal_export(
-                    str(export_id or ""),
-                    json.dumps(list(entries), ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(dict(html_assets or {}), ensure_ascii=False, separators=(",", ":")),
-                )
-            )
-        )
-    except Exception as e:
-        raise RuntimeError("HTML 导出完整性组件生成校验失败。") from e
-    if not isinstance(result, dict) or not str(result.get("bundle") or "").strip():
-        raise RuntimeError("HTML 导出完整性组件返回结果为空。")
-    return result
-
-
 def _format_ts(ts: int) -> str:
     if not ts:
         return ""
@@ -4305,6 +4281,7 @@ def _iter_realtime_rows_for_conversation(
     end_time: Optional[int],
     local_types: Optional[set[int]] = None,
     checkpoint: Optional[Callable[[], None]] = None,
+    descending: bool = False,
 ) -> Iterable[_Row]:
     db_storage_dir = _resolve_account_db_storage_dir(account_dir)
     logger.info(
@@ -4329,6 +4306,7 @@ def _iter_realtime_rows_for_conversation(
         local_types=local_types,
         page_size=1000,
         checkpoint=checkpoint,
+        descending=descending,
     )
     yielded = 0
     self_username = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
@@ -4456,6 +4434,7 @@ def _merge_anti_revoke_into_row_stream(
     start_time: Optional[int],
     end_time: Optional[int],
     local_types: Optional[set[int]] = None,
+    descending: bool = False,
 ) -> Iterable[_Row]:
     revoked_map = get_revoked_messages_map(account_dir, conv_username)
     revoked_list = get_revoked_messages_list(account_dir, conv_username)
@@ -4499,7 +4478,7 @@ def _merge_anti_revoke_into_row_stream(
                 extra_json=str(rev_row.get("extra_json") or "{}"),
             )
         )
-    deleted_rows.sort(key=sort_key)
+    deleted_rows.sort(key=sort_key, reverse=descending)
 
     def tagged_stream() -> Iterable[_Row]:
         for r in row_stream:
@@ -4522,20 +4501,26 @@ def _merge_anti_revoke_into_row_stream(
 
     seen_non_sys_servers: set[str] = set()
     seen_non_sys_locals: set[int] = set()
-    for r in heapq.merge(tagged_stream(), deleted_rows, key=sort_key):
-        sid = str(r.server_id or 0).strip()
-        lid = int(r.local_id or 0)
-        is_sys = (int(r.local_type or 0) == 10000)
-        if not is_sys:
-            if sid and sid != "0":
-                if sid in seen_non_sys_servers:
-                    continue
-                seen_non_sys_servers.add(sid)
-            elif lid > 0:
-                if lid in seen_non_sys_locals:
-                    continue
-                seen_non_sys_locals.add(lid)
-        yield r
+    tagged = tagged_stream()
+    try:
+        for r in heapq.merge(tagged, deleted_rows, key=sort_key, reverse=descending):
+            sid = str(r.server_id or 0).strip()
+            lid = int(r.local_id or 0)
+            is_sys = (int(r.local_type or 0) == 10000)
+            if not is_sys:
+                if sid and sid != "0":
+                    if sid in seen_non_sys_servers:
+                        continue
+                    seen_non_sys_servers.add(sid)
+                elif lid > 0:
+                    if lid in seen_non_sys_locals:
+                        continue
+                    seen_non_sys_locals.add(lid)
+            yield r
+    finally:
+        tagged.close()
+        if hasattr(row_stream, 'close'):
+            row_stream.close()
 
 
 def _iter_rows_for_conversation(
@@ -4548,6 +4533,7 @@ def _iter_rows_for_conversation(
     source: str = "decrypted",
     rt_conn: Any | None = None,
     checkpoint: Optional[Callable[[], None]] = None,
+    descending: bool = False,
 ) -> Iterable[_Row]:
     if source == "realtime":
         if rt_conn is None:
@@ -4560,6 +4546,7 @@ def _iter_rows_for_conversation(
             end_time=end_time,
             local_types=local_types,
             checkpoint=checkpoint,
+            descending=descending,
         )
         return _merge_anti_revoke_into_row_stream(
             base_stream,
@@ -4568,6 +4555,7 @@ def _iter_rows_for_conversation(
             start_time=start_time,
             end_time=end_time,
             local_types=local_types,
+            descending=descending,
         )
 
     db_paths = _iter_message_db_paths(account_dir)
@@ -4575,6 +4563,7 @@ def _iter_rows_for_conversation(
         return []
 
     account_wxid = resolve_account_self_username(account_dir)
+    direction = 'DESC' if descending else 'ASC'
 
     def iter_db(db_path: Path) -> Iterable[_Row]:
         conn = sqlite3.connect(db_path.resolve().as_uri() + '?mode=ro', uri=True)
@@ -4647,7 +4636,7 @@ def _iter_rows_for_conversation(
                 f"FROM {quoted} m "
                 "LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
                 f"{where_sql} "
-                "ORDER BY m.create_time ASC, m.sort_seq ASC, m.local_id ASC "
+                f"ORDER BY m.create_time {direction}, m.sort_seq {direction}, m.local_id {direction} "
             )
             sql_no_join = (
                 "SELECT "
@@ -4657,7 +4646,7 @@ def _iter_rows_for_conversation(
                 + "'' AS sender_username "
                 f"FROM {quoted} m "
                 f"{where_sql} "
-                "ORDER BY m.create_time ASC, m.sort_seq ASC, m.local_id ASC "
+                f"ORDER BY m.create_time {direction}, m.sort_seq {direction}, m.local_id {direction} "
             )
 
             try:
@@ -4721,7 +4710,7 @@ def _iter_rows_for_conversation(
 
     def merged_rows():
         try:
-            yield from heapq.merge(*streams, key=sort_key)
+            yield from heapq.merge(*streams, key=sort_key, reverse=descending)
         finally:
             # heapq.merge 不负责关闭输入流；需主动释放各分库的 SQLite 连接。
             for stream in streams:
@@ -4734,6 +4723,7 @@ def _iter_rows_for_conversation(
         start_time=start_time,
         end_time=end_time,
         local_types=local_types,
+        descending=descending,
     )
 
 

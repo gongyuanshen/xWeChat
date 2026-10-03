@@ -85,6 +85,8 @@
             </span>
           </div>
 
+          <MessageInsightLabel v-if="insightLabels && !message.isSent" :message="message" :labels="insightLabels" />
+
           <ContactProfileCard
             v-if="isMentionContactProfileCardForMessage && isMentionContactProfileCardForMessage(message)"
             :state="state"
@@ -101,10 +103,11 @@
 import { defineComponent, toRef } from 'vue'
 import ContactProfileCard from '~/components/chat/ContactProfileCard.vue'
 import MessageContent from '~/components/chat/MessageContent.vue'
+import MessageInsightLabel from '~/components/chat/MessageInsightLabel.vue'
 
 export default defineComponent({
   name: 'MessageItem',
-  components: { ContactProfileCard, MessageContent },
+  components: { ContactProfileCard, MessageContent, MessageInsightLabel },
   props: {
     state: { type: Object, required: true },
     message: { type: Object, required: true }
@@ -112,6 +115,7 @@ export default defineComponent({
   setup(props) {
     return {
       ...props.state,
+      insightLabels: toRef(props.state, 'insightLabels'),
       message: toRef(props, 'message')
     }
   }

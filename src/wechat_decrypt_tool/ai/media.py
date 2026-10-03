@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .diagnostics import observed, event as diagnostic_event
+from .diagnostics import observed, event as diagnostic_event, executor_call
 import logging
 
 import asyncio
@@ -12,8 +12,10 @@ import zipfile
 import re
 from xml.etree import ElementTree
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
+from .agent_budget import pieces, size
 
 
 def image_url(data):
@@ -26,7 +28,7 @@ def image_url(data):
     return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
 
 
-def iter_document(data: bytes, suffix: str, *, include_images=True):
+def iter_document(data: bytes, suffix: str, *, include_images=True, scan_only=False):
     """返回带位置的片段；不运行宏，不提取压缩包中的任意文件到磁盘。"""
     stream = io.BytesIO(data)
     if suffix in {".txt", ".md", ".csv"}:
@@ -63,7 +65,7 @@ def iter_document(data: bytes, suffix: str, *, include_images=True):
                         bitmap.close()
                         pdf_page.close()
                 else:
-                    if not include_images:
+                    if not include_images or scan_only:
                         for name in page.images.keys():
                             yield {"label": f"第 {i + 1} 页图片 {name}", "skipped_image": True}
                         continue
@@ -168,37 +170,159 @@ class MediaService:
     def __init__(self, store, models):
         self.store, self.models = store, models
 
-    async def enrich(self, account, message, options, vision_profile, checkpoint, unit_callback=None):
+    async def enrich(self, account, message, options, vision_profile, checkpoint, unit_callback=None, progress_callback=None):
         if message["kind"] not in {"image", "file"}:
             return message
-        return await self._enrich(account, message, options, vision_profile, checkpoint, unit_callback)
+        return await self._enrich(account, message, options, vision_profile, checkpoint, unit_callback, progress_callback)
+
+    async def _overview(self, account, result, data, suffix, options, profile, checkpoint,
+                        key, skip_images, unit_callback, progress_callback):
+        cursor = options.get('media_cursor') or {'part_offset': 0, 'text_offset': 0}
+        start, text_offset = cursor['part_offset'], cursor['text_offset']
+        parts = iter_document(data, suffix, include_images=suffix == '.pdf' and not skip_images, scan_only=True)
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='media-parser')
+        fragments, index, consumed, text_bytes, images = [], 0, 0, 0, 0
+        completed = 0
+        next_cursor, exhausted, skipped = None, False, False
+
+        def progress(phase, label, cached=False):
+            if progress_callback:
+                progress_callback({'phase': phase, 'label': label, 'completed_units': completed, 'cached': cached})
+
+        try:
+            while consumed < 32 and text_bytes < 12288 and images < 3:
+                checkpoint()
+                progress('extracting', f'附件部件 {index + 1}')
+                part = await executor_call(executor, next, parts, None)
+                if part is None:
+                    exhausted = True
+                    break
+                if index < start:
+                    index += 1
+                    continue
+                checkpoint()
+                label = part['label']
+                progress('extracting', label)
+                consumed += 1
+                if part.get('skipped_image'):
+                    skipped = True
+                elif 'image' in part:
+                    if not profile.get('vision'):
+                        raise ValueError('该附件包含扫描图片，请配置视觉模型后重试')
+                    partial_key = f'{key}:{index}'
+                    partial = self.store.get('media_cache', partial_key)
+                    images += 1
+                    if unit_callback:
+                        unit_callback(label, cached=bool(partial))
+                    progress('analyzing', label, cached=bool(partial))
+                    if partial:
+                        description = partial['text']
+                    else:
+                        prompt = f'根据这份附件的{label}简要提取标题、用途、主要内容。无法辨认时明确说明，不推断未读页面。'
+                        if options.get('question'):
+                            prompt += '\n本次问题：' + options['question']
+                        description = await self.models.invoke(profile, prompt, images=[part['image']], account=account)
+                        if not description.strip():
+                            raise ValueError('视觉分析未返回可用内容')
+                        self.store.put('media_cache', {'text': description}, id=partial_key, account=account)
+                    if not description.strip():
+                        raise ValueError('图片分析缓存为空，缓存内容无效')
+                    fragments.append(f'[{label}] {description}')
+                elif part.get('text', '').strip():
+                    full_text = part['text']
+                    offset = text_offset if index == start else 0
+                    remaining = 12288 - text_bytes
+                    fragment = next(pieces(full_text[offset:], remaining), '')
+                    # pieces 保留完整字符；剩余空间小于一个字符时留给下一次读取。
+                    if size(fragment) > remaining:
+                        fragment = ''
+                    text_bytes += size(fragment)
+                    if fragment:
+                        fragments.append(f'[{label}] {fragment}')
+                    if offset + len(fragment) < len(full_text):
+                        next_cursor = {'part_offset': index, 'text_offset': offset + len(fragment)}
+                        completed += 1
+                        progress('extracting', label)
+                        break
+                index += 1
+                completed += 1
+                progress('extracting', label)
+            if not exhausted and next_cursor is None:
+                checkpoint()
+                # 有界预读只确认是否到末尾；后续请求仍从尚未处理的 index 开始。
+                exhausted = await executor_call(executor, next, parts, None) is None
+                if not exhausted:
+                    next_cursor = {'part_offset': index, 'text_offset': 0}
+        finally:
+            try:
+                await asyncio.shield(executor_call(executor, parts.close))
+            finally:
+                executor.shutdown(wait=False)
+        if not fragments and next_cursor is None:
+            raise ValueError('附件未提取到文字，扫描图片未分析，请配置视觉模型后重试' if skipped
+                             else '附件未提取到可分析内容')
+        detail = {'complete': exhausted and not skipped and start == 0 and text_offset == 0, 'parts_read': consumed, 'text_bytes': text_bytes,
+            'images_analyzed': images, 'next_cursor': next_cursor, 'images_not_inspected': skipped,
+            'text_only': images == 0, 'start_part': start, 'start_text_offset': text_offset}
+        coverage = ('已分析附件概览；已读取标注位置的部分内容，不代表全文分析' if fragments
+                    else '附件概览当前片段未提取到可用内容')
+        if skipped:
+            coverage += '；未检查嵌入图片内容'
+        if next_cursor:
+            coverage += '；可按返回游标继续读取'
+        combined = '\n'.join(fragments)
+        if fragments:
+            self.store.put('media_cache', {'text': combined, 'units': images, 'coverage': coverage,
+                'analysis_mode': 'overview', 'coverage_detail': detail}, id=key, account=account)
+        progress('completed', '附件概览完成')
+        return result | {'text': result['text'] + '\n' + combined, 'coverage': coverage,
+            'analysis_mode': 'overview', 'coverage_detail': detail}
 
     @observed('media.enrich')
-    async def _enrich(self, account, message, options, vision_profile, checkpoint, unit_callback=None):
+    async def _enrich(self, account, message, options, vision_profile, checkpoint, unit_callback=None, progress_callback=None):
         result = dict(message)
+        mode = options.get('analysis_mode', 'full') if message['kind'] == 'file' else 'full'
+        if mode not in ('overview', 'full'):
+            raise ValueError('附件分析模式必须是 overview 或 full')
         if not options.get("media", True):
             return result | {"coverage": "未启用媒体分析"}
         skip_images = bool(options.get('skip_unsupported_images') and not vision_profile.get('vision'))
         skipped_notice = '当前模型不支持图片，已跳过图片内容'
         if skip_images and message['kind'] == 'image':
             return result | {'coverage': skipped_notice}
+        parts = None
+        executor = None
         try:
+            if progress_callback:
+                progress_callback({'phase': 'extracting', 'label': '定位附件', 'completed_units': 0})
             data, suffix = await asyncio.to_thread(resolve_media, account, message, options.get("max_attachment_mb", 20))
             diagnostic_event('media.located', suffix=suffix, bytes=len(data))
             signature = {"version": 2, "profile": vision_profile.get("id"), "model": vision_profile.get('model'),
                          "revision": vision_profile.get("revision"), "suffix": suffix, 'skip_images': skip_images}
+            if mode == 'overview':
+                signature.update(analysis_mode=mode, media_cursor=options.get('media_cursor'), overview_version=1)
             question = str(options.get('question') or '').strip()
             if question:
                 signature['question'] = question
             key = hashlib.sha256(account.encode() + data + json.dumps(signature, sort_keys=True).encode()).hexdigest()
             cached = self.store.get("media_cache", key)
             if cached:
+                if not cached['text'].strip():
+                    raise ValueError('附件分析缓存为空，缓存内容无效')
                 diagnostic_event('media.cache', cached=True, count=cached.get('units', 1))
                 if unit_callback:
                     for n in range(cached.get('units', 1)):
                         unit_callback(f'缓存图片 {n + 1}', cached=True)
-                return result | {"text": result["text"] + "\n" + cached["text"], "coverage": cached.get('coverage', '已分析') + '（缓存）'}
+                if progress_callback:
+                    progress_callback({'phase': 'completed', 'label': '附件分析缓存',
+                        'completed_units': cached.get('coverage_detail', {}).get('parts_read', cached.get('parts_read', cached.get('units', 1))), 'cached': True})
+                return result | {"text": result["text"] + "\n" + cached["text"], "coverage": cached.get('coverage', '已分析') + '（缓存）',
+                    **{k: cached[k] for k in ('analysis_mode', 'coverage_detail') if k in cached}}
+            if mode == 'overview':
+                return await self._overview(account, result, data, suffix, options, vision_profile, checkpoint,
+                    key, skip_images, unit_callback, progress_callback)
             parts = iter([{ "label": "图片", "image": image_url(data)}]) if suffix == ".image" else iter_document(data, suffix, include_images=not skip_images)
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='media-parser')
             text, index, units = [], -1, 0
             local_text = []
             skipped, has_text = False, False
@@ -206,7 +330,9 @@ class MediaService:
                 checkpoint()
                 unit_started = time.monotonic()
                 diagnostic_event('media.page.started', index=index+1)
-                part = await asyncio.to_thread(next, parts, None)
+                if progress_callback:
+                    progress_callback({'phase': 'extracting', 'label': f'附件部件 {index + 2}', 'completed_units': index + 1})
+                part = await executor_call(executor, next, parts, None)
                 if part is None:
                     diagnostic_event('media.page.finished', index=index+1, complete=True)
                     break
@@ -228,11 +354,17 @@ class MediaService:
                         diagnostic_event('media.page.cache', index=index, cached=True)
                         description = partial["text"]
                     else:
+                        if progress_callback:
+                            progress_callback({'phase': 'analyzing', 'label': label, 'completed_units': index})
                         prompt = f"描述这份聊天资料中的{label}，完整提取可辨认文字、表格和关键信息。不能辨认的内容请说明。"
                         if question:
                             prompt += '\n重点核查本次问题：' + question
                         description = await self.models.invoke(vision_profile, prompt, images=[part["image"]], account=account)
+                        if not description.strip():
+                            raise ValueError('视觉分析未返回可用内容')
                         self.store.put("media_cache", {"text": description}, id=partial_key, account=account)
+                    if not description.strip():
+                        raise ValueError('图片分析缓存为空，缓存内容无效')
                     text.append(f"[{label}] {description}")
                 else:
                     has_text = has_text or bool(part.get('text', '').strip())
@@ -243,13 +375,26 @@ class MediaService:
                     self.store.put('local_media_text', {'text': '\n'.join(local_text), 'username': message['username'],
                         'anchor': message['anchor'], 'file_hash': hashlib.sha256(data).hexdigest(), 'version': 1}, id=local_id, account=account)
                 diagnostic_event('media.page.finished', index=index, duration_ms=(time.monotonic()-unit_started)*1000)
+                if progress_callback:
+                    progress_callback({'phase': 'extracting', 'label': label, 'completed_units': index + 1})
+            if not has_text and not units and not skipped:
+                raise ValueError('附件未提取到可分析内容')
             combined = "\n".join(text)
             coverage = ('已分析附件文字；' + skipped_notice) if skipped and has_text else (skipped_notice if skipped else '已分析')
-            self.store.put("media_cache", {"text": combined, "units": units, 'coverage': coverage}, id=key, account=account)
+            self.store.put("media_cache", {"text": combined, "units": units, 'parts_read': index + 1, 'coverage': coverage}, id=key, account=account)
+            if progress_callback:
+                progress_callback({'phase': 'completed', 'label': '附件分析完成', 'completed_units': index + 1})
             return result | {"text": result["text"] + "\n" + combined, "coverage": coverage}
         except (ValueError, OSError, zipfile.BadZipFile, ElementTree.ParseError, KeyError) as exc:
             diagnostic_event('media.failed', level=logging.WARNING, error=exc, reason_code=media_failure_reason(exc))
             return result | {"coverage": str(exc), "text": result["text"] + "\n[附件未分析]"}
+        finally:
+            if executor is not None:
+                try:
+                    if hasattr(parts, 'close'):
+                        await asyncio.shield(executor_call(executor, parts.close))
+                finally:
+                    executor.shutdown(wait=False)
 
 
 def media_failure_reason(error):

@@ -1,0 +1,32 @@
+Laya runtime and calibration fixture
+====================================
+
+This project adapts laya_mlx/common.py, laya_mlx/agent.py, and the email case from
+web/fixtures/parity-multilingual.json from https://github.com/mizchi/laya-mlx
+revision dc3aa6b150cb861d0788fbd421cfd1303de4ed57 (Apache-2.0).
+
+Changes: Python ONNX Runtime CPU adapter, fixed model verification, strict input
+length errors instead of truncation, explicit graph/output validation, lazy load.
+No MLX code or neural network implementation is included.
+The fixed ONNX graph and tokenizer are downloaded separately.
+
+The WechatVibe Node runner was consulted for the ONNX tensor contract:
+https://github.com/tswawa/WechatVibe/blob/main/electron/laya/runner.ts
+WechatVibe is distributed under Apache-2.0.
+
+Upstream NOTICE follows:
+
+laya-mlx
+Copyright 2026 laya-mlx contributors
+
+This product includes software derived from Laya:
+https://github.com/NandhaKishorM/laya
+Copyright Convai Innovations and Laya contributors. Licensed under Apache-2.0.
+Upstream source revision: 6a5819129eb220570792e417e49723d697efd76f
+
+The token sequence construction, question rendering, confidence calculation,
+presets, email utilities and language router are adapted from Laya.
+The neural network is reimplemented using Apple's MLX, following Laya's
+DecisionModel and the ModernBERT architecture in Hugging Face Transformers.
+Model weights are downloaded separately from Convai Innovations on Hugging Face;
+they are not included in this repository.

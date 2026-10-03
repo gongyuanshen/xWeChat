@@ -1124,6 +1124,7 @@ import { parseTextWithEmoji } from '~/lib/wechat-emojis'
 import { SNS_SETTING_USE_CACHE_KEY, readLocalBoolSetting } from '~/lib/desktop-settings'
 import { reportServerErrorFromError, reportServerErrorFromResponse } from '~/lib/server-error-logging'
 import { selectSnsImageSource } from '~/lib/sns-media-source'
+import { formatBytes } from '~/lib/format-bytes'
 
 useHead({ title: '朋友圈 - 微信数据分析助手' })
 
@@ -1346,20 +1347,6 @@ const asNumber = (v) => {
 }
 
 const clamp01 = (v) => Math.max(0, Math.min(1, Number(v) || 0))
-
-const formatBytes = (value) => {
-  const bytes = Number(value)
-  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let size = bytes
-  let index = 0
-  while (size >= 1024 && index < units.length - 1) {
-    size /= 1024
-    index += 1
-  }
-  const digits = size >= 100 || index === 0 ? 0 : size >= 10 ? 1 : 2
-  return `${size.toFixed(digits)} ${units[index]}`
-}
 
 const resetExportSaveFeedback = ({ resetAutoSavedFor = false } = {}) => {
   exportSaveMsg.value = ''

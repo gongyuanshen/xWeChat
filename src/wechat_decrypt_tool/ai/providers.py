@@ -65,9 +65,37 @@ PRESETS = [
 
 
 class ProviderFailure(RuntimeError):
-    def __init__(self, message, authentication=False):
+    def __init__(self, message, authentication=False, reason=''):
         super().__init__(message)
         self.authentication = authentication
+        self.reason = reason
+
+
+def check_output_refusal(response, audit):
+    """Record bounded termination metadata and reject explicit provider refusals."""
+    metadata = getattr(response, 'response_metadata', {}) or {}
+    finish = metadata.get('finish_reason') or metadata.get('stop_reason')
+    stop = metadata.get('stop_reason')
+    status = metadata.get('status')
+    incomplete = (metadata.get('incomplete_details') or {}).get('reason')
+    finish_codes = {'stop', 'length', 'max_tokens', 'end_turn', 'tool_calls', 'function_call',
+                    'tool_use', 'stop_sequence', 'pause_turn', 'content_filter', 'refusal',
+                    'repetition_truncation'}
+    for key, value, allowed in (
+        ('finish_reason', finish, finish_codes),
+        ('stop_reason', stop, finish_codes),
+        ('response_status', status, {'queued', 'in_progress', 'completed', 'incomplete', 'failed', 'cancelled'}),
+        ('incomplete_reason', incomplete, {'max_output_tokens', 'content_filter'}),
+    ):
+        if value is not None:
+            audit[key] = value if isinstance(value, str) and value in allowed else 'unknown'
+    additional = getattr(response, 'additional_kwargs', {}) or {}
+    content = response.content
+    refusal_block = isinstance(content, list) and any(
+        isinstance(block, dict) and block.get('type') == 'refusal' for block in content)
+    if (finish in ('content_filter', 'refusal') or stop in ('content_filter', 'refusal')
+            or additional.get('refusal') or refusal_block or incomplete == 'content_filter'):
+        raise ProviderFailure('模型服务拒绝生成本次结果。', reason='output_refused')
 
 
 def public_profile(profile):
@@ -137,7 +165,7 @@ def parse_model_catalog(payload):
                 detail.setdefault('modalities', {})[direction] = values
                 if direction == 'input':
                     detail['vision'] = 'image' in values
-        for key in ('vision', 'tool_call', 'reasoning', 'structured_output', 'temperature', 'attachment'):
+        for key in ('vision', 'tool_call', 'reasoning', 'structured_output', 'temperature', 'attachment', 'streaming'):
             value = item.get(key, capabilities.get(key))
             if isinstance(value, bool):
                 detail[key] = value
@@ -213,6 +241,11 @@ class ModelService:
                 and profile.get('thinking_mode') is None and profile.get('thinking_budget') is None
                 and 'disabled' in documented_metadata(profile, profile['model']).get('thinking_types', [])):
             extra['extra_body'] = {'thinking': {'type': 'disabled'}}
+        endpoint = urlparse(profile['base_url']).path.rstrip('/')
+        if endpoint.endswith('/responses'):
+            extra['use_responses_api'] = True
+        elif endpoint.endswith('/chat/completions'):
+            extra['use_responses_api'] = False
         client = ChatOpenAI(base_url=model_base_url(profile["base_url"]), **extra, **common)
         if documented_metadata(profile, profile['model']).get('reasoning_content_required'):
             from .reasoning_client import ReasoningClient
@@ -272,16 +305,18 @@ class ModelService:
         # 不使用全局环境 tracing；下面使用 tracing_context 明确关闭。
         from langsmith import tracing_context
         messages = analysis_messages(prompt, schema, images)
-        native_output = bool(schema and profile.get("protocol") == "anthropic"
-                             and profile.get('model_metadata', {}).get('structured_output') is not False)
-        json_output = bool(schema and profile.get('protocol') == 'openai'
-                           and profile.get('model_metadata', {}).get('structured_output') is True)
         policy = call_policy.get()
+        output_support = profile.get('model_metadata', {}).get('structured_output')
+        native_output = bool(schema and profile.get("protocol") == "anthropic"
+                             and (output_support is True or (not policy.strict_output and output_support is not False)))
+        json_output = bool(schema and profile.get('protocol') == 'openai'
+                            and output_support is True)
         if policy.constrain_thinking:
             from .model_reasoning import constrain_reasoning_profile
             profile = constrain_reasoning_profile(profile)
         deadline = time.monotonic() + policy.seconds
-        for attempt in range(3):
+        attempts = 1 if policy.strict_output else 3
+        for attempt in range(attempts):
             if active_budget.get():check_request(profile,messages,schema.model_json_schema() if native_output else None)
             hook = model_attempt_hook.get()
             if hook:
@@ -292,7 +327,8 @@ class ModelService:
                      "profile_revision": profile.get("revision"), "account": account,
                      "task_id": audit_task_id.get(), "subtask_id": subtask_id.get(), "attempt": attempt + 1, "started_at": started,
                      "image_count": len(images or []), "status": "running", "usage": {},
-                     "usage_known": False, "id": uuid.uuid4().hex}
+                     "usage_known": False, "id": uuid.uuid4().hex,
+                     "output_format": 'json_schema' if native_output else 'json_object' if json_output else 'text'}
             audit.update({k:v for k,v in diagnostic_context.get().items() if k in {'trace_id','operation_id','execution_id','run_id','thread_id'}})
             self.store.put("usage", audit, account=account)
             queued = time.monotonic()
@@ -317,7 +353,9 @@ class ModelService:
                         if json_output:
                             kwargs['response_format'] = {'type': 'json_object'}
                         if native_output:
-                            response_bundle = await client.with_structured_output(schema, method="json_schema", include_raw=True).ainvoke(messages, config={"callbacks": []}, **kwargs)
+                            # A dict schema leaves SDK output uncoerced for our strict validation.
+                            output_schema = schema.model_json_schema() if policy.strict_output else schema
+                            response_bundle = await client.with_structured_output(output_schema, method="json_schema", include_raw=True).ainvoke(messages, config={"callbacks": []}, **kwargs)
                             response = response_bundle["raw"]
                             parsed = response_bundle.get("parsed")
                             parse_error = response_bundle.get("parsing_error")
@@ -332,12 +370,23 @@ class ModelService:
                 metadata = getattr(response,'response_metadata',{}) or {}
                 finish = metadata.get('finish_reason') or metadata.get('stop_reason')
                 audit['response_chars'] = len(str(text or ''))
-                audit['finish_reason'] = finish if finish in {'stop', 'length', 'max_tokens', 'end_turn', 'tool_calls', 'content_filter'} else 'unknown'
+                if policy.strict_output:
+                    check_output_refusal(response, audit)
+                    response_status = metadata.get('status')
+                    if response_status in ('failed', 'cancelled'):
+                        raise ProviderFailure('模型服务未完成本次响应，严格分析已停止。', reason='provider_' + response_status)
+                    if finish in ('length', 'max_tokens') or response_status == 'incomplete':
+                        raise ProviderFailure('模型输出被截断，严格分析已停止。', reason='output_truncated')
+                else:
+                    audit['finish_reason'] = finish if finish in {'stop', 'length', 'max_tokens', 'end_turn', 'tool_calls', 'content_filter'} else 'unknown'
                 if active_budget.get() and (metadata.get('finish_reason') or metadata.get('stop_reason')) in ('length','max_tokens'):
                     raise ContextOverflow('分段结果超出输出窗口，需要缩小分段。')
                 if parse_error:
                     raise ValueError("结构化输出校验失败")
-                if parsed is not None:
+                if policy.strict_output and schema:
+                    # SDK JSON parsers can repair Markdown or incomplete JSON; validate raw text.
+                    result = schema.model_validate_json(text, strict=True).model_dump()
+                elif parsed is not None:
                     result = schema.model_validate(parsed).model_dump()
                 elif not schema:
                     result = str(text)
@@ -356,6 +405,8 @@ class ModelService:
                 if request_finished is None: request_finished = time.monotonic()
                 if capture_sdk_truncation(audit, exc):
                     audit['status'] = 'failed'
+                    if policy.strict_output:
+                        raise ProviderFailure('模型输出被截断，严格分析已停止。', reason='output_truncated') from None
                     raise ContextOverflow('摘要输出被截断，原资料已保留，需要缩小分段或调整摘要输出预算。') from None
                 if schema and isinstance(exc, ValidationError):
                     # 只记录模式中的字段名和错误类型；不保存模型正文、异常消息或未知字段名。
@@ -370,17 +421,33 @@ class ModelService:
                     fields = [{'path': [p if isinstance(p, int) or p in allowed else '<field>' for p in e['loc']],
                                'type': e['type']} for e in exc.errors(include_input=False, include_context=False)[:12]]
                     audit['validation_errors'] = fields
-                    from langchain_core.messages import SystemMessage
-                    messages = [*messages, SystemMessage(content=(
-                        '上次结果未通过 JSON 格式校验。请根据原资料重新输出完整 JSON 对象，不要只思考或返回空内容；'
-                        '不得为满足格式编造事实，未知内容按模式允许的空值表达。待修正字段与类型：'
-                        + json.dumps(fields, ensure_ascii=False)))]
+                    if not policy.strict_output:
+                        from langchain_core.messages import SystemMessage
+                        messages = [*messages, SystemMessage(content=(
+                            '上次结果未通过 JSON 格式校验。请根据原资料重新输出完整 JSON 对象，不要只思考或返回空内容；'
+                            '不得为满足格式编造事实，未知内容按模式允许的空值表达。待修正字段与类型：'
+                            + json.dumps(fields, ensure_ascii=False)))]
                 diagnostic_event('model.call.attempt_failed', level=logging.WARNING, error=exc, call_id=audit['id'], diagnostic_id=audit['id'])
                 status = getattr(exc, "status_code", None)
                 if status == 429:
                     scheduler().throttled()
                 # 不记录供应商原始异常、提示词或密钥，失败也保留请求审计。
                 audit.update(status="failed", http_status=status, error_type=type(exc).__name__)
+                if policy.strict_output:
+                    if isinstance(exc, ProviderFailure) and exc.reason in {'output_truncated', 'output_refused', 'provider_failed', 'provider_cancelled'}:
+                        reason = exc.reason
+                    elif isinstance(exc, (ValidationError, ValueError)):
+                        reason = 'output_invalid'
+                    elif isinstance(exc, TimeoutError) or 'timeout' in type(exc).__name__.lower():
+                        reason = 'timeout'
+                    elif isinstance(exc, ContextOverflow) or is_context_error(exc):
+                        reason = 'context_overflow'
+                    else:
+                        reason = f'http_{status}' if type(status) is int else 'provider_error'
+                    audit['error_code'] = reason
+                    detail = '模型服务因内容过滤或拒绝响应终止了本次请求。' if reason == 'output_refused' else ''
+                    raise ProviderFailure(f'严格模型调用失败（{reason}）；{detail}请查看调用审计。',
+                        authentication=status in {401, 403}, reason=reason) from None
                 if isinstance(exc,ContextOverflow) or (active_budget.get() and is_context_error(exc)):
                     audit['error_category']='context'
                     raise ContextOverflow('模型上下文不足，正在缩小资料分段。') from None
@@ -419,7 +486,7 @@ class ModelService:
             finally:
                 audit.update(finished_at=time.time(), duration_ms=round((time.time() - started) * 1000))
                 self.store.put("usage", audit, account=account)
-                diagnostic_event('model.call.finished', level=logging.ERROR if audit['status']=='failed' and attempt==2 else logging.INFO,
+                diagnostic_event('model.call.finished', level=logging.ERROR if audit['status']=='failed' and attempt==attempts-1 else logging.INFO,
                     call_id=audit['id'], status=audit['status'], duration_ms=audit['duration_ms'], usage_known=audit['usage_known'],
                     input_tokens=audit['usage'].get('input_tokens'), output_tokens=audit['usage'].get('output_tokens'),
                     queue_ms=(requested-queued)*1000 if requested is not None else None,

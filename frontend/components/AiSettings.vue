@@ -118,16 +118,23 @@
         <div><span>输入 tokens</span><strong>{{ formatNumber(usage?.input_tokens) }}</strong></div>
         <div><span>输出 tokens</span><strong>{{ formatNumber(usage?.output_tokens) }}</strong></div>
       </div>
-      <div class="ais-audit-toolbar"><div><h4>调用明细</h4><p>失败 {{ usage?.failed_calls || 0 }} 次 · 用量未知 {{ usage?.unknown_usage_calls || 0 }} 次</p></div><div><button type="button" :disabled="busy" @click="action(() => loadAudit(true))"><RefreshCw :size="16" :stroke-width="1.8" aria-hidden="true" />刷新</button><button type="button" :disabled="!audit.length" @click="exportAudit"><Download :size="16" :stroke-width="1.8" aria-hidden="true" />导出已加载记录</button></div></div>
+      <div class="ais-audit-toolbar"><div><h4>调用明细</h4><p>所有账号 · 失败 {{ usage?.failed_calls || 0 }} 次 · 用量未知 {{ usage?.unknown_usage_calls || 0 }} 次</p></div><div><button type="button" :disabled="busy" @click="action(() => loadAudit(true))"><RefreshCw :size="16" :stroke-width="1.8" aria-hidden="true" />刷新</button><button type="button" :disabled="!audit.length" @click="exportAudit"><Download :size="16" :stroke-width="1.8" aria-hidden="true" />导出已加载记录</button><button type="button" :disabled="busy || !audit.length" @click="auditRemoval = {}"><Trash2 :size="16" :stroke-width="1.8" aria-hidden="true" />清空明细</button></div></div>
+      <div v-if="auditRemoval" class="ais-audit-confirm" role="group" aria-label="调用明细移除确认">
+        <p v-if="auditRemoval.id">从明细列表移除 {{ auditRemoval.model || auditRemoval.profile_name || auditRemoval.profile_id }} 的这条调用记录？明细列表包含所有账号。</p>
+        <p v-else>清空所有账号的已结束调用明细？运行中记录会保留。</p>
+        <p>仅从明细列表移除，累计用量、任务统计和聊天分析结果保留。</p>
+        <div><button type="button" :disabled="busy" @click="removeAudit">{{ auditRemoval.id ? '确认删除' : '确认清空' }}</button><button type="button" :disabled="busy" @click="auditRemoval = null">取消</button></div>
+      </div>
       <div class="ais-table-wrap">
-        <table v-if="audit.length" class="ais-audit-table"><thead><tr><th>模型 / 时间</th><th>状态</th><th>用量</th><th>详情</th></tr></thead>
+        <table v-if="audit.length" class="ais-audit-table"><thead><tr><th>模型 / 时间</th><th>状态</th><th>用量</th><th>详情</th><th>操作</th></tr></thead>
           <tbody><tr v-for="r in audit" :key="r.id">
             <td><strong :title="r.model">{{ r.model || r.profile_name || r.profile_id }}</strong><small>{{ r.started_at ? new Date(r.started_at * 1000).toLocaleString() : '历史记录' }}</small></td>
             <td><span class="ais-status" :class="'status-' + (r.status || 'success')">{{ statusLabel(r.status) }}</span><small v-if="r.http_status">HTTP {{ r.http_status }}</small></td>
             <td class="ais-token-cell"><span>输入 {{ r.usage_known === false ? '未知' : (r.usage?.input_tokens ?? '未知') }}</span><span>输出 {{ r.usage_known === false ? '未知' : (r.usage?.output_tokens ?? '未知') }}</span></td>
             <td><details><summary>查看</summary><div class="ais-audit-detail">{{ r.profile_name || r.profile_id }}<br />第 {{ r.attempt || 1 }} 次尝试 · 图片 {{ r.image_count || 0 }} 张<br />{{ r.account ? '账号 ' + r.account : '' }}<br v-if="r.account" />{{ r.task_id ? '任务 ' + r.task_id : '独立调用 / 连接测试' }}</div></details></td>
+            <td><button type="button" :disabled="busy || r.status === 'running'" :title="r.status === 'running' ? '运行中的调用明细不能移除' : '仅从明细列表移除'" @click="auditRemoval = r">删除</button></td>
           </tr></tbody></table>
-        <div v-else class="ais-empty"><ChartBar :size="16" :stroke-width="1.8" aria-hidden="true" /><h4>还没有调用记录</h4><p>完成第一次总结或连接测试后，用量会显示在这里。</p></div>
+        <div v-else class="ais-empty"><ChartBar :size="16" :stroke-width="1.8" aria-hidden="true" /><h4>暂无调用明细</h4><p>新的模型调用会显示在这里，已移除的明细仍计入累计用量。</p></div>
       </div>
       <button v-if="hasMoreAudit" type="button" class="ais-load-more" :disabled="busy" @click="action(() => loadAudit(false))">加载更多</button>
       <p class="ais-footnote">每次重试单独记录，费用以服务商账单为准。审计不包含密钥和聊天正文。</p>
@@ -159,7 +166,7 @@ function navigateTabs(event,id){
 }
 const localSettingsTarget = useSettingsDialog().focusTarget || ref('')
 // 服务连接结果不带入本地检索、Agent 或审计页面。
-watch(activeTab, () => { error.value = ''; notice.value = '' })
+watch(activeTab, () => { error.value = ''; notice.value = ''; auditRemoval.value = null })
 watch(localSettingsTarget, target => { if (target === 'local-search') activeTab.value = 'local' }, { immediate: true })
 const formatNumber = (value) => Number(value || 0).toLocaleString('zh-CN')
 const protocolOptions = [{ value: 'openai', label: 'OpenAI 兼容' }, { value: 'anthropic', label: 'Claude Messages' }]
@@ -231,13 +238,20 @@ const api = useAiApi()
 const profiles = ref([]), presets = ref([]), models = ref([]), editId = ref(''), key = ref('')
 const busy = ref(false), error = ref(''), notice = ref(''), usage = ref(null)
 const testing = ref(false)
-const audit = ref([]), hasMoreAudit = ref(false)
+const audit = ref([]), hasMoreAudit = ref(false), auditRemoval = ref(null)
 const statusLabel = (status) => ({ success: '成功', failed: '失败', cancelled: '已取消', interrupted: '已中断', running: '执行中' }[status] || (status ? '未知状态' : '历史成功调用'))
 const loadAudit = async (reset = true) => {
   const rows = await api.request(`/usage/records?limit=50&offset=${reset ? 0 : audit.value.length}`)
   audit.value = reset ? rows : [...audit.value, ...rows]; hasMoreAudit.value = rows.length === 50
   usage.value = await api.request('/usage')
 }
+const removeAudit = () => action(async () => {
+  const path = auditRemoval.value.id ? `/usage/records/${encodeURIComponent(auditRemoval.value.id)}` : '/usage/records'
+  const result = await api.request(path, { method: 'DELETE' })
+  await loadAudit(true)
+  auditRemoval.value = null
+  notice.value = `已从明细列表移除 ${result.removed} 条记录，累计统计保留。`
+})
 const exportAudit = () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify(audit.value, null, 2)], { type: 'application/json' }))
   const link = document.createElement('a'); link.href = url; link.download = 'ai-usage-audit.json'; link.click()
@@ -387,3 +401,12 @@ const test = () => action(async () => {
 const remove = () => action(async () => { await api.request(`/profiles/${editId.value}`, { method: 'DELETE' }); reset(); await load(); dialogStep.value = ''; notice.value = '配置已删除，引用它的规则已暂停'; nextTick(() => document.querySelector('.ais-add')?.focus()) })
 onMounted(() => action(load))
 </script>
+
+<style scoped>
+.ai-settings .ais-audit-toolbar, .ai-settings .ais-audit-toolbar > div:last-child { flex-wrap: wrap; }
+.ai-settings .ais-audit-table { min-width: 560px; }
+.ai-settings .ais-audit-table th:first-child { width: 36%; }
+.ai-settings .ais-audit-table th:last-child { width: 72px; }
+.ai-settings .ais-audit-confirm { display: grid; gap: 8px; padding: 12px; margin-bottom: 12px; border: 1px solid var(--ais-border); border-radius: 6px; background: var(--ais-soft); overflow-wrap: anywhere; }
+.ai-settings .ais-audit-confirm > div { display: flex; flex-wrap: wrap; gap: 8px; }
+</style>

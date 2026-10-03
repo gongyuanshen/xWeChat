@@ -2179,16 +2179,6 @@
     color: #ff8a8a;
   }
 
-  html[data-theme='dark'] .api-status-banner {
-    background-color: rgba(250, 81, 81, 0.14);
-    border-color: rgba(250, 81, 81, 0.28);
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.32);
-  }
-
-  html[data-theme='dark'] .api-status-banner :is(.text-red-800, .text-red-700, .text-red-600) {
-    color: #ff9b9b;
-  }
-
   html[data-theme='dark'] .theme-scope .text-green-600 {
     color: #7cd8a3;
   }

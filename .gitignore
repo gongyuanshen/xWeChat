@@ -128,3 +128,12 @@ pro-shots/
 # 语音验收包含真实聊天音频、转写、模型权重及本地运行环境。
 /tmp/stt-benchmark-20260921/
 /tmp/stt-integration-20260921/
+
+# Local Laya weights and isolated validation database are not source assets.
+/tmp/laya-real/
+
+# Local verification captures can contain private chats and model responses.
+/tmp/
+/.pytest_cache/
+/.pytest_tmp/
+/pytest_run_tmp/

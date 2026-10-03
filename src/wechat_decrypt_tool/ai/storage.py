@@ -93,6 +93,22 @@ class AIStore:
             rows = db.execute(sql, args).fetchall()
         return [json.loads(row[0]) for row in rows]
 
+    def list_usage_records(self, limit=50, offset=0):
+        with self.connection() as db:
+            rows = db.execute("""SELECT body FROM records WHERE kind='usage'
+                AND json_extract(body,'$.history_hidden') IS NOT 1
+                ORDER BY updated DESC LIMIT ? OFFSET ?""", (limit, offset)).fetchall()
+        return [json.loads(row[0]) for row in rows]
+
+    def hide_usage_records(self, id=None):
+        # 调用仍供累计用量和任务统计引用；不改 updated，保留子任务最近模型的排序。
+        sql = """UPDATE records SET body=json_set(body,'$.history_hidden',1)
+            WHERE kind='usage' AND json_extract(body,'$.status') IS NOT 'running'
+            AND json_extract(body,'$.history_hidden') IS NOT 1"""
+        with self.connection() as db:
+            return db.execute(sql + (" AND id=?" if id is not None else ""),
+                              (id,) if id is not None else ()).rowcount
+
     def tasks_in_status(self, statuses):
         placeholders = ",".join("?" for _ in statuses)
         with self.connection() as db:

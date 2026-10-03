@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 function sendDebugLog(scope, message, details) {
   try {
@@ -94,6 +94,14 @@ contextBridge.exposeInMainWorld("wechatDesktop", {
   chooseDirectory: (options = {}) => ipcRenderer.invoke("dialog:chooseDirectory", options),
   chooseArchive: (options = {}) => ipcRenderer.invoke("dialog:chooseArchive", options),
   chooseImage: () => ipcRenderer.invoke("dialog:chooseImage"),
+  chooseFile: () => ipcRenderer.invoke("dialog:chooseFile"),
+  importChatAttachments: async (files) => {
+    const entries = await Promise.all(files.map(async (file) => {
+      const filePath = webUtils.getPathForFile(file);
+      return filePath ? { path: filePath } : { name: file.name, bytes: await file.arrayBuffer() };
+    }));
+    return ipcRenderer.invoke('chat:importAttachments', entries);
+  },
 
   // Data/output folder helpers
   getOutputDirInfo: () => ipcRenderer.invoke("app:getOutputDirInfo"),

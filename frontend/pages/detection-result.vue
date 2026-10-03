@@ -304,10 +304,8 @@ import {computed, onMounted, ref} from 'vue'
 import {useApi} from '~/composables/useApi'
 import {withErrorLogGuidance} from '~/composables/useErrorNotice'
 import {normalizeWechatInstallPath, readStoredWechatInstallPath, writeStoredWechatInstallPath} from '~/lib/wechat-install-path'
-import {useAppStore} from '~/stores/app'
 
 const { detectWechat, pickSystemDirectory, getPlatformCapabilities } = useApi()
-const appStore = useAppStore()
 const loading = ref(false)
 const detectionResult = ref(null)
 const customPath = ref('')
@@ -543,11 +541,6 @@ const startDetection = async () => {
     detectionResult.value = result
 
     if (result.status === 'success') {
-      const current = result?.data?.current_account || null
-      if (current) {
-        appStore.setCurrentAccount(current)
-      }
-
       if (process.client) {
         try {
           let toSave = String(customPath.value || '').trim()

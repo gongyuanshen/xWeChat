@@ -9,9 +9,10 @@ function aiPackagingArgs(root, platform = process.platform) {
     'pypdf', 'pypdfium2', 'pypdfium2_raw', 'tiktoken', 'docx', 'pptx', 'openpyxl',
     'onnxruntime', 'tokenizers', 'sqlite_vec', 'huggingface_hub'];
   const args = packages.flatMap(name => ['--collect-all', name]);
-  for (const name of ['local_search_models.json', 'local_search_gpu.json']) {
+  for (const name of ['local_search_models.json', 'local_search_gpu.json', 'insight_local_model.json']) {
     args.push('--add-data', `${path.join(root, 'src/wechat_decrypt_tool/resources', name)};wechat_decrypt_tool/resources`);
   }
+  args.push('--add-data', `${path.join(root, 'src/wechat_decrypt_tool/resources/licenses')};wechat_decrypt_tool/resources/licenses`);
   args.push('--collect-submodules', 'tiktoken_ext', '--hidden-import', 'langgraph.checkpoint.sqlite.aio');
   return args;
 }

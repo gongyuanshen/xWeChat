@@ -14,7 +14,9 @@ import hashlib
 import io
 import json
 import logging
+import os
 from pathlib import Path
+import stat
 import sys
 import time
 from typing import Any, Callable, Literal, Optional, Union
@@ -169,6 +171,18 @@ class ImageSendReceipt:
 
 
 @dataclass
+class FileSendReceipt:
+    """Confirmed local file submission; not a server-delivery receipt."""
+
+    success: bool
+    session_title: str
+    file_name: str
+    file_size_bytes: int
+    duration_ms: float
+    timestamp: float
+
+
+@dataclass
 class WeChatStatus:
     running: bool
     pid: Optional[int]
@@ -204,12 +218,12 @@ class WeChatRateLimiter:
 
     @staticmethod
     def compute_message_key(
-        session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+        session: str, content: str, *, message_kind: Literal["text", "image", "file"] = "text",
     ) -> str:
-        """Keep legacy text keys; image fingerprints use a distinct namespace."""
-        if message_kind == "image":
+        """Keep legacy text keys; attachment fingerprints have separate namespaces."""
+        if message_kind in ("image", "file"):
             payload = json.dumps([session, content], ensure_ascii=False).encode("utf-8")
-            return "image:" + hashlib.sha256(payload).hexdigest()
+            return message_kind + ":" + hashlib.sha256(payload).hexdigest()
         payload = f"{session}:{content}".encode("utf-8")
         return hashlib.md5(payload).hexdigest()
 
@@ -223,7 +237,7 @@ class WeChatRateLimiter:
             del self._session_cache[s]
 
     def check_and_record(
-        self, session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+        self, session: str, content: str, *, message_kind: Literal["text", "image", "file"] = "text",
     ) -> None:
         """Enforce rate limits and record timestamps atomically.
 
@@ -255,7 +269,7 @@ class WeChatRateLimiter:
 
     def rollback_message(
         self, session: str, content: str, rollback_session: bool = True,
-        *, message_kind: Literal["text", "image"] = "text",
+        *, message_kind: Literal["text", "image", "file"] = "text",
     ) -> None:
         """Roll back idempotency cache if send fails due to OS/UI error."""
         msg_key = self.compute_message_key(session, content, message_kind=message_kind)
@@ -264,7 +278,7 @@ class WeChatRateLimiter:
             self._session_cache.pop(session, None)
 
     def retain_uncertain_message(
-        self, session: str, content: str, *, message_kind: Literal["text", "image"] = "text",
+        self, session: str, content: str, *, message_kind: Literal["text", "image", "file"] = "text",
     ) -> None:
         """Start duplicate protection at the uncertain result, not before UI waits."""
         now = self._clock()
@@ -883,7 +897,7 @@ class WeChatBridge:
             raise WeChatBridgeError("图片内容损坏或无法完整解码", code="WECHAT_IMAGE_INVALID", status_code=400) from exc
         return path, image_format, len(data), hashlib.sha256(data).hexdigest()
 
-    async def send_image(self, session_title: str, image_path: str) -> ImageSendReceipt:
+    async def send_image(self, session_title: str, image_path: str, *, account: str, username: str) -> ImageSendReceipt:
         """Send one validated image through the Qt client, sharing text serialization."""
         session = str(session_title or "").strip()
         if not session:
@@ -903,7 +917,7 @@ class WeChatBridge:
                 except Exception:
                     self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
                     raise
-                self._send_qt_image(hwnd, session, str(path), fingerprint)
+                self._send_qt_image(hwnd, session, str(path), fingerprint, account, username)
         except asyncio.CancelledError:
             # The only async wait is lock acquisition, before any UI submission.
             self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
@@ -915,15 +929,19 @@ class WeChatBridge:
             timestamp=time.time(),
         )
 
-    def _send_qt_image(self, hwnd: int, session: str, image_path: str, fingerprint: str) -> None:
+    def _send_qt_image(self, hwnd: int, session: str, image_path: str, fingerprint: str,
+                       account: str, username: str) -> None:
         ui = None
         try:
             import uiautomation as auto
             from .wechat_qt_ui import WeChatQtUI
+            from .wechat_image_receipt import ImageSendObserver
 
+            receipt = ImageSendObserver(account, username)
             with auto.UIAutomationInitializerInThread():
                 ui = WeChatQtUI(hwnd, auto, self.send_timeout_s)
-                ui.send_image(session, image_path, window_api=self.win32gui, process_api=self.win32process)
+                ui.send_image(session, image_path, window_api=self.win32gui, process_api=self.win32process,
+                              receipt=receipt)
         except Exception as exc:
             attempted = ui is not None and ui.submission_attempted
             if attempted:
@@ -932,10 +950,94 @@ class WeChatBridge:
                 self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
             stage = ui.stage if ui is not None else "initialize"
             logger.exception("WeChat image UIA failed: hwnd=%s stage=%s submitted=%s", hwnd, stage, attempted)
-            if isinstance(exc, WeChatBridgeError):
+            if isinstance(exc, WeChatBridgeError) and (not attempted or exc.code == "WECHAT_SEND_UNCONFIRMED"):
                 raise
             raise WeChatBridgeError(
                 f"微信图片 UI Automation 操作失败（阶段: {stage}）；请检查客户端状态和后台异常日志"
+                + ("；发送结果不确定，请勿直接重发" if attempted else ""),
+                code="WECHAT_SEND_UNCONFIRMED" if attempted else "WECHAT_UIA_ERROR",
+                status_code=504 if attempted else 502,
+            ) from exc
+
+    @staticmethod
+    def _validate_file_path(file_path: str) -> tuple[Path, int, str]:
+        """Validate an ordinary readable file and stream its content fingerprint."""
+        if not isinstance(file_path, str) or not file_path.strip():
+            raise WeChatBridgeError("文件路径不能为空", code="WECHAT_FILE_PATH_INVALID", status_code=400)
+        path = Path(file_path)
+        if (not path.is_absolute() or path.is_reserved() or "\x00" in file_path
+                or file_path.replace("/", "\\").startswith("\\\\.\\")):
+            raise WeChatBridgeError("文件路径必须为普通文件的本地绝对路径", code="WECHAT_FILE_PATH_INVALID", status_code=400)
+        try:
+            path = path.resolve(strict=True)
+            if not stat.S_ISREG(path.stat().st_mode):
+                raise WeChatBridgeError("文件路径必须指向普通文件", code="WECHAT_FILE_PATH_INVALID", status_code=400)
+            if path.suffix.lower() in (".jpg", ".jpeg", ".png"):
+                raise WeChatBridgeError("JPG/JPEG/PNG 请使用图片发送接口", code="WECHAT_FILE_PATH_INVALID", status_code=400)
+            with path.open("rb") as source:
+                metadata = os.fstat(source.fileno())
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise WeChatBridgeError("文件路径必须指向普通文件", code="WECHAT_FILE_PATH_INVALID", status_code=400)
+                fingerprint = hashlib.file_digest(source, "sha256").hexdigest()
+        except FileNotFoundError as exc:
+            raise WeChatBridgeError("文件不存在", code="WECHAT_FILE_NOT_FOUND", status_code=404) from exc
+        except (OSError, ValueError) as exc:
+            raise WeChatBridgeError("文件无法读取，请检查路径和文件权限", code="WECHAT_FILE_UNREADABLE", status_code=400) from exc
+        return path, metadata.st_size, fingerprint
+
+    async def send_file(self, session_title: str, file_path: str) -> FileSendReceipt:
+        """Send one local file through the Qt client using the shared send lock."""
+        session = str(session_title or "").strip()
+        if not session:
+            raise WeChatSessionNotFoundError("会话名称不能为空")
+        # Arbitrarily large files must not block the event loop or create a reservation
+        # until hashing finishes. Cancelling this await has no UI or limiter side effects.
+        path, file_size, fingerprint = await asyncio.to_thread(self._validate_file_path, file_path)
+        self.rate_limiter.check_and_record(session, fingerprint, message_kind="file")
+        t_start = time.perf_counter()
+        try:
+            async with self._get_lock():
+                try:
+                    hwnd = self._prepare_send_window()
+                    if not self.win32gui.GetClassName(hwnd).lower().startswith("qt"):
+                        raise WeChatBridgeError(
+                            "文件发送目前仅适配 Windows 微信 4.x Qt 客户端",
+                            code="WECHAT_FILE_SEND_UNSUPPORTED", status_code=501,
+                        )
+                except Exception:
+                    self.rate_limiter.rollback_message(session, fingerprint, message_kind="file")
+                    raise
+                self._send_qt_file(hwnd, session, str(path), fingerprint)
+        except asyncio.CancelledError:
+            # After reserving, lock acquisition is the only cancellable await.
+            self.rate_limiter.rollback_message(session, fingerprint, message_kind="file")
+            raise
+        return FileSendReceipt(
+            success=True, session_title=session, file_name=path.name, file_size_bytes=file_size,
+            duration_ms=round((time.perf_counter() - t_start) * 1000.0, 2), timestamp=time.time(),
+        )
+
+    def _send_qt_file(self, hwnd: int, session: str, file_path: str, fingerprint: str) -> None:
+        ui = None
+        try:
+            import uiautomation as auto
+            from .wechat_qt_ui import WeChatQtUI
+
+            with auto.UIAutomationInitializerInThread():
+                ui = WeChatQtUI(hwnd, auto, self.send_timeout_s)
+                ui.send_file(session, file_path, window_api=self.win32gui, process_api=self.win32process)
+        except Exception as exc:
+            attempted = ui is not None and ui.submission_attempted
+            if attempted:
+                self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="file")
+            else:
+                self.rate_limiter.rollback_message(session, fingerprint, message_kind="file")
+            stage = ui.stage if ui is not None else "initialize"
+            logger.exception("WeChat file UIA failed: hwnd=%s stage=%s submitted=%s", hwnd, stage, attempted)
+            if isinstance(exc, WeChatBridgeError) and (not attempted or exc.code == "WECHAT_SEND_UNCONFIRMED"):
+                raise
+            raise WeChatBridgeError(
+                f"微信文件 UI Automation 操作失败（阶段: {stage}）；请检查客户端状态和后台异常日志"
                 + ("；发送结果不确定，请勿直接重发" if attempted else ""),
                 code="WECHAT_SEND_UNCONFIRMED" if attempted else "WECHAT_UIA_ERROR",
                 status_code=504 if attempted else 502,

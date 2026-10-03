@@ -82,7 +82,7 @@ class PlannedWork:
         """仅记录程序实际返回的资料；旧版本证据和仅选择范围不能充当前期工作。"""
         if parent.get('parent_run_id') or parent.get('subtask_plan_version') != REVISION:
             return None
-        if action not in {'read_messages', 'search_messages', 'search_live_messages', 'read_context', 'count_messages', 'read_material', 'search_material', 'read_results'}:
+        if action not in {'read_messages', 'list_files', 'search_messages', 'search_live_messages', 'read_context', 'count_messages', 'read_material', 'search_material', 'read_results'}:
             return None
         sources = [m['source'] for m in body.get('messages', body.get('sources', [])) if isinstance(m, dict) and m.get('source')]
         if action == 'read_results':

@@ -6,7 +6,8 @@ import MessageInputWorkspace from '../components/chat/MessageInputWorkspace.vue'
 import { useApi } from '../composables/useApi'
 
 const image = {
-  canceled: false,
+  kind: 'image',
+  sizeBytes: 512,
   path: 'C:\\照片\\测试.png',
   name: '测试.png',
   previewDataUrl: 'data:image/png;base64,aW1hZ2U='
@@ -18,6 +19,8 @@ const deferred = () => {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
 }
+
+const picked = (...attachments) => ({ canceled: false, attachments })
 
 describe('图片选择与独立发送', () => {
   let state
@@ -37,7 +40,7 @@ describe('图片选择与独立发送', () => {
       sendChatImage: vi.fn().mockResolvedValue({ success: true }),
       sendChatMessage: vi.fn().mockResolvedValue({ success: true })
     }
-    window.wechatDesktop = { platform: 'win32', chooseImage: vi.fn().mockResolvedValue(image) }
+    window.wechatDesktop = { platform: 'win32', chooseImage: vi.fn().mockResolvedValue(picked(image)) }
     wrapper = mount(MessageInputWorkspace, { props: { state, api } })
   })
 
@@ -57,8 +60,8 @@ describe('图片选择与独立发送', () => {
   it('选图预览使用 data URL，空文字可独立发送图片并刷新消息', async () => {
     await pick()
     expect(wrapper.get('.chat-input-image-preview').attributes('src')).toBe(image.previewDataUrl)
-    expect(wrapper.get('.chat-input-btn-send-image').attributes('disabled')).toBeUndefined()
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeUndefined()
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await flushPromises()
     expect(api.sendChatImage).toHaveBeenCalledExactlyOnceWith({
       account: 'wx_account', username: 'wx_peer', display_name: '甲', image_path: image.path
@@ -83,11 +86,11 @@ describe('图片选择与独立发送', () => {
       await wrapper.get('textarea').setValue('保留文字')
       await pick()
       api.sendChatImage.mockRejectedValueOnce(error)
-      await wrapper.get('.chat-input-btn-send-image').trigger('click')
+      await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
       await flushPromises()
       expect(wrapper.get('.chat-input-image-preview').attributes('src')).toBe(image.previewDataUrl)
       expect(wrapper.get('textarea').element.value).toBe('保留文字')
-      expect(wrapper.get(error.code === 'WECHAT_SEND_UNCONFIRMED' ? '[role="status"]' : '[role="alert"]').text()).toContain(error.message)
+      expect(wrapper.get('[role="status"]').text()).toContain(error.message)
       expect(state.refreshSelectedMessages).not.toHaveBeenCalled()
     }
   )
@@ -95,7 +98,7 @@ describe('图片选择与独立发送', () => {
   it.each([{ success: false }, {}])('未明确 success=true 时不得清除图片', async (receipt) => {
     await pick()
     api.sendChatImage.mockResolvedValueOnce(receipt)
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await flushPromises()
     expect(wrapper.find('.chat-input-image-preview').exists()).toBe(true)
     expect(wrapper.get('[role="status"]').text()).toContain('WECHAT_SEND_UNCONFIRMED')
@@ -107,8 +110,8 @@ describe('图片选择与独立发送', () => {
     await pick()
     const pending = deferred()
     api.sendChatImage.mockReturnValueOnce(pending.promise)
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await wrapper.get('textarea').trigger('keydown.enter.exact')
     expect(api.sendChatImage).toHaveBeenCalledOnce()
     expect(api.sendChatMessage).not.toHaveBeenCalled()
@@ -122,13 +125,13 @@ describe('图片选择与独立发送', () => {
     await wrapper.get('textarea').setValue('保留正文')
     await pick()
     api.sendChatImage.mockRejectedValueOnce({ code: 'WECHAT_SEND_UNCONFIRMED', message: '未确认方向' })
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await flushPromises()
     expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.get('[role="status"]').text()).toContain('待核对')
-    expect(wrapper.get('.chat-input-btn-send-image').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeDefined()
     expect(wrapper.get('.chat-input-btn-image').attributes('disabled')).toBeDefined()
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await wrapper.get('.chat-input-image-confirm').trigger('click')
     expect(api.sendChatImage).toHaveBeenCalledOnce()
     expect(wrapper.find('.chat-input-image-preview').exists()).toBe(false)
@@ -140,7 +143,7 @@ describe('图片选择与独立发送', () => {
   it('切换会话不能确认原图；核对未发送只解锁按钮，不自动重发', async () => {
     await pick()
     api.sendChatImage.mockRejectedValueOnce({ code: 'WECHAT_SEND_UNCONFIRMED', message: '结果未知' })
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await flushPromises()
     state.selectedContact = { username: 'other', name: '乙' }
     await flushPromises()
@@ -151,7 +154,7 @@ describe('图片选择与独立发送', () => {
     await wrapper.get('.chat-input-image-retry-ready').trigger('click')
     expect(wrapper.find('[role="status"]').exists()).toBe(false)
     expect(wrapper.find('.chat-input-image-preview').exists()).toBe(true)
-    expect(wrapper.get('.chat-input-btn-send-image').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeUndefined()
     expect(api.sendChatImage).toHaveBeenCalledOnce()
   })
 
@@ -170,8 +173,8 @@ describe('图片选择与独立发送', () => {
     if (kind === 'contact') state.selectedContact = { username: 'wx_other', name: '乙' }
     else state.selectedAccount = 'wx_other_account'
     await flushPromises()
-    expect(wrapper.get('.chat-input-btn-send-image').attributes('disabled')).toBeDefined()
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeDefined()
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     expect(api.sendChatImage).not.toHaveBeenCalled()
     expect(wrapper.find('.chat-input-image-preview').exists()).toBe(true)
   })
@@ -181,7 +184,7 @@ describe('图片选择与独立发送', () => {
     window.wechatDesktop.chooseImage.mockReturnValueOnce(pending.promise)
     await wrapper.get('.chat-input-btn-image').trigger('click')
     state.selectedContact = { username: 'wx_other', name: '乙' }
-    pending.resolve(image)
+    pending.resolve(picked(image))
     await flushPromises()
     expect(wrapper.find('.chat-input-image-preview').exists()).toBe(false)
     expect(wrapper.get('[role="alert"]').text()).toContain('IMAGE_TARGET_CHANGED')
@@ -192,7 +195,7 @@ describe('图片选择与独立发送', () => {
     await pick()
     const pending = deferred()
     api.sendChatImage.mockReturnValueOnce(pending.promise)
-    await wrapper.get('.chat-input-btn-send-image').trigger('click')
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     state.selectedContact = { username: 'wx_other', name: '乙' }
     pending.resolve({ success: true })
     await flushPromises()

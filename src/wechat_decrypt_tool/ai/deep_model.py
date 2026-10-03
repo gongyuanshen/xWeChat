@@ -162,8 +162,9 @@ class DeepChatModel(BaseChatModel):
             sent_at, visible_at = None, None
             exposed = False
             buffered = []
+            call_timeout = asyncio.timeout(max(.01, deadline - time.monotonic()))
             try:
-                async with asyncio.timeout(max(.01, deadline - time.monotonic())), self.service.ai.models.semaphore:
+                async with call_timeout, self.service.ai.models.semaphore:
                     acquired = time.monotonic()
                     self.guard()
                     # 首轮核验采用轻量调用；结构纠正和正文修复恢复正常推理，避免每批长时间思考。
@@ -270,7 +271,8 @@ class DeepChatModel(BaseChatModel):
                 if code == 429:
                     scheduler().throttled()
                 transient = transient_model_error(exc)
-                if attempt == 2 or time.monotonic() >= total_deadline:
+                # 总期限的回调可能早于粗粒度时钟下一跳；单次尝试超时仍允许在总预算内重试。
+                if attempt == 2 or time.monotonic() >= total_deadline or (call_timeout.expired() and deadline == total_deadline):
                     detail = '上游连接中断或超时，自动重试仍未完成。' if transient else '模型响应或协议未通过校验。'
                     raise ProviderFailure(detail + '已保存进度。', authentication=code in (401, 403)) from exc
                 if not exposed and unsupported and not fallback:

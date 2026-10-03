@@ -299,6 +299,99 @@ describe('全局 AI 设置', () => {
       expect(wrapper.text()).not.toContain('历史成功调用')
     } finally { wrapper.unmount() }
   })
+  it('删除调用明细须确认，刷新列表并保留累计用量，运行中不可删除', async () => {
+    const original = request.getMockImplementation()
+    let records = [{ id: 'completed', model: 'finished-model', status: 'success', usage: { input_tokens: 12 } },
+      { id: 'running', model: 'running-model', status: 'running', usage: {} }]
+    request.mockImplementation(async (path, options) => {
+      if (path === '/usage/records/completed' && options?.method === 'DELETE') {
+        records = records.filter(record => record.id !== 'completed'); return { removed: 1 }
+      }
+      if (path.startsWith('/usage/records?')) return records
+      if (path === '/usage') return { calls: 2, input_tokens: 12, output_tokens: 3 }
+      return original(path, options)
+    })
+    const wrapper = mount(AiSettings)
+    try {
+      await flushPromises()
+      await wrapper.find('#ais-usage-tab').trigger('click')
+      const rows = wrapper.findAll('.ais-audit-table tbody tr')
+      expect(rows[1].find('button').attributes('disabled')).toBeDefined()
+      await rows[0].find('button').trigger('click')
+      expect(request.mock.calls.some(([, options]) => options?.method === 'DELETE')).toBe(false)
+      const confirm = wrapper.find('.ais-audit-confirm')
+      expect(confirm.text()).toContain('finished-model')
+      expect(confirm.text()).toContain('所有账号')
+      expect(confirm.text()).toContain('仅从明细列表移除，累计用量、任务统计和聊天分析结果保留')
+      await confirm.findAll('button').find(button => button.text() === '确认删除').trigger('click')
+      await flushPromises()
+      expect(request).toHaveBeenCalledWith('/usage/records/completed', { method: 'DELETE' })
+      expect(wrapper.findAll('.ais-audit-table tbody tr')).toHaveLength(1)
+      expect(wrapper.find('.ais-audit-table').text()).toContain('running-model')
+      expect(wrapper.find('.ais-metrics').text()).toContain('累计调用2次')
+      expect(wrapper.find('.ais-metrics').text()).toContain('输入 tokens12')
+      expect(wrapper.find('.ais-audit-confirm').exists()).toBe(false)
+    } finally { wrapper.unmount() }
+  })
+  it('清空所有账号明细后只保留运行中记录，累计统计仍显示', async () => {
+    const original = request.getMockImplementation()
+    let records = [{ id: 'one', model: 'one-model', account: 'one', status: 'failed', usage: {} },
+      { id: 'two', model: 'two-model', account: 'two', status: 'interrupted', usage: {} },
+      { id: 'running', model: 'running-model', status: 'running', usage: {} }]
+    request.mockImplementation(async (path, options) => {
+      if (path === '/usage/records' && options?.method === 'DELETE') {
+        records = records.filter(record => record.status === 'running'); return { removed: 2 }
+      }
+      if (path.startsWith('/usage/records?')) return records
+      if (path === '/usage') return { calls: 3, input_tokens: 20 }
+      return original(path, options)
+    })
+    const wrapper = mount(AiSettings)
+    try {
+      await flushPromises()
+      await wrapper.find('#ais-usage-tab').trigger('click')
+      await wrapper.findAll('button').find(button => button.text() === '清空明细').trigger('click')
+      const confirm = wrapper.find('.ais-audit-confirm')
+      expect(confirm.text()).toContain('所有账号')
+      expect(confirm.text()).toContain('运行中')
+      expect(confirm.text()).toContain('仅从明细列表移除，累计用量、任务统计和聊天分析结果保留')
+      await confirm.findAll('button').find(button => button.text() === '确认清空').trigger('click')
+      await flushPromises()
+      expect(request).toHaveBeenCalledWith('/usage/records', { method: 'DELETE' })
+      expect(wrapper.findAll('.ais-audit-table tbody tr')).toHaveLength(1)
+      expect(wrapper.find('.ais-audit-table').text()).toContain('running-model')
+      expect(wrapper.find('.ais-metrics').text()).toContain('累计调用3次')
+      expect(wrapper.text()).toContain('已从明细列表移除 2 条记录')
+    } finally { wrapper.unmount() }
+  })
+  it.each([false, true])('取消或移除失败保留列表与错误，不自动重试，批量=%s', async bulk => {
+    const original = request.getMockImplementation()
+    const records = [{ id: 'kept', model: 'kept-model', status: 'success', usage: {} }]
+    request.mockImplementation(async (path, options) => {
+      if (path.startsWith('/usage/records') && options?.method === 'DELETE') throw new Error('明细移除失败')
+      if (path.startsWith('/usage/records?')) return records
+      return original(path, options)
+    })
+    const wrapper = mount(AiSettings)
+    try {
+      await flushPromises()
+      await wrapper.find('#ais-usage-tab').trigger('click')
+      const open = () => (bulk ? wrapper.findAll('button').find(button => button.text() === '清空明细')
+        : wrapper.find('.ais-audit-table tbody tr button')).trigger('click')
+      await open()
+      await wrapper.find('.ais-audit-confirm').findAll('button').find(button => button.text() === '取消').trigger('click')
+      expect(wrapper.find('.ais-audit-confirm').exists()).toBe(false)
+      expect(wrapper.find('.ais-audit-table').text()).toContain('kept-model')
+      expect(request.mock.calls.some(([, options]) => options?.method === 'DELETE')).toBe(false)
+      await open()
+      await wrapper.find('.ais-audit-confirm').findAll('button').find(button => button.text() === (bulk ? '确认清空' : '确认删除')).trigger('click')
+      await flushPromises()
+      expect(wrapper.find('[role=alert]').text()).toContain('明细移除失败')
+      expect(wrapper.find('.ais-audit-table').text()).toContain('kept-model')
+      expect(request.mock.calls.filter(([, options]) => options?.method === 'DELETE')).toHaveLength(1)
+      expect(wrapper.find('.ais-audit-confirm').exists()).toBe(true)
+    } finally { wrapper.unmount() }
+  })
   it('连接测试展示明确结果，不显示模型对测试图片的原始回答', async () => {
     const original = request.getMockImplementation()
     const profile = { id: 'saved', name: 'saved', provider: 'custom', protocol: 'openai', base_url: 'https://example.com/v1', model: 'image', vision: true }

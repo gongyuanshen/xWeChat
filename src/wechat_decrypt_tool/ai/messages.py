@@ -9,15 +9,16 @@ import time
 from collections import deque
 
 
-def message_identity(server_id, anchor, timestamp):
+def message_identity(server_id, anchor, timestamp, local_type=0):
     """各读取入口共用消息身份；没有服务端编号时保留数据库定位与时间。"""
     try:
         server_id = int(server_id or 0)
     except (TypeError, ValueError):
         server_id = 0
-    if server_id:
-        return f's:{server_id}'
-    return f'l:{anchor}:{timestamp}' if len(anchor.split(':')) == 3 else anchor
+    identity = f's:{server_id}' if server_id else (
+        f'l:{anchor}:{timestamp}' if len(anchor.split(':')) == 3 else anchor)
+    # 微信可把原记录原地改成系统撤回提示，仍使用原 server ID；归档原文是另一条消息。
+    return f'system:{identity}' if int(local_type or 0) == 10000 else identity
 
 
 def read_messages(account, username, start, end, count=None, require_realtime=False, checkpoint=None, page_offset=None, page_size=50, max_batch_bytes=None, message_weight=None):
@@ -31,12 +32,16 @@ def read_messages(account, username, start, end, count=None, require_realtime=Fa
         pages.close()
 
 
-def iter_message_pages(account, username, start, end, count=None, require_realtime=False, checkpoint=None, page_offset=0, page_size=100, on_progress=None, max_batch_chars=128000, cursor=None, emit_cursor=False, max_batch_bytes=None, message_weight=None, count_key=None):
+def iter_message_pages(account, username, start, end, count=None, require_realtime=False, checkpoint=None, page_offset=0, page_size=100, on_progress=None, max_batch_chars=128000, cursor=None, emit_cursor=False, max_batch_bytes=None, message_weight=None, count_key=None, descending=False, message_kind=None, sender_id=None):
     """同一会话只打开一次消息流；新断点从最后提交的时间读取并按身份去重。
 
     迭代和关闭必须在同一线程进行，以保证 SQLite 连接及底层游标的生命周期。
     page_offset=None 保留原来的整段读取行为，供总结和 Agent 使用。
     """
+    if descending and (count is not None or count_key is not None or cursor is not None or emit_cursor):
+        raise ValueError('倒序读取仅支持 offset 分页，不能组合 count 或 cursor')
+    if (message_kind is not None or sender_id is not None) and count is not None:
+        raise ValueError('消息筛选不能组合 count，请使用 offset 分页')
     batch_size = page_size() if callable(page_size) else page_size
     byte_limit = max_batch_bytes() if callable(max_batch_bytes) else max_batch_bytes
     if byte_limit is not None and byte_limit < 2:
@@ -115,11 +120,11 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
             on_progress(completed)
             last_progress = now
     def row_identity(row):
-        return message_identity(row.server_id, f'{row.db_stem}:{row.table_name}:{row.local_id}', row.create_time)
+        return message_identity(row.server_id, f'{row.db_stem}:{row.table_name}:{row.local_id}', row.create_time, row.local_type)
 
     def result(has_more):
         nonlocal saved_cursor, committed_offset
-        messages = sorted(output, key=lambda m: (m["time"], m["identity"]))
+        messages = list(output) if descending else sorted(output, key=lambda m: (m["time"], m["identity"]))
         if track_cursor:
             saved_cursor = advance_cursor(messages, saved_cursor)
         if byte_limit is None:
@@ -139,7 +144,8 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
         chat_id = _resource_lookup_chat_id(resource_conn, username) if resource_conn else None
         def read_rows(window_start, window_end):
             return _iter_rows_for_conversation(account_dir=account_dir, conv_username=username,
-                start_time=window_start, end_time=window_end, source=source, rt_conn=connection, checkpoint=checkpoint)
+                start_time=window_start, end_time=window_end, source=source, rt_conn=connection, checkpoint=checkpoint,
+                **({'descending': True} if descending else {}))
 
         if count:
             # 从最近一天向前扩展窗口，避免“最近 100 条”遍历多年全部消息。
@@ -185,6 +191,9 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
             if checkpoint and time.monotonic() - last_check > 0.1:
                 checkpoint()
                 last_check = time.monotonic()
+            if descending and ((start is not None and row.create_time < start) or
+                               (end is not None and row.create_time >= end)):
+                continue
             # server ID 优先，跨数据源切换仍保持同一条消息的身份。
             identity = row_identity(row)
             # 同秒仍可能有未提交或新到达的消息，不能简单从下一秒开始。
@@ -198,6 +207,14 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
                 if identity in seen:
                     continue
                 seen.add(identity)
+            msg = None
+            if message_kind is not None or sender_id is not None:
+                msg = _parse_message_for_export(row=row, conv_username=username, is_group=username.endswith("@chatroom"),
+                    resource_conn=resource_conn, resource_chat_id=chat_id)
+                if message_kind is not None and msg.get('renderType', 'text') != message_kind:
+                    continue
+                if sender_id is not None and (msg.get('senderUsername') or row.sender_username) != sender_id:
+                    continue
             if page_offset is not None:
                 page_seen += 1
                 if cursor is None and page_seen <= page_offset:
@@ -224,8 +241,9 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
                         raise ValueError('动态分页预算无效')
                     if checkpoint:
                         checkpoint()
-            msg = _parse_message_for_export(row=row, conv_username=username, is_group=username.endswith("@chatroom"),
-                resource_conn=resource_conn, resource_chat_id=chat_id)
+            if msg is None:
+                msg = _parse_message_for_export(row=row, conv_username=username, is_group=username.endswith("@chatroom"),
+                    resource_conn=resource_conn, resource_chat_id=chat_id)
             msg['atUsernames'] = _extract_at_usernames_from_source(getattr(row, 'msg_source', None))
             if msg.get("renderType") == "voice" and not msg.get("voiceTranscript"):
                 cache = account_dir / "_cache" / "voice_transcripts.sqlite3"

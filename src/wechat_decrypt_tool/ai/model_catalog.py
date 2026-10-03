@@ -41,7 +41,12 @@ def documented_metadata(profile, model):
             and endpoint.hostname == 'api.xiaomimimo.com'
             and endpoint.port in (None, 443)
             and endpoint.path.rstrip('/') in ('', '/v1', '/v1/chat/completions', '/v1/models')
-            and model in ('mimo-v2.5', 'mimo-v2.5-pro')):
+            and model in ('mimo-v2.5', 'mimo-v2.5-pro', 'mimo-v2.6-flash', 'mimo-v2.6-pro', 'mimo-v2.6-pro-ultraspeed')):
+        if model in ('mimo-v2.6-flash', 'mimo-v2.6-pro', 'mimo-v2.6-pro-ultraspeed'):
+            return {
+                'structured_output': True,
+                'documentation_url': 'https://mimo.mi.com/docs/en-US/quick-start/usage-guide/text-generation/structured-output',
+            }
         return {
             'structured_output': True,
             'tool_call': True,

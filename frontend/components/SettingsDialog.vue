@@ -1,7 +1,7 @@
 <template>
   <div
     v-if="open"
-    class="settings-dialog theme-scope fixed inset-0 z-[20000] flex items-center justify-center bg-black/40 px-2 py-2 backdrop-blur-md sm:px-4 sm:py-8"
+    class="settings-dialog theme-scope fixed inset-0 z-[20000] flex items-center justify-center bg-black/40 px-2 py-2 sm:px-4 sm:py-8"
     @click.self="handleClose"
   >
     <!-- 所有栏目共用尺寸，避免滚动更新当前栏目时弹窗跳动。 -->

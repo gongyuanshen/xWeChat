@@ -140,50 +140,6 @@ def _safe_int(v: Any) -> int:
         return 0
 
 
-def _count_sns_timeline_rows_in_decrypted_sqlite(
-    sns_db_path: Path,
-    *,
-    users: list[str],
-    kw: str,
-) -> int:
-    """Count rows in decrypted `sns.db` for a given query (raw rows, not timeline-filtered)."""
-    sns_db_path = Path(sns_db_path)
-    try:
-        if (not sns_db_path.exists()) or (not sns_db_path.is_file()):
-            return 0
-    except Exception:
-        return 0
-
-    filters: list[str] = []
-    params: list[Any] = []
-
-    if users:
-        placeholders = ",".join(["?"] * len(users))
-        filters.append(f"user_name IN ({placeholders})")
-        params.extend(users)
-
-    if kw:
-        filters.append("content LIKE ?")
-        params.append(f"%{kw}%")
-
-    where_sql = f"WHERE {' AND '.join(filters)}" if filters else ""
-    sql = f"SELECT COUNT(*) AS c FROM SnsTimeLine {where_sql}"
-
-    try:
-        conn = sqlite3.connect(str(sns_db_path), timeout=2.0)
-        try:
-            conn.execute("PRAGMA busy_timeout=2000")
-            row = conn.execute(sql, params).fetchone()
-            return int((row[0] if row else 0) or 0)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-    except Exception:
-        return 0
-
-
 def _count_sns_timeline_posts_in_decrypted_sqlite(
     sns_db_path: Path,
     *,

@@ -193,11 +193,6 @@ export const useApi = () => {
     })
   }
   
-  // 健康检查API
-  const healthCheck = async () => {
-    return await request('/health')
-  }
-
   const getPlatformCapabilities = async () => {
     return await request('/system/platform')
   }
@@ -276,11 +271,25 @@ export const useApi = () => {
   const sendChatImage = async (data = {}) => {
     return await request('/chat/send/image', {
       method: 'POST',
+      retry: 0,
       body: {
         account: data.account,
         username: data.username,
         display_name: data.display_name ?? null,
         image_path: data.image_path
+      }
+    })
+  }
+
+  const sendChatFile = async (data = {}) => {
+    return await request('/chat/send/file', {
+      method: 'POST',
+      retry: 0,
+      body: {
+        account: data.account,
+        username: data.username,
+        display_name: data.display_name ?? null,
+        file_path: data.file_path
       }
     })
   }
@@ -1183,7 +1192,6 @@ export const useApi = () => {
     decryptDatabase,
     importDecryptedPreview,
     importDecrypted,
-    healthCheck,
     getPlatformCapabilities,
     listChatAccounts,
     getChatAccountInfo,
@@ -1193,6 +1201,7 @@ export const useApi = () => {
     getChatMessageRaw,
     sendChatMessage,
     sendChatImage,
+    sendChatFile,
     getAiSuggestedReply,
     getChatSendStatus,
     getChatRealtimeStatus,

@@ -1,7 +1,7 @@
 <template>
   <div
     class="message-input-workspace flex flex-col shrink-0 border-t border-[var(--app-border,#e5e7eb)] bg-[var(--chat-page-bg,#ffffff)] dark:bg-[#1e1e1e] relative select-text"
-    :style="{ height: `${inputHeight}px`, minHeight: selectedImage?.confirmation ? '260px' : selectedImage ? '200px' : undefined }"
+    :style="{ height: `${inputHeight}px`, minHeight: pendingAttachment ? '320px' : selectedAttachments.length ? '260px' : undefined }"
   >
     <!-- Top Draggable Resizer Handle -->
     <div
@@ -42,21 +42,21 @@
       </button>
     </div>
 
-    <div v-if="selectedImage?.confirmation" role="status" class="chat-input-image-pending mx-3 my-1 p-2 rounded border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 text-xs shrink-0">
-      <p>图片发送结果待核对：请在微信「{{ selectedImage.display_name || selectedImage.username }}」中检查对应的新图片，避免重复发送。</p>
+    <div v-if="pendingAttachment" role="status" :class="`chat-input-${pendingAttachment.kind}-pending`" class="mx-3 my-1 p-2 rounded border border-amber-300 bg-amber-50 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 text-xs shrink-0">
+      <p>附件发送结果待核对：请在微信「{{ pendingAttachment.display_name || pendingAttachment.username }}」中检查「{{ pendingAttachment.name }}」。后续附件已暂停，避免重复发送。</p>
       <div class="flex flex-wrap gap-3 mt-1">
-        <button type="button" class="chat-input-image-confirm underline disabled:opacity-40" :disabled="!imageTargetMatches || isSending" @click="confirmImageSent">已在微信确认发送</button>
-        <button type="button" class="chat-input-image-retry-ready underline disabled:opacity-40" :disabled="!imageTargetMatches || isSending" @click="allowImageRetry">已核对未发送，允许重试</button>
+        <button type="button" :class="`chat-input-${pendingAttachment.kind}-confirm`" class="underline disabled:opacity-40" :disabled="!attachmentTargetMatches || isSending" @click="confirmAttachmentSent">已在微信确认发送</button>
+        <button type="button" :class="`chat-input-${pendingAttachment.kind}-retry-ready`" class="underline disabled:opacity-40" :disabled="!attachmentTargetMatches || isSending" @click="allowAttachmentRetry">已核对未发送，允许重试</button>
       </div>
       <details class="mt-1 max-h-20 overflow-y-auto">
         <summary class="cursor-pointer">查看原因</summary>
-        <p class="break-words">{{ selectedImage.confirmation.code }}：{{ selectedImage.confirmation.message }}</p>
+        <p class="break-words">{{ pendingAttachment.confirmation.code }}：{{ pendingAttachment.confirmation.message }}</p>
       </details>
     </div>
 
     <!-- Action Toolbar -->
-    <div class="chat-input-toolbar flex items-center justify-between px-3 py-1 text-xs border-b border-gray-100 dark:border-gray-800/80 select-none shrink-0">
-      <div class="flex items-center gap-2">
+    <div class="chat-input-toolbar flex items-center px-3 py-1 text-xs border-b border-gray-100 dark:border-gray-800/80 select-none shrink-0">
+      <div class="chat-input-tools flex items-center gap-2">
         <button
           type="button"
           class="chat-input-btn-ai inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-[#07c160] hover:bg-[#07c160]/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -76,14 +76,34 @@
         <button
           type="button"
           class="chat-input-btn-image inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          :disabled="!canPickImage"
-          :aria-busy="isSelectingImage"
-          title="选择 PNG 或 JPEG 图片（Windows 桌面版）"
-          @click="handlePickImage"
+          :disabled="!canPickAttachment"
+          :aria-busy="selectingAttachment === 'image'"
+          title="添加 PNG 或 JPEG 图片，可多选（Windows 桌面版）"
+          @click="handlePickAttachment('image')"
         >
           <span>▧</span>
-          <span>{{ isSelectingImage ? '选图中...' : '图片' }}</span>
+          <span>{{ selectingAttachment === 'image' ? '选图中...' : '图片' }}</span>
         </button>
+
+        <button
+          type="button"
+          class="chat-input-btn-file inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          :disabled="!canPickAttachment"
+          :aria-busy="selectingAttachment === 'file'"
+          title="添加文件，可多选（Windows 桌面版，PNG/JPEG 将作为图片发送）"
+          @click="handlePickAttachment('file')"
+        >
+          <span>📎</span>
+          <span>{{ selectingAttachment === 'file' ? '选择中...' : '文件' }}</span>
+        </button>
+
+        <MessageRecognitionControl
+          v-if="recognitionState"
+          :state="recognitionState"
+          :engine="recognitionEngine"
+          compact
+          @configure="state.toggleInsightsPanel(true)"
+        />
 
         <button
           type="button"
@@ -97,20 +117,21 @@
         </button>
       </div>
 
-      <div class="text-[11px] text-gray-400 dark:text-gray-500">
-        Enter 发送，Shift + Enter 换行
-      </div>
     </div>
 
     <!-- Textarea & Send Button -->
     <div class="chat-input-body flex-1 flex flex-col min-h-0 relative px-3 py-1.5">
-      <div v-if="selectedImage" class="flex items-center gap-2 mb-1 shrink-0 text-xs">
-        <img :src="selectedImage.previewDataUrl" :alt="selectedImage.name" class="chat-input-image-preview w-12 h-10 object-contain rounded border border-gray-200 dark:border-gray-700" />
-        <div class="min-w-0 flex-1">
-          <div class="truncate">{{ selectedImage.name }}</div>
-          <div class="text-gray-500 truncate">{{ imageTargetMatches ? `发送给 ${selectedImage.display_name || selectedImage.username}` : '图片属于原会话，请切回原会话或移除图片' }}</div>
+      <div v-if="selectedAttachments.length" class="chat-input-attachments max-h-32 overflow-y-auto shrink-0 mb-1" aria-label="待发送附件">
+        <div v-for="attachment in selectedAttachments" :key="attachment.id" class="chat-input-attachment flex items-center gap-2 mb-1 text-xs">
+          <img v-if="attachment.kind === 'image'" :src="attachment.previewDataUrl" :alt="attachment.name" class="chat-input-image-preview w-12 h-10 object-contain rounded border border-gray-200 dark:border-gray-700" />
+          <span v-else class="chat-input-file-preview text-2xl" aria-hidden="true">📄</span>
+          <div class="min-w-0 flex-1">
+            <div class="chat-input-attachment-name truncate" :title="attachment.name">{{ attachment.name }}</div>
+            <div class="chat-input-attachment-size text-gray-500">{{ formatFileSize(String(attachment.sizeBytes)) }}</div>
+            <div class="text-gray-500 truncate">{{ attachmentTargetMatches ? `发送给 ${attachment.display_name || attachment.username}` : '附件属于原会话，请切回原会话或移除未发送项' }}</div>
+          </div>
+          <button type="button" :class="`chat-input-${attachment.kind}-remove`" class="chat-input-attachment-remove px-2 py-1 text-gray-500 disabled:opacity-40" :disabled="isSending || !!selectingAttachment || !!attachment.confirmation" :aria-label="`移除 ${attachment.name}`" @click="removeAttachment(attachment.id)">移除</button>
         </div>
-        <button type="button" class="chat-input-image-remove px-2 py-1 text-gray-500 disabled:opacity-40" :disabled="isSending || isSelectingImage" aria-label="移除图片" @click="removeImage">移除</button>
       </div>
       <textarea
         ref="textareaRef"
@@ -120,20 +141,24 @@
         :disabled="isDisabled || isSending"
         rows="2"
         @input="onInput"
+        @paste="onPaste"
         @keydown.enter.exact="onEnter"
         @compositionstart="isComposing = true"
         @compositionend="isComposing = false"
       />
 
       <div class="chat-input-footer flex items-center justify-end gap-2 pt-1 pb-0.5 shrink-0">
+        <div class="mr-auto text-[11px] text-gray-400 dark:text-gray-500" aria-live="polite">
+          {{ selectingAttachment === 'paste' ? '正在读取粘贴附件...' : 'Enter 发送，Shift + Enter 换行' }}
+        </div>
         <button
-          v-if="selectedImage"
+          v-if="selectedAttachments.length"
           type="button"
-          class="chat-input-btn-send-image px-3 py-1.5 rounded-md text-xs font-medium border border-[#07c160] text-[#07c160] disabled:opacity-40 disabled:cursor-not-allowed"
-          :disabled="!canSendImage"
+          class="chat-input-btn-send-attachments px-3 py-1.5 rounded-md text-xs font-medium border border-[#07c160] text-[#07c160] disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="!canSendAttachment"
           :aria-busy="isSending"
-          @click="handleSendImage"
-        >发送图片</button>
+          @click="handleSendAttachment"
+        >{{ isSending ? '发送中，剩余' : '发送附件' }}（{{ selectedAttachments.length }}）</button>
         <button
           type="button"
           class="chat-input-btn-send inline-flex items-center justify-center gap-1.5 px-4 py-1.5 rounded-md text-xs font-medium bg-[#07c160] hover:bg-[#06ad56] text-white shadow-sm disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -153,8 +178,10 @@
 </template>
 
 <script setup>
-import { computed, ref, unref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, unref, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi as defaultUseApi } from '~/composables/useApi'
+import { formatFileSize } from '~/lib/chat/formatters'
+import MessageRecognitionControl from '~/components/chat/MessageRecognitionControl.vue'
 
 const props = defineProps({
   state: {
@@ -187,12 +214,16 @@ const inputHeight = ref(DEFAULT_HEIGHT)
 const textareaRef = ref(null)
 const draftText = ref('')
 const isSending = ref(false)
-const isSelectingImage = ref(false)
-const selectedImage = ref(null)
+const selectingAttachment = ref('')
+const selectedAttachments = ref([])
+let nextAttachmentId = 0
+let targetRevision = 0
 const isGeneratingAiReply = ref(false)
 const isComposing = ref(false)
 const errorInfo = ref(null)
 const aiView = useState('chat-agent-ui', () => ({ selected: {}, drafts: {}, pinned: {} }))
+const recognitionState = computed(() => unref(props.state.recognitionState))
+const recognitionEngine = computed(() => unref(props.state.recognitionEngine))
 
 // Computed helpers to extract data from props.state safely
 const account = computed(() => {
@@ -219,16 +250,20 @@ const placeholderText = computed(() => {
   if (!hasContact.value) {
     return '未选定会话，请从左侧选择联系人或群聊'
   }
-  return '输入消息，Enter 发送，Shift + Enter 换行'
+  return '输入消息，Enter 发送；Ctrl+V 粘贴图片、文件'
 })
 
 const canSend = computed(() => {
-  return hasAccount.value && hasContact.value && !isSending.value && !isSelectingImage.value && !!draftText.value.trim()
+  return hasAccount.value && hasContact.value && !isSending.value && !selectingAttachment.value && !!draftText.value.trim()
 })
 
-const canPickImage = computed(() => hasAccount.value && hasContact.value && !isSending.value && !isSelectingImage.value && !selectedImage.value?.confirmation)
-const imageTargetMatches = computed(() => selectedImage.value?.account === account.value && selectedImage.value?.username === contactUsername.value)
-const canSendImage = computed(() => canPickImage.value && !!selectedImage.value && imageTargetMatches.value)
+// Even switching away and back invalidates a running selection/send batch.
+watch([account, contactUsername], () => { targetRevision += 1 }, { flush: 'sync' })
+
+const pendingAttachment = computed(() => selectedAttachments.value.find(attachment => attachment.confirmation))
+const attachmentTargetMatches = computed(() => selectedAttachments.value.every(attachment => attachment.account === account.value && attachment.username === contactUsername.value))
+const canPickAttachment = computed(() => hasAccount.value && hasContact.value && !isSending.value && !selectingAttachment.value && !pendingAttachment.value && attachmentTargetMatches.value)
+const canSendAttachment = computed(() => canPickAttachment.value && selectedAttachments.value.length > 0)
 
 const canAiSuggest = computed(() => {
   return hasAccount.value && hasContact.value && !isSending.value && !isGeneratingAiReply.value
@@ -339,8 +374,8 @@ const handleSend = async () => {
   }
 }
 
-const showImageError = (err) => {
-  const code = err.code || err.data?.code || (typeof err.detail === 'object' ? err.detail?.code : '') || 'IMAGE_SEND_ERROR'
+const showAttachmentError = (err, kind) => {
+  const code = err.code || err.data?.code || (typeof err.detail === 'object' ? err.detail?.code : '') || `${kind.toUpperCase()}_SEND_ERROR`
   const message = err.message || err.detail || err.data?.detail || String(err)
   errorInfo.value = {
     code: String(code),
@@ -348,75 +383,108 @@ const showImageError = (err) => {
   }
 }
 
-const handlePickImage = async () => {
-  if (!canPickImage.value) return
+const onPaste = (event) => {
+  // Snapshot FileList during the event; text-only paste keeps native editing behavior.
+  const files = Array.from(event.clipboardData?.files || [])
+  if (!files.length) return
+  event.preventDefault()
+  if (!canPickAttachment.value) {
+    errorInfo.value = { code: 'ATTACHMENT_PASTE_BLOCKED', message: '当前无法添加附件，请等待当前操作完成，并核对待发送列表及目标会话。' }
+    return
+  }
+  void handlePickAttachment('paste', files)
+}
+
+const handlePickAttachment = async (kind, files) => {
+  if (!canPickAttachment.value) return
   const target = { account: account.value, username: contactUsername.value, display_name: contactDisplayName.value || null }
-  isSelectingImage.value = true
+  const revision = targetRevision
+  const label = kind === 'paste' ? '附件' : kind === 'image' ? '图片' : '文件'
+  selectingAttachment.value = kind
   errorInfo.value = null
   try {
     const desktop = window.wechatDesktop
-    if (desktop?.platform !== 'win32' || typeof desktop.chooseImage !== 'function') {
-      throw Object.assign(new Error('图片发送仅支持 Windows 桌面版，请使用桌面应用选择图片'), { code: 'IMAGE_SEND_UNSUPPORTED' })
+    const choose = kind === 'paste' ? desktop?.importChatAttachments : kind === 'image' ? desktop?.chooseImage : desktop?.chooseFile
+    if (desktop?.platform !== 'win32' || typeof choose !== 'function') {
+      throw Object.assign(new Error(`${label}添加需要 Windows 桌面版支持，请使用最新源码启动桌面应用后重试`), { code: `${kind.toUpperCase()}_SEND_UNSUPPORTED` })
     }
-    const result = await desktop.chooseImage()
+    const result = kind === 'paste' ? await choose(files) : await choose()
     if (result.canceled) return
-    if (account.value !== target.account || contactUsername.value !== target.username) {
-      throw Object.assign(new Error('选图期间会话已切换，请在当前会话重新选择图片'), { code: 'IMAGE_TARGET_CHANGED' })
+    if (revision !== targetRevision) {
+      throw Object.assign(new Error(`选择${label}期间会话已切换，请在当前会话重新选择${label}`), { code: `${kind.toUpperCase()}_TARGET_CHANGED` })
     }
-    selectedImage.value = { ...result, ...target }
+    if (!Array.isArray(result.attachments) || !result.attachments.length) {
+      throw Object.assign(new Error('桌面应用未返回附件列表，请重启桌面应用后重试'), { code: 'ATTACHMENT_PICKER_INVALID' })
+    }
+    selectedAttachments.value.push(...result.attachments.map(attachment => ({ ...attachment, ...target, id: ++nextAttachmentId })))
   } catch (err) {
-    showImageError(err)
+    showAttachmentError(err, kind)
   } finally {
-    isSelectingImage.value = false
+    selectingAttachment.value = ''
   }
 }
 
-const removeImage = () => {
-  if (isSending.value || isSelectingImage.value) return
-  selectedImage.value = null
+const removeAttachment = (id) => {
+  if (isSending.value || selectingAttachment.value) return
+  selectedAttachments.value = selectedAttachments.value.filter(attachment => attachment.id !== id || attachment.confirmation)
 }
 
-const confirmImageSent = () => {
-  if (!selectedImage.value?.confirmation || !imageTargetMatches.value || isSending.value) return
+const confirmAttachmentSent = () => {
+  if (!pendingAttachment.value || !attachmentTargetMatches.value || isSending.value) return
   // User acknowledgement only; no backend success is manufactured and no resend occurs.
-  selectedImage.value = null
+  selectedAttachments.value = selectedAttachments.value.filter(attachment => attachment.id !== pendingAttachment.value.id)
   if (typeof props.state?.refreshSelectedMessages === 'function') {
     props.state.refreshSelectedMessages()
   }
 }
 
-const allowImageRetry = () => {
-  if (!selectedImage.value?.confirmation || !imageTargetMatches.value || isSending.value) return
-  delete selectedImage.value.confirmation
+const allowAttachmentRetry = () => {
+  if (!pendingAttachment.value || !attachmentTargetMatches.value || isSending.value) return
+  delete pendingAttachment.value.confirmation
 }
 
-const handleSendImage = async () => {
-  if (!canSendImage.value) return
-  const image = selectedImage.value
+const handleSendAttachment = async () => {
+  if (!canSendAttachment.value) return
+  const revision = targetRevision
+  const queue = [...selectedAttachments.value]
+  let sentCount = 0
   isSending.value = true
   errorInfo.value = null
   try {
-    const receipt = await getApi().sendChatImage({
-      account: image.account,
-      username: image.username,
-      display_name: image.display_name,
-      image_path: image.path
-    })
-    if (receipt?.success !== true) {
-      throw Object.assign(new Error('后端未确认图片发送成功，图片已保留，请检查微信后再决定是否重试'), { code: 'WECHAT_SEND_UNCONFIRMED' })
-    }
-    selectedImage.value = null
-    if (account.value === image.account && contactUsername.value === image.username && typeof props.state?.refreshSelectedMessages === 'function') {
-      props.state.refreshSelectedMessages()
-    }
-  } catch (err) {
-    showImageError(err)
-    if (errorInfo.value.code === 'WECHAT_SEND_UNCONFIRMED') {
-      selectedImage.value.confirmation = errorInfo.value
-      errorInfo.value = null
+    const api = getApi()
+    for (const attachment of queue) {
+      // Existing backend shares a 1 s per-session cooldown across message types.
+      // This is pacing between confirmed sends, never an automatic retry.
+      if (sentCount > 0) await new Promise(resolve => setTimeout(resolve, 1000))
+      if (revision !== targetRevision) {
+        errorInfo.value = { code: 'ATTACHMENT_TARGET_CHANGED', message: '会话已切换，后续附件已暂停；请切回原会话后重新点击发送。' }
+        return
+      }
+      try {
+        const target = { account: attachment.account, username: attachment.username, display_name: attachment.display_name }
+        const receipt = attachment.kind === 'image'
+          ? await api.sendChatImage({ ...target, image_path: attachment.path })
+          : await api.sendChatFile({ ...target, file_path: attachment.path })
+        if (receipt?.success !== true) {
+          throw Object.assign(new Error('后端未确认附件发送成功，请检查微信后再决定是否重试'), { code: 'WECHAT_SEND_UNCONFIRMED' })
+        }
+      } catch (err) {
+        showAttachmentError(err, attachment.kind)
+        // A missing/transport response cannot prove that the native send did not happen.
+        if (errorInfo.value.code === 'WECHAT_SEND_UNCONFIRMED' || !errorInfo.value.code.startsWith('WECHAT_')) {
+          attachment.confirmation = errorInfo.value
+          errorInfo.value = null
+        }
+        return
+      }
+      selectedAttachments.value = selectedAttachments.value.filter(item => item.id !== attachment.id)
+      sentCount += 1
     }
   } finally {
     isSending.value = false
+    if (sentCount > 0 && revision === targetRevision && typeof props.state?.refreshSelectedMessages === 'function') {
+      props.state.refreshSelectedMessages()
+    }
   }
 }
 
@@ -480,6 +548,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  targetRevision += 1
   if (typeof window !== 'undefined') {
     window.removeEventListener('pointermove', onPointerMove)
     window.removeEventListener('pointerup', onPointerUp)
@@ -504,4 +573,7 @@ defineExpose({
   background-color: var(--chat-page-bg, #ffffff);
   border-top-color: var(--app-border, #e5e7eb);
 }
+.chat-input-toolbar { overflow-x: auto; }
+.chat-input-tools { flex-wrap: nowrap; white-space: nowrap; }
+.chat-input-tools > * { flex-shrink: 0; }
 </style>

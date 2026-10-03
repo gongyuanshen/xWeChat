@@ -4,7 +4,8 @@
 
     <div class="chat-page-main flex-1 flex flex-col min-h-0 min-w-0">
       <div class="flex-1 flex min-h-0 min-w-0">
-        <ConversationPane :state="chatState" />
+        <ConversationPane v-show="!insightsPanelOpen || !selectedContact" :state="chatState" />
+        <ChatInsightsPanel v-if="insightsPanelOpen && selectedContact" :key="`${selectedAccount}:${selectedContact.username}`" :state="insightsState" :recognition="recognitionState" :contact="selectedContact" :locate-source="locateInsightSource" :privacy-mode="privacyMode" :show-settings="insightsSettingsOpen" @close="insightsPanelOpen = false" />
       </div>
     </div>
 
@@ -31,6 +32,9 @@ import ResourceSidebar from '~/components/chat/ResourceSidebar.vue'
 import VoiceTranscriptionSidebar from '~/components/chat/VoiceTranscriptionSidebar.vue'
 import GroupMembersSidebar from '~/components/chat/GroupMembersSidebar.vue'
 import ChatAgentPanel from '~/components/chat/ChatAgentPanel.vue'
+import ChatInsightsPanel from '~/components/chat/ChatInsightsPanel.vue'
+import { useChatInsights } from '~/composables/chat/useChatInsights'
+import { useMessageRecognition } from '~/composables/chat/useMessageRecognition'
 import { useApi } from '~/composables/useApi'
 import { createEmptySearchContext, useChatSearch } from '~/composables/chat/useChatSearch'
 import { useChatSessions } from '~/composables/chat/useChatSessions'
@@ -1199,6 +1203,27 @@ watch(
 )
 
 const aiSidebarOpen = ref(false)
+const insightsPanelOpen = ref(false)
+const insightsSettingsOpen = ref(false)
+const insightSharedState = useState('chat-agent-ui', () => ({ selected: {}, drafts: {}, pinned: {} }))
+const insightsState = useChatInsights({ account: selectedAccount, contact: selectedContact, open: insightsPanelOpen, api: useAiApi(), shared: insightSharedState.value })
+const recognitionState = useMessageRecognition({ account: selectedAccount, contact: selectedContact, messages,
+  engine: insightsState.engine, modelChoice: insightsState.modelChoice, api: useAiApi() })
+const toggleInsightsPanel = (showSettings = false) => {
+  insightsSettingsOpen.value = showSettings === true
+  insightsPanelOpen.value = !insightsPanelOpen.value
+  if (insightsPanelOpen.value) {
+    aiSidebarOpen.value = false
+    closeVoiceSidebar()
+    messageState.closeResourceSidebar()
+    searchState.closeMessageSearch('insights-panel')
+    searchState.closeTimeSidebar()
+    groupMembersSidebarOpen.value = false
+  }
+}
+watch([aiSidebarOpen, voiceSidebarOpen, messageState.resourceSidebarOpen, searchState.messageSearchOpen, searchState.timeSidebarOpen], opened => {
+  if (opened.some(Boolean)) insightsPanelOpen.value = false
+})
 const groupMembersSidebarOpen = ref(false)
 const toggleGroupMembersSidebar = () => {
   if (groupMembersSidebarOpen.value) {
@@ -1206,6 +1231,7 @@ const toggleGroupMembersSidebar = () => {
     return
   }
   if (!selectedContact.value?.isGroup) return
+  insightsPanelOpen.value = false
   aiSidebarOpen.value = false
   closeVoiceSidebar()
   messageState.closeResourceSidebar()
@@ -1251,6 +1277,23 @@ const diagnoseAiSource = async (source, operation) => {
 }
 const prepareAiSource = source => diagnoseAiSource(source, () => searchState.prepareAnchorContext({ targetUsername: source.username, anchorId: source.anchor }))
 const locateAiSource = source => diagnoseAiSource(source, () => searchState.locateByAnchorId({ targetUsername: source.username, anchorId: source.anchor, kind: 'ai', label: 'AI 消息来源', throwOnError: true }))
+const locateInsightSource = async source => {
+  const account = selectedAccount.value, username = selectedContact.value.username
+  // 定位要求消息真正进入可见区；先恢复聊天布局，保留输入组件和草稿。
+  insightsPanelOpen.value = false
+  await nextTick()
+  try {
+    const found = await locateAiSource(source)
+    if (found === false) throw new Error('未定位到来源消息')
+    return found
+  } catch (error) {
+    if (selectedAccount.value === account && selectedContact.value?.username === username) {
+      insightsPanelOpen.value = true
+      await nextTick()
+    }
+    throw error
+  }
+}
 const consumeAiNavigation = async () => {
   const target = aiNavigation.value
   if (!target) return
@@ -1275,6 +1318,12 @@ watch(aiNavigation, () => { void consumeAiNavigation() })
 onMounted(() => { void consumeAiNavigation() })
 
 const chatState = {
+  insightsPanelOpen,
+  toggleInsightsPanel,
+  insightLabels: computed(() => ({ ...insightsState.labels.value, ...recognitionState.labels.value })),
+  recognitionState,
+  recognitionEngine: insightsState.engine,
+  recognitionHeader: recognitionState.header,
   groupMembersSidebarOpen,
   toggleGroupMembersSidebar,
   aiSidebarOpen,

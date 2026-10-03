@@ -13,18 +13,30 @@ afterEach(() => vi.unstubAllGlobals())
 
 it('运行中显示触发用量，完成后同一位置默认折叠，展开才读取摘要', async () => {
   const wrapper = mount(Compaction, { props: { item: entry('running'), run: run(), viewState: reactive({}) } })
-  expect(wrapper.text()).toContain('当前已用 83.3%')
+  expect(wrapper.text()).toContain('当前估算已用 83.3%')
   expect(wrapper.text()).toContain('原文已保留，完成后自动继续')
   expect(request).not.toHaveBeenCalled()
   await wrapper.setProps({ item: entry() })
   expect(wrapper.text()).toBe('上下文已压缩')
   expect(wrapper.get('button').attributes('aria-expanded')).toBe('false')
   await wrapper.get('button').trigger('click'); await flushPromises()
-  expect(wrapper.text()).toContain('83.3% → 27.4%')
+  expect(wrapper.text()).toContain('上下文估算用量 83.3% → 27.4%')
   expect(wrapper.text()).toContain('核对转账')
   expect(request).toHaveBeenCalledWith('/agent/runs/r/context-compactions/j', { query: { account: 'a', version: 1 } })
   await wrapper.get('button').trigger('click')
   expect(wrapper.text()).toBe('上下文已压缩')
+  wrapper.unmount()
+})
+
+it('真实窗口未知时展示估算预算单位与未知窗口，不生成容量百分比', () => {
+  const item = entry('running')
+  item.context_job.before = 35172
+  item.context_job.model_window = null
+  const wrapper = mount(Compaction, { props: { item, run: run(), viewState: {} } })
+  expect(wrapper.text()).toContain('当前估算 35,172 预算单位 · 模型上下文窗口未知')
+  expect(wrapper.text()).not.toContain('%')
+  expect(wrapper.text()).not.toContain('Token')
+  expect(request).not.toHaveBeenCalled()
   wrapper.unmount()
 })
 
@@ -70,13 +82,14 @@ it('压缩失败展开后显示后端保存的具体校验原因', async () => {
   wrapper.unmount()
 })
 
-it('读取失败可重试，旧记录缺少窗口时显示 Token 而非借用当前模型', async () => {
+it('读取失败可重试，旧记录缺少窗口时显示估算预算单位而非借用当前模型', async () => {
   request.mockRejectedValueOnce(new Error('暂时无法读取')).mockResolvedValueOnce({ before: 800, after: 200, summary: null })
   const wrapper = mount(Compaction, { props: { item: entry(), run: run(), viewState: {} } })
   await wrapper.get('button').trigger('click'); await flushPromises()
   expect(wrapper.get('[role="alert"]').text()).toContain('暂时无法读取')
   await wrapper.get('[role="alert"] button').trigger('click'); await flushPromises()
-  expect(wrapper.text()).toContain('800 → 200 Token')
+  expect(wrapper.text()).toContain('上下文估算用量 800 → 200 预算单位（模型上下文窗口未知）')
+  expect(wrapper.text()).not.toContain('Token')
   expect(wrapper.text()).toContain('未保存可查看的摘要')
   wrapper.unmount()
 })
