@@ -1,20 +1,16 @@
 <p align="center">
-    <img src="frontend/public/logo.png" alt="微信数据库解密工具" width="200" />
+    <img src="frontend/public/logo.png" alt="微信数据分析工具" width="200" />
 </p>
 
 <div align="center">
-    <h1>WeChatDataAnalysis - 微信数据库解密与分析工具</h1>
-    <p>微信4.x数据解密并生成年度总结，高仿微信，支持实时更新，导出聊天记录，朋友圈等大量便捷功能</p>
-    <p>官网链接：https://lifearchiveproject.github.io/WeChatDataAnalysis/</p>
-    <img src="https://img.shields.io/github/v/tag/LifeArchiveProject/WeChatDataAnalysis" alt="Version" />
-    <img src="https://img.shields.io/github/stars/LifeArchiveProject/WeChatDataAnalysis" alt="Stars" />
-    <img src="https://gh-down-badges.linkof.link/LifeArchiveProject/WeChatDataAnalysis" alt="Downloads" />
-    <img src="https://img.shields.io/github/forks/LifeArchiveProject/WeChatDataAnalysis" alt="Forks" />
-    <a href="https://qm.qq.com/q/2IB0gvYpYA"><img src="https://img.shields.io/badge/QQ Group-WeChatDataAnalysis-12B7F5?logo=tencentqq&logoColor=white" alt="QQ Group" /></a>
-    <img src="https://img.shields.io/badge/Python-3776AB?logo=Python&logoColor=white" alt="Python" />
-    <img src="https://img.shields.io/badge/Vue.js-4FC08D?logo=Vue.js&logoColor=white" alt="Vue.js" />
-    <img src="https://img.shields.io/badge/SQLite-003B57?logo=SQLite&logoColor=white" alt="SQLite" />
-    <p>如果你需要 QQ 侧的数据解密、分析或年度总结类工具，欢迎体验 <a href="https://github.com/H3CoF6/WeQ">H3CoF6/WeQ</a>；WeQ 作者也是本项目开发成员之一</p>
+    <h1>WeChatDataAnalysis - 微信数据分析与年度总结工具</h1>
+    <p>一个纯粹出于个人兴趣、娱乐与学习研究开发的微信数据分析小工具</p>
+    <p>支持本地数据解密、年度总结生成、聊天记录导出与浏览、朋友圈回顾等功能</p>
+    <p><b>⚠️ 声明：本项目为个人业余娱乐开发项目，仅供个人技术研究与娱乐使用，不涉及任何商业盈利、经济收益或收费服务。</b></p>
+    <img src="https://img.shields.io/badge/Project-Personal%20Hobby-blue" alt="Personal Project" />
+    <img src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=Python&logoColor=white" alt="Python" />
+    <img src="https://img.shields.io/badge/Vue.js-3.x-4FC08D?logo=Vue.js&logoColor=white" alt="Vue.js" />
+    <img src="https://img.shields.io/badge/SQLite-Database-003B57?logo=SQLite&logoColor=white" alt="SQLite" />
 </div>
 
 ## 年度总结
@@ -118,24 +114,6 @@
   </tr>
 </table>
 
-## 高级版
-
-常规版聚焦于**解密、读取、导出与年度总结**等只读能力；**高级版**在此基础上提供 **61 项写入、动作与自动化能力**，覆盖消息修改、消息补录、微信动作、朋友圈同步与互动、群聊与联系人管理，以及自动化任务。当前公开版本仅展示功能说明与演示动画，不包含高级功能的执行实现；实际使用需要匹配微信版本的高级版。
-
-> **获取方式**：进 QQ 3 群 [**1109365501**](https://qm.qq.com/q/2IB0gvYpYA) 私聊咨询群主获取。
-
-| 模块 | 高级版功能 |
-| --- | --- |
-| 消息修改 | 修改文字消息、编辑消息源码、修改时间、字段编辑、恢复原消息、修复为我发送、反转微信气泡位置、删除系统消息 |
-| 消息补录 | 文字、图片、文件、语音、视频、表情、转账记录、红包记录、位置、链接卡片、小程序卡片、视频号卡片、引用消息、合并聊天记录、通话记录、系统消息、拍一拍记录 |
-| 微信动作 | 发送文字消息、发送群聊真 @、发送图片、视频、表情、语音（支持 MP3）、文件、链接卡片、拍一拍，以及单会话标记已读、会话免打扰 |
-| 朋友圈 | 连续同步动态及历史页、朋友圈点赞、图片评论、文字评论、发布朋友圈 |
-| 群聊 | 修改本人群昵称、发布群公告、新建群聊、修改群名称、拉好友进群、邀请成员进群、移除群成员、退出群聊、群成员批量加好友 |
-| 联系人 | 修改好友备注、同意好友请求、添加好友、删除好友、新建标签、设置标签、手机号 / 微信号找人、联系人变化记录 |
-| 自动化任务 | 定时群发任务、新好友备注 / 标签 / 欢迎消息处理、朋友圈跟圈任务（按关键词筛出新动态，自动点赞、评论并跟发同样内容，命中屏蔽词的不发） |
-
-其中**消息修改、消息补录以及会话标记已读、会话免打扰共 27 项直接回写你本机的微信还可同步到手机**，改动均可随时一键还原
-
 ## 可导出的内容
 
 | 内容 | 支持格式 | 导出范围 / 说明 |
@@ -153,21 +131,11 @@
 
 > Excel 格式生成 `.xlsx` 文件；聊天记录、朋友圈和收藏会将对应格式文件与必要资源一起打包为 ZIP。
 
-## 加入群聊
-
-也欢迎加入下方 QQ 群一起讨论。
-
-<p align="center">
-    <a href="https://qm.qq.com/q/2IB0gvYpYA">
-        <img src="docs/upstream-assets/QQImage_1770190010691_1103312318341691201.jpg" alt="WeChatDataAnalysis 加群二维码" width="360" />
-    </a>
-</p>
-
 ## 快速开始
 
-### 1. 下载桌面安装包（推荐）
+### 1. 下载桌面安装包
 
-1. 打开 Release 页面（最新版）：https://github.com/LifeArchiveProject/WeChatDataAnalysis/releases/latest
+1. 打开 Release 页面：https://github.com/gongyuanshen/WeChatDataAnalysis/releases
 2. Windows 下载 `Setup.exe`；macOS 15+ 的 Apple Silicon Mac 下载 `.dmg` 或 `mac.zip`
 3. 安装完成后启动 `WeChatDataAnalysis`
 
@@ -179,7 +147,7 @@
 #### 2.1 克隆项目
 
 ```bash
-git clone https://github.com/LifeArchiveProject/WeChatDataAnalysis.git
+git clone https://github.com/gongyuanshen/WeChatDataAnalysis.git
 cd WeChatDataAnalysis
 ```
 
@@ -290,9 +258,11 @@ npm run dist:mac
 
 请在充分理解以下内容，并自愿承担相应责任的前提下使用本项目：
 
-1. **项目性质**
+1. **项目性质与严禁商用**
 
-   本项目为独立开发的非官方开源工具，与微信、腾讯及其关联主体不存在隶属、授权、合作或认可关系。相关产品名称和商标归其权利人所有。
+   本项目为个人出于业余兴趣、娱乐探索与技术学习而开发的非官方工具，纯属私人娱乐与学习研究，不涉及任何经济收益、商业运作或收费服务。本项目与微信、腾讯及其关联主体不存在任何隶属、授权、合作或认可关系，相关产品名称和商标归其权利人所有。
+
+   **严禁商业牟利**：本项目绝不提供任何付费版或商业服务，严禁任何组织或个人将本项目代码、衍生功能或技术工具用于任何商业牟利、收费转售、恶意侵犯他人隐私或非法用途。
 
 2. **合法使用**
 
