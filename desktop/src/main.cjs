@@ -814,7 +814,7 @@ function ensureOutputLink() {
   // This avoids the data-loss risks of using junctions/symlinks under the install directory.
   try {
     const p = path.join(exeDir, "output-location.txt");
-    const text = `WeChatDataAnalysis data directory\n\nOutput folder:\n${target}\n`;
+    const text = `xwechat data directory\n\nOutput folder:\n${target}\n`;
     fs.writeFileSync(p, text, { encoding: "utf8" });
   } catch {}
 
@@ -1483,7 +1483,7 @@ function requestMainWindow(reason = "request") {
       const message = err?.message || String(err);
       logMain(`[main] failed to open window reason=${reason}: ${err?.stack || message}`);
       try {
-        dialog.showErrorBox("WeChatDataAnalysis", `无法打开主窗口：${message}`);
+        dialog.showErrorBox("xwechat", `无法打开主窗口：${message}`);
       } catch {}
     });
 }
@@ -1507,7 +1507,7 @@ function createTray() {
   }
 
   try {
-    tray.setToolTip("WeChatDataAnalysis");
+    tray.setToolTip("xwechat");
   } catch {}
 
   try {
@@ -2105,7 +2105,7 @@ function createMainWindow() {
       win.hide();
       try {
         tray.displayBalloon({
-          title: "WeChatDataAnalysis",
+          title: "xwechat",
           content: "已最小化到托盘，可从托盘图标再次打开。",
         });
       } catch {}
@@ -3102,7 +3102,7 @@ if (gotSingleInstanceLock) {
           detailLines.push("", `当前 output 目录：${outputDir}`, `其中 output${path.sep}logs${path.sep}... 也在这里`);
         }
         dialog.showErrorBox(
-          "WeChatDataAnalysis 启动失败",
+          "xwechat 启动失败",
           detailLines.join("\n")
         );
         shell.openPath(dir);

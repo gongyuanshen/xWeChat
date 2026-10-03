@@ -11,6 +11,6 @@
 import BizMessages from "../components/BizMessages.vue";
 
 useHead({
-  title: '服务号消息 - WeChatDataAnalysis'
+  title: '服务号消息 - xwechat'
 })
 </script>

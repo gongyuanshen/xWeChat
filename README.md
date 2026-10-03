@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="frontend/public/logo.png" alt="WeChatDataAnalysis Logo" width="160" />
+  <img src="frontend/public/logo.png" alt="xwechat Logo" width="160" />
 </p>
 
 <div align="center">
 
-# WeChatDataAnalysis
+# xwechat
 
 **一个纯粹出于个人业余兴趣、娱乐探索与技术学习而开发的本地微信数据分析工具**
 
@@ -24,7 +24,7 @@
 
 ## 📖 项目简介与血缘说明
 
-**WeChatDataAnalysis** 是一个面向 Windows 平台的个人本地微信数据分析与交互实验工具。本项目纯粹源于个人对客户端架构、本地数据库处理以及端侧 AI 模型的学习研究兴趣，旨在提供一个轻量、纯本地、私密的聊天数据浏览与分析环境。
+**xwechat** 是一个面向 Windows 平台的个人本地微信数据分析与交互实验工具。本项目纯粹源于个人对客户端架构、本地数据库处理以及端侧 AI 模型的学习研究兴趣，旨在提供一个轻量、纯本地、私密的聊天数据浏览与分析环境。
 
 所有数据均在使用者本机解密与处理，不依赖任何第三方远程后端服务，充分保障个人数据隐私与安全。
 
@@ -136,7 +136,7 @@ npm run dev
 cd desktop
 npm run dist
 ```
-打包成功后，安装程序位于 `desktop/dist/` 目录。
+打包成功后，安装程序位于 `desktop/dist/` 目录（例如 `xwechat Setup <version>.exe`）。
 
 ---
 

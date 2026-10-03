@@ -66,11 +66,11 @@ export default defineNuxtConfig({
   // 应用配置
   app: {
     head: {
-      title: '微信数据库解密工具',
+      title: 'xwechat',
       meta: [
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
-        { name: 'description', content: '微信4.x版本数据库解密工具' }
+        { name: 'description', content: 'xwechat - 个人微信数据分析与互动工具' }
       ],
       script: [
         {

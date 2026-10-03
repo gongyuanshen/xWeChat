@@ -934,7 +934,7 @@ const applyMcpAccessInfo = (resp) => {
 const mcpSkillFallback = [
   '# WeChat MCP Copilot',
   '',
-  'Use WeChatDataAnalysis MCP like an investigator: start broad, resolve fuzzy targets, then fetch only the context needed to answer.',
+  'Use xwechat MCP like an investigator: start broad, resolve fuzzy targets, then fetch only the context needed to answer.',
   '',
   'Core rules:',
   '1. Start with initialize and tools/list.',
@@ -943,7 +943,7 @@ const mcpSkillFallback = [
   '4. Use returned URLs for media and exports instead of inlining binary content.',
 ].join('\n')
 const mcpAiPrompt = computed(() => [
-  '你现在可以通过 WeChatDataAnalysis MCP 访问本机微信数据。',
+  '你现在可以通过 xwechat MCP 访问本机微信数据。',
   `MCP endpoint: ${mcpEndpoint.value}`,
   `Authorization: Bearer ${mcpToken.value || '<MCP_TOKEN>'}`,
   '',
