@@ -2081,6 +2081,7 @@ function setupRendererLifecycleLogging(win) {
 
 function createMainWindow() {
   const win = new BrowserWindow({
+    icon: path.join(__dirname, "icon.ico"),
     width: 1200,
     height: 800,
     minWidth: 980,

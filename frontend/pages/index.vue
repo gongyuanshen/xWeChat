@@ -9,7 +9,7 @@
       <section class="space-y-5">
         <div class="flex flex-col gap-5 rounded-lg border border-[#EDEDED] bg-white/78 p-6 backdrop-blur sm:p-8 lg:flex-row lg:items-center lg:justify-between">
           <div class="flex items-start gap-4 text-left">
-            <img src="/logo.png" alt="微信解密助手Logo" class="h-16 w-16 shrink-0 object-contain" />
+            <img src="/logo.png" alt="xwechat Logo" class="h-16 w-16 shrink-0 object-contain" />
             <div>
               <p class="text-[13px] font-medium tracking-[0.16em] text-[#07C160]">本地整理·安心备份</p>
               <h1 class="mt-3 text-[34px] font-semibold leading-tight tracking-[-0.04em] text-[#000000e6] sm:text-[46px]">

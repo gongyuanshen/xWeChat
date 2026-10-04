@@ -6,10 +6,14 @@ const { PNG } = require("pngjs");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const srcPng = path.join(repoRoot, "frontend", "public", "logo.png");
-const dstPng = path.join(repoRoot, "desktop", "src", "icon.png");
-// Write the generated ICO to the locations electron-builder expects for app+installer icons.
-// Also keep a copy in desktop/resources for convenience.
+const dstPngs = [
+  path.join(repoRoot, "desktop", "src", "icon.png"),
+  path.join(repoRoot, "website", "assets", "img", "logo.png"),
+];
+// Keep browser, tray, app, and installer icons on the same source image.
 const dstIcos = [
+  path.join(repoRoot, "frontend", "public", "favicon.ico"),
+  path.join(repoRoot, "desktop", "src", "icon.ico"),
   path.join(repoRoot, "desktop", "resources", "icon.ico"),
   path.join(repoRoot, "desktop", "build", "icon.ico"),
   path.join(repoRoot, "desktop", "build", "installerIcon.ico"),
@@ -43,7 +47,10 @@ async function main() {
   const tmpPng = path.join(tmpDir, "logo-square.png");
   const squarePng = PNG.sync.write(square);
   fs.writeFileSync(tmpPng, squarePng);
-  fs.writeFileSync(dstPng, squarePng);
+  for (const dstPng of dstPngs) {
+    fs.mkdirSync(path.dirname(dstPng), { recursive: true });
+    fs.writeFileSync(dstPng, squarePng);
+  }
 
   const buf = await pngToIco(tmpPng);
   for (const dstIco of dstIcos) {
@@ -52,7 +59,7 @@ async function main() {
   }
 
   // eslint-disable-next-line no-console
-  console.log(`Generated icon(s):\n- ${dstPng}\n${dstIcos.map((p) => `- ${p}`).join("\n")}`);
+  console.log(`Generated icon(s):\n${[...dstPngs, ...dstIcos].map((p) => `- ${p}`).join("\n")}`);
 }
 
 main().catch((err) => {

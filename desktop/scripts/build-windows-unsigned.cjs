@@ -40,7 +40,7 @@ function main() {
   env.WCE_WINDOWS_PRIVATE_ROOT_SHA256 = rootSha256;
   console.log(`Public native runtime: ${manifest.buildId}; expires ${new Date(manifest.buildExpiresAtUnix * 1000).toISOString()}`);
 
-  for (const script of ["build:ui", "build:backend", "build:icon"]) {
+  for (const script of ["build:icon", "build:ui", "build:backend"]) {
     run(process.execPath, [npmCli, "run", script], env);
   }
   run(process.execPath, [

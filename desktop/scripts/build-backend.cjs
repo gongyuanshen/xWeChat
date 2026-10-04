@@ -575,6 +575,8 @@ function main() {
       0,
       "--version-file",
       versionFilePath,
+      "--icon",
+      path.join(repoRoot, "desktop", "src", "icon.ico"),
       "--hidden-import",
       "wechat_decrypt_tool.key_v4",
       "--hidden-import",
