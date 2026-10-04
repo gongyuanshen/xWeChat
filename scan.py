@@ -1,9 +1,11 @@
+import argparse
 import json
 import sys
 import re
 import time
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 
 try:
     import pefile
@@ -139,8 +141,7 @@ if __name__ == "__main__":
     # Windows 下多进程必须保护入口点
     multiprocessing.freeze_support()
 
-    # 将此处的路径替换为你要分析的 DLL 路径
-    path = r"C:\Users\Carto\Documents\Virtual Machines\共享\Weixin\weixin_4.1.9.23\install\4.1.9.23\Weixin.dll"
-    path = r"C:\Users\Carto\Downloads\Telegram Desktop\Weixin_4.1.10.25\install\4.1.10.25\Weixin.dll"
-    v = path.split("\\")[-2]  # 从路径中提取版本号
-    extract_xor_keys_multiprocess(path, version=v)
+    parser = argparse.ArgumentParser(description="扫描指定 Weixin.dll 的特征码")
+    parser.add_argument("dll_path", type=Path, help="待扫描的 Weixin.dll 路径")
+    args = parser.parse_args()
+    extract_xor_keys_multiprocess(str(args.dll_path), version=args.dll_path.parent.name)

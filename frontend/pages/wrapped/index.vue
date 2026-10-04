@@ -492,7 +492,8 @@ const goTo = (i) => {
 }
 
 const goBack = async () => {
-  await router.push('/chat')
+  if (router.options.history.state.back) router.back()
+  else await router.push('/chat')
 }
 
 const next = () => goTo(activeIndex.value + 1)

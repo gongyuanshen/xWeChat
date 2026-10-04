@@ -87,6 +87,11 @@ async function importChatAttachments({ event, parentWindow, entries, nativeImage
     }
   }
 
+  if (entries.some(entry => !('path' in entry)) &&
+      (typeof tempRoot !== 'string' || !path.isAbsolute(tempRoot))) {
+    throw new TypeError('附件缓存目录必须是本地绝对路径');
+  }
+
   let tempDirectory;
   try {
     const filePaths = [];
@@ -94,7 +99,10 @@ async function importChatAttachments({ event, parentWindow, entries, nativeImage
       if ('path' in entry) {
         filePaths.push(entry.path);
       } else {
-        if (!tempDirectory) tempDirectory = await fs.mkdtemp(path.join(tempRoot, 'wechat-chat-paste-'));
+        if (!tempDirectory) {
+          await fs.mkdir(tempRoot, { recursive: true });
+          tempDirectory = await fs.mkdtemp(path.join(tempRoot, 'wechat-chat-paste-'));
+        }
         const directory = path.join(tempDirectory, String(index));
         await fs.mkdir(directory);
         const filePath = path.join(directory, entry.name);

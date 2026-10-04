@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { Check, ChevronDown, ChevronLeft, ChevronRight, RotateCcw } from '@lucide/vue'
 
 const props = defineProps({ modelValue: { type: Object, default: () => ({}) }, profiles: { type: Array, default: () => [] }, profilesLoading: Boolean, profilesError: String })
@@ -98,15 +98,19 @@ const closeOnEscape = event => {
   event.preventDefault(); event.stopPropagation()
   if (focusInside) menu.value.querySelector('summary')?.focus()
 }
-onMounted(() => {
+const bindMenuEvents = () => {
   document.addEventListener('pointerdown', closeOutside, true)
   document.addEventListener('keydown', closeOnEscape, true)
-})
-onBeforeUnmount(() => {
-  capabilityRequest++
+}
+const suspendMenu = () => {
+  if (menu.value) menu.value.open = false
   document.removeEventListener('pointerdown', closeOutside, true)
   document.removeEventListener('keydown', closeOnEscape, true)
-})
+}
+onMounted(bindMenuEvents)
+onActivated(bindMenuEvents)
+onDeactivated(suspendMenu)
+onBeforeUnmount(() => { capabilityRequest++; suspendMenu() })
 </script>
 
 <template>

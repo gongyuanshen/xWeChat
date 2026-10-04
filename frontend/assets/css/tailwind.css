@@ -47,7 +47,7 @@
     /* 背景色 */
     --bg-primary: #f7f8fa;
     --bg-secondary: #ffffff;
-    --bg-gray: #ededed;
+    --bg-gray: #fafaf6;
     --bg-dark: #191919;
 
     /* 文字颜色 */
@@ -61,20 +61,30 @@
     --border-light: #f4f4f4;
 
     /* 统一消息圆角（聊天所有消息共用） */
-    --message-radius: 4px;
+    --message-radius: 14px;
+    --sidebar-rail-width: 68px;
+    --sidebar-rail-active-bg: #c6f3df;
+    --chat-input-bg: #ffffff;
+    --chat-input-border: #dce5dd;
+    --chat-accent: #21483f;
+    --chat-accent-hover: #2d6254;
+    --chat-ai-bg: #fff0df;
+    --chat-ai-text: #995018;
+    --chat-focus-ring: #278467;
+    --chat-subtle-bg: #eef2ee;
 
     /* 主题色板 */
-    --sidebar-rail-bg: #e8e7e7;
-    --sidebar-rail-border: #dadada;
-    --sidebar-rail-hover: #e1e1e1;
-    --sidebar-rail-icon-color: #5d5d5d;
-    --sidebar-rail-icon-active-color: #07b75b;
-    --desktop-titlebar-bg: #ededed;
-    --desktop-titlebar-icon: #111111;
+    --sidebar-rail-bg: #21483f;
+    --sidebar-rail-border: #21483f;
+    --sidebar-rail-hover: rgba(255, 255, 255, 0.09);
+    --sidebar-rail-icon-color: #d1e7df;
+    --sidebar-rail-icon-active-color: #21483f;
+    --desktop-titlebar-bg: #fafaf6;
+    --desktop-titlebar-icon: #344c43;
     --desktop-titlebar-hover: rgba(0, 0, 0, 0.06);
     --desktop-titlebar-active: rgba(0, 0, 0, 0.1);
 
-    --app-shell-bg: #ededed;
+    --app-shell-bg: #fafaf6;
     --app-surface-bg: #ffffff;
     --app-surface-soft: #f7f7f7;
     --app-surface-muted: #f3f3f3;
@@ -97,54 +107,54 @@
     --app-accent: #07c160;
     --app-accent-hover: #06ad56;
 
-    --session-list-bg: #f7f7f7;
-    --session-list-search-bg: #f7f7f7;
-    --session-list-border: #e5e7eb;
-    --session-list-item-border: #f1f1f1;
+    --session-list-bg: #f8f9f5;
+    --session-list-search-bg: #f8f9f5;
+    --session-list-border: #e5ebe5;
+    --session-list-item-border: transparent;
     --session-list-item-bg: transparent;
-    --session-list-item-hover: #eaeaea;
-    --session-list-item-selected: #dedede;
-    --session-list-item-selected-hover: #d3d3d3;
-    --session-list-item-top-bg: #eaeaea;
-    --session-list-item-top-hover: #dedede;
-    --session-list-item-top-selected: #d2d2d2;
-    --session-list-item-top-selected-hover: #c7c7c7;
-    --session-list-name: #111827;
-    --session-list-meta: #6b7280;
-    --session-list-preview: #6b7280;
-    --session-list-resizer: rgba(0, 0, 0, 0.12);
+    --session-list-item-hover: #edf2eb;
+    --session-list-item-selected: #dff3e8;
+    --session-list-item-selected-hover: #d4ecdf;
+    --session-list-item-top-bg: #edf2eb;
+    --session-list-item-top-hover: #e5eee5;
+    --session-list-item-top-selected: #dff3e8;
+    --session-list-item-top-selected-hover: #d4ecdf;
+    --session-list-name: #263c33;
+    --session-list-meta: #607268;
+    --session-list-preview: #63736b;
+    --session-list-resizer: #258b6b;
 
-    --contact-search-bg: #eaeaea;
+    --contact-search-bg: #edf1eb;
     --contact-search-focus-bg: #ffffff;
-    --contact-search-focus-ring: rgba(3, 193, 96, 0.2);
-    --contact-search-icon: #9ca3af;
-    --contact-search-text: #1f2937;
-    --contact-search-placeholder: #9ca3af;
-    --contact-search-clear: #9ca3af;
-    --account-select-bg: #eaeaea;
+    --contact-search-focus-ring: rgba(37, 139, 107, 0.24);
+    --contact-search-icon: #62766b;
+    --contact-search-text: #263c33;
+    --contact-search-placeholder: #63736b;
+    --contact-search-clear: #63736b;
+    --account-select-bg: #edf1eb;
 
-    --chat-page-bg: #ededed;
-    --chat-header-bg: #ededed;
-    --chat-header-border: #e5e7eb;
-    --chat-header-title: #111827;
-    --chat-header-icon: #4b5563;
-    --chat-header-icon-hover: #1f2937;
-    --message-filter-color: #374151;
-    --message-list-status: #6b7280;
+    --chat-page-bg: #fafaf6;
+    --chat-header-bg: #fafaf6;
+    --chat-header-border: #e5ebe5;
+    --chat-header-title: #263c33;
+    --chat-header-icon: #53695e;
+    --chat-header-icon-hover: #21483f;
+    --message-filter-color: #53695e;
+    --message-list-status: #63736b;
     --message-load-more-bg: #ffffff;
     --message-load-more-border: #e5e7eb;
     --message-load-more-text: #374151;
     --jump-to-bottom-bg: rgba(255, 255, 255, 0.9);
     --jump-to-bottom-border: #e5e7eb;
     --jump-to-bottom-text: #374151;
-    --chat-date-text: #9e9e9e;
-    --chat-sender-name: #6b7280;
-    --chat-bubble-sent: #95ec69;
-    --chat-bubble-sent-text: #000000;
+    --chat-date-text: #63736b;
+    --chat-sender-name: #63736b;
+    --chat-bubble-sent: #d4f2e2;
+    --chat-bubble-sent-text: #243f32;
     --chat-bubble-received: #ffffff;
-    --chat-bubble-received-text: #1f2937;
-    --quote-bubble-bg: #e1e1e1;
-    --quote-bubble-text: #525252;
+    --chat-bubble-received-text: #283b34;
+    --quote-bubble-bg: #edf1eb;
+    --quote-bubble-text: #53695e;
     --merged-history-bg: #ffffff;
     --merged-history-hover: #f5f5f5;
     --merged-history-title: #161616;
@@ -171,12 +181,22 @@
     --calendar-day-empty-border: #f3f4f6;
     --calendar-day-empty-text: #9ca3af;
 
-    --scrollbar-track: #f1f1f1;
-    --scrollbar-thumb: #c1c1c1;
-    --scrollbar-thumb-hover: #a1a1a1;
+    --scrollbar-track: transparent;
+    --scrollbar-thumb: #c9d4cb;
+    --scrollbar-thumb-hover: #9eafa3;
   }
 
   html[data-theme='dark'] {
+    --sidebar-rail-active-bg: #32604b;
+    --chat-input-bg: #23332a;
+    --chat-input-border: #3c5344;
+    --chat-accent: #9ddcb9;
+    --chat-accent-hover: #b3e8cb;
+    --chat-ai-bg: #473420;
+    --chat-ai-text: #f3c990;
+    --chat-focus-ring: #81cfa8;
+    --chat-subtle-bg: #2b3b31;
+
     --bg-primary: #191919;
     --bg-secondary: #242424;
     --bg-gray: #242424;
@@ -186,17 +206,17 @@
     --border-color: #303030;
     --border-light: #262626;
 
-    --sidebar-rail-bg: #2d2d2d;
-    --sidebar-rail-border: #2d2d2d;
-    --sidebar-rail-hover: #373737;
-    --sidebar-rail-icon-color: #a0a0a0;
-    --sidebar-rail-icon-active-color: #3eb575;
-    --desktop-titlebar-bg: #191919;
+    --sidebar-rail-bg: #173a31;
+    --sidebar-rail-border: #24483c;
+    --sidebar-rail-hover: rgba(255, 255, 255, 0.08);
+    --sidebar-rail-icon-color: #c4ded1;
+    --sidebar-rail-icon-active-color: #ddf6e7;
+    --desktop-titlebar-bg: #19241f;
     --desktop-titlebar-icon: #d0d0d0;
     --desktop-titlebar-hover: rgba(255, 255, 255, 0.08);
     --desktop-titlebar-active: rgba(255, 255, 255, 0.14);
 
-    --app-shell-bg: #191919;
+    --app-shell-bg: #19241f;
     --app-surface-bg: #242424;
     --app-surface-soft: #2e2e2e;
     --app-surface-muted: #2f2f2f;
@@ -245,25 +265,25 @@
     --setup-disabled-bg: #2a2d2b;
     --setup-disabled-text: #6f7772;
 
-    --session-list-bg: #191919;
-    --session-list-search-bg: #191919;
-    --session-list-border: #2d2d2d;
-    --session-list-item-border: #2d2d2d;
-    --session-list-item-bg: #242424;
-    --session-list-item-hover: #2f2f2f;
-    --session-list-item-selected: #3a3a3a;
-    --session-list-item-selected-hover: #444444;
-    --session-list-item-top-bg: #2f2f2f;
-    --session-list-item-top-hover: #3a3a3a;
-    --session-list-item-top-selected: #444444;
-    --session-list-item-top-selected-hover: #4e4e4e;
+    --session-list-bg: #1c2922;
+    --session-list-search-bg: #1c2922;
+    --session-list-border: #304139;
+    --session-list-item-border: transparent;
+    --session-list-item-bg: transparent;
+    --session-list-item-hover: #283c30;
+    --session-list-item-selected: #315342;
+    --session-list-item-selected-hover: #3b624e;
+    --session-list-item-top-bg: #25372c;
+    --session-list-item-top-hover: #2d4537;
+    --session-list-item-top-selected: #315342;
+    --session-list-item-top-selected-hover: #3b624e;
     --session-list-name: #f5f5f5;
     --session-list-meta: #c4c4c4;
     --session-list-preview: #b8b8b8;
     --session-list-resizer: rgba(255, 255, 255, 0.18);
 
-    --contact-search-bg: #2f2f2f;
-    --contact-search-focus-bg: #2f2f2f;
+    --contact-search-bg: #2a3b31;
+    --contact-search-focus-bg: #26392e;
     --contact-search-focus-ring: rgba(62, 181, 117, 0.22);
     --contact-search-icon: #9f9f9f;
     --contact-search-text: #f5f5f5;
@@ -271,9 +291,9 @@
     --contact-search-clear: #9f9f9f;
     --account-select-bg: #2f2f2f;
 
-    --chat-page-bg: #191919;
-    --chat-header-bg: #191919;
-    --chat-header-border: #2b2b2b;
+    --chat-page-bg: #19241f;
+    --chat-header-bg: #19241f;
+    --chat-header-border: #304139;
     --chat-header-title: #f5f5f5;
     --chat-header-icon: #d0d0d0;
     --chat-header-icon-hover: #ffffff;
@@ -287,11 +307,11 @@
     --jump-to-bottom-text: #d8d8d8;
     --chat-date-text: #9f9f9f;
     --chat-sender-name: #b9b9b9;
-    --chat-bubble-sent: #3eb575;
-    --chat-bubble-sent-text: #ffffff;
-    --chat-bubble-received: #2e2e2e;
-    --chat-bubble-received-text: #f5f5f5;
-    --quote-bubble-bg: #252525;
+    --chat-bubble-sent: #315e47;
+    --chat-bubble-sent-text: #e3f6e9;
+    --chat-bubble-received: #29392f;
+    --chat-bubble-received-text: #e9f1eb;
+    --quote-bubble-bg: #24332a;
     --quote-bubble-text: #c9c9c9;
     --merged-history-bg: #2e2e2e;
     --merged-history-hover: #383838;
@@ -319,13 +339,13 @@
     --calendar-day-empty-border: #1f1f1f;
     --calendar-day-empty-text: #7f7f7f;
 
-    --scrollbar-track: #232323;
-    --scrollbar-thumb: #4b4b4b;
-    --scrollbar-thumb-hover: #5b5b5b;
+    --scrollbar-track: transparent;
+    --scrollbar-thumb: #435c4d;
+    --scrollbar-thumb-hover: #607b69;
   }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-family: 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     background-color: var(--bg-primary);
     color: var(--text-primary);
     -webkit-font-smoothing: antialiased;

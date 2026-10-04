@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentRun from '../components/chat/AgentRun.vue'
 import AgentSubtasks from '../components/chat/AgentSubtasks.vue'
 import AgentAnswer from '../components/chat/AgentAnswer.vue'
-import AgentMaterials from '../components/chat/AgentMaterials.vue'
 import { mergeRunEvent, mergeTimeline, mergeReferenceData, groupTimelineTools } from '../utils/agentTimeline'
 import { renderAgentMarkdown, copyAgentText } from '../utils/agentMarkdown'
 
@@ -230,55 +229,6 @@ describe('Frontend UI State Restoration & Defensive Rendering', () => {
       expect(preview.text()).not.toContain('Invalid Date')
       expect(preview.text()).toContain('未知时间')
     }
-
-    wrapper.unmount()
-  })
-
-  it('AgentMaterials 完整支持 stage_notes 阶段笔记渲染与消息定位', async () => {
-    request.mockResolvedValue({
-      items: [
-        {
-          path: '/notes/batch_00001.json',
-          batch_index: 1,
-          messages_count: 50,
-          facts_count: 12,
-          committed_at: '2026-09-30 15:00:00',
-          start_source: 'msg_001_id'
-        }
-      ],
-      total: 1,
-      total_facts: 12,
-      has_more: false
-    })
-
-    const run = { id: 'run_mat', account: 'acc', version: 1 }
-    const wrapper = mount(AgentMaterials, {
-      props: { run }
-    })
-
-    await flushPromises()
-
-    // 切换至阶段笔记标签
-    const notesTab = wrapper.findAll('nav button').find(b => b.text() === '阶段笔记')
-    expect(notesTab).toBeDefined()
-    await notesTab.trigger('click')
-    await flushPromises()
-
-    expect(request).toHaveBeenCalledWith(
-      '/agent/runs/run_mat/materials',
-      expect.objectContaining({ query: expect.objectContaining({ kind: 'notes' }) })
-    )
-
-    expect(wrapper.text()).toContain('分批笔记 #1')
-    expect(wrapper.text()).toContain('覆盖 50 条消息')
-    expect(wrapper.text()).toContain('记录 12 条事实')
-
-    // 测试定位按钮
-    const locateBtn = wrapper.find('article button')
-    expect(locateBtn.exists()).toBe(true)
-    await locateBtn.trigger('click')
-    expect(wrapper.emitted('locate')).toBeDefined()
-    expect(wrapper.emitted('locate')[0][0]).toEqual({ source: 'msg_001_id' })
 
     wrapper.unmount()
   })

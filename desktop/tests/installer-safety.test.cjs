@@ -17,6 +17,9 @@ const powershellPath = path.join(
   "v1.0",
   "powershell.exe"
 );
+const powershellEnv = Object.fromEntries(
+  Object.entries(process.env).filter(([name]) => name.toLowerCase() !== "psmodulepath")
+);
 
 function runInstallDirHelper(args) {
   return spawnSync(
@@ -29,13 +32,100 @@ function runInstallDirHelper(args) {
       installDirProbePath,
       ...args,
     ],
-    { encoding: "utf8", windowsHide: true }
+    { encoding: "utf8", windowsHide: true, env: powershellEnv }
   );
 }
 
 function runInstallDirProbe(installDir) {
   return runInstallDirHelper(["-Mode", "Validate", "-InstallDir", installDir]);
 }
+
+function makeRuntimeFixture(root) {
+  fs.mkdirSync(path.join(root, "resources", "backend"), { recursive: true });
+  fs.writeFileSync(path.join(root, "resources", "app.asar"), "fixture");
+  fs.writeFileSync(path.join(root, "resources", "backend", "wechat-backend.exe"), "fixture");
+}
+
+function readAccessRules(target) {
+  const result = spawnSync(powershellPath, ["-NoProfile", "-Command",
+    "@((Get-Acl -LiteralPath $env:WDA_ACL_TEST_PATH).GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object { " +
+    "[pscustomobject]@{sid=$_.IdentityReference.Value;rights=[int]$_.FileSystemRights;inherited=$_.IsInherited;inheritance=[int]$_.InheritanceFlags} }) | ConvertTo-Json -Compress"], {
+    encoding: "utf8", windowsHide: true, env: { ...powershellEnv, WDA_ACL_TEST_PATH: target },
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return JSON.parse(result.stdout);
+}
+
+test("installer prepares sandbox file access before recording output settings", () => {
+  const customInstall = installerScript.match(/!macro customInstall(?<body>[^]*?)!macroend/)?.groups?.body;
+  const grant = installerScript.match(/Function WDA_GrantRuntimeAccess(?<body>[^]*?)FunctionEnd/)?.groups?.body;
+  assert.match(customInstall, /Call WDA_GrantRuntimeAccess[^]*?Call WDA_WritePendingOutputDirSetting/);
+  assert.match(grant, /-Mode GrantRuntimeAccess -InstallDir "\$INSTDIR"/);
+  assert.match(grant, /PSModulePath/);
+  assert.match(grant, /\$0 != "0"[^]*?SetErrorLevel 2[^]*?Abort/);
+});
+
+test("runtime access grants inheritable read and execute to sandboxed app packages", { skip: process.platform !== "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-runtime-access-"));
+  const target = path.join(root, "安装-$folder-$(1+1)");
+  makeRuntimeFixture(target);
+  try {
+    const result = runInstallDirHelper(["-Mode", "GrantRuntimeAccess", "-InstallDir", target]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const grants = readAccessRules(target).filter(rule => rule.sid === "S-1-15-2-2");
+    assert.ok(grants.some(rule => !rule.inherited && rule.inheritance === 3 && (rule.rights & 0x200a9) === 0x200a9));
+    assert.ok(grants.every(rule => (rule.rights & (278 | 65536 | 262144 | 524288)) === 0));
+    const childRules = readAccessRules(path.join(target, "resources", "app.asar"));
+    assert.ok(childRules.some(rule => rule.sid === "S-1-15-2-2" && rule.inherited));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime access rejects filesystem roots and incomplete packages", { skip: process.platform !== "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-runtime-invalid-"));
+  try {
+    const filesystemRoot = runInstallDirHelper(["-Mode", "GrantRuntimeAccess", "-InstallDir", path.parse(root).root]);
+    assert.notEqual(filesystemRoot.status, 0);
+    assert.match(filesystemRoot.stderr, /filesystem root/);
+    const before = readAccessRules(root);
+    const incomplete = runInstallDirHelper(["-Mode", "GrantRuntimeAccess", "-InstallDir", root]);
+    assert.notEqual(incomplete.status, 0);
+    assert.match(incomplete.stderr, /Missing packaged runtime file/);
+    assert.deepEqual(readAccessRules(root), before);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime access rejects root and descendant junctions without granting their targets", { skip: process.platform !== "win32" }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-runtime-junction-"));
+  const target = path.join(root, "package");
+  const external = path.join(root, "user-data");
+  const rootLink = path.join(root, "package-link");
+  const childLink = path.join(target, "resources", "user-link");
+  makeRuntimeFixture(target);
+  fs.mkdirSync(external);
+  fs.writeFileSync(path.join(external, "keep.txt"), "private fixture");
+  const before = readAccessRules(external);
+  const packageBefore = readAccessRules(target);
+  try {
+    fs.symlinkSync(target, rootLink, "junction");
+    const linkedRoot = runInstallDirHelper(["-Mode", "GrantRuntimeAccess", "-InstallDir", rootLink]);
+    assert.notEqual(linkedRoot.status, 0);
+    assert.match(linkedRoot.stderr, /reparse point/);
+    fs.symlinkSync(external, childLink, "junction");
+    const linkedChild = runInstallDirHelper(["-Mode", "GrantRuntimeAccess", "-InstallDir", target]);
+    assert.notEqual(linkedChild.status, 0);
+    assert.match(linkedChild.stderr, /reparse point/);
+    assert.deepEqual(readAccessRules(external), before);
+    assert.deepEqual(readAccessRules(target), packageBefore);
+    assert.equal(fs.readFileSync(path.join(external, "keep.txt"), "utf8"), "private fixture");
+  } finally {
+    for (const link of [childLink, rootLink]) if (fs.existsSync(link)) fs.unlinkSync(link);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function createShortcut(shortcutPath, targetPath) {
   const quote = (value) => `'${value.replaceAll("'", "''")}'`;

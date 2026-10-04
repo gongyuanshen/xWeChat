@@ -9,7 +9,7 @@ const script = parse(source).descriptor.scriptSetup.content.replace(/^import .*$
 const settings = readFileSync(new URL('../lib/desktop-settings.js', import.meta.url), 'utf8')
   .replace(/^export /gm, '')
 
-const runStartup = async ({ stored = null, accounts = ['ready-account'], accepted = true, fails = false } = {}) => {
+const runStartup = async ({ stored = null, accounts = ['ready-account'], fails = false } = {}) => {
   let mounted
   let contextAvailable = true
   const paths = []
@@ -26,7 +26,6 @@ const runStartup = async ({ stored = null, accounts = ['ready-account'], accepte
     onMounted: callback => { mounted = callback },
     useRouter: getRouter,
     navigateTo: path => getRouter().replace(path),
-    isFirstUseAgreementAccepted: () => accepted,
     console: { warn: (...args) => warnings.push(args) },
     useApi: () => ({ listChatAccounts: async () => {
       await Promise.resolve()
@@ -40,14 +39,14 @@ const runStartup = async ({ stored = null, accounts = ['ready-account'], accepte
   return { paths, warnings }
 }
 
-test('默认开启时，账号请求结束后仍能跳转到回看页', async () => {
+test('没有本地设置时，账号请求结束后仍能直接跳转到回看页', async () => {
   const result = await runStartup()
   assert.deepEqual(result.paths, ['/chat'])
   assert.equal(result.warnings.length, 0)
 })
 
-test('手动关闭、没有账号或未同意协议时不自动跳转', async () => {
-  for (const options of [{ stored: 'false' }, { accounts: [] }, { accepted: false }]) {
+test('手动关闭或没有账号时不自动跳转', async () => {
+  for (const options of [{ stored: 'false' }, { accounts: [] }]) {
     assert.deepEqual((await runStartup(options)).paths, [])
   }
 })

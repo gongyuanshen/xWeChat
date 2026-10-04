@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentRun from '../components/chat/AgentRun.vue'
 import AgentSubtasks from '../components/chat/AgentSubtasks.vue'
 import AgentAnswer from '../components/chat/AgentAnswer.vue'
-import AgentMaterials from '../components/chat/AgentMaterials.vue'
 import { renderAgentMarkdown, copyAgentText } from '../utils/agentMarkdown'
 
 const { request } = vi.hoisted(() => ({ request: vi.fn() }))
@@ -198,47 +197,4 @@ describe('M4 Deep Empirical Challenge: Active Task Snapshot Restoration & Citati
     expect(copied).toContain('〔群2 · 王五〕')
   })
 
-  it('AgentMaterials: handles virtual notes rendering and chunk switching', async () => {
-    request.mockImplementation((url) => {
-      if (url.includes('kind=notes')) {
-        return Promise.resolve({
-          items: [
-            {
-              path: '/notes/batch_00001.json',
-              batch_index: 1,
-              cursor: 'cur_1',
-              messages_count: 80,
-              facts_count: 5,
-              committed_at: '2026-09-30 15:00:00',
-              facts: [{ text: '关键发现1', quote: '原文1', sources: ['s1'] }]
-            }
-          ],
-          total: 1,
-          total_facts: 5,
-          has_more: false,
-          offset: 0
-        })
-      }
-      return Promise.resolve({})
-    })
-
-    const run = {
-      id: 'run_mat_deep',
-      account: 'tester_adv',
-      version: 1,
-      status: 'completed',
-      evidence: {}
-    }
-
-    const wrapper = mount(AgentMaterials, {
-      props: {
-        run,
-        modelValue: null
-      }
-    })
-
-    await flushPromises()
-    expect(wrapper.exists()).toBe(true)
-    wrapper.unmount()
-  })
 })

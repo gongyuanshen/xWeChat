@@ -33,13 +33,13 @@ function resolveUnpackedRoot({
   return path.resolve(explicitArgument || explicitEnvironment || defaultPackageRoot);
 }
 
-function resolvePackagedRuntime(packageRoot = defaultPackageRoot) {
+function resolvePackagedRuntime(packageRoot = defaultPackageRoot, { config = packageConfig } = {}) {
   const root = path.resolve(packageRoot);
   const backendRoot = path.join(root, "resources", "backend");
   const nativeRoot = path.join(backendRoot, "native");
   const paths = {
     root,
-    application: path.join(root, "WeChatDataAnalysis.exe"),
+    application: path.join(root, `${config.build.win?.executableName ?? config.build.productName}.exe`),
     backend: path.join(backendRoot, "wechat-backend.exe"),
     client: path.join(nativeRoot, "wechatdb_client.dll"),
     broker: path.join(nativeRoot, "wechatdb_broker.exe"),

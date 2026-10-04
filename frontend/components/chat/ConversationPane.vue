@@ -2,7 +2,12 @@
   <div class="conversation-pane flex-1 flex flex-col min-h-0 min-w-0">
     <div v-if="selectedContact" class="flex-1 flex flex-col min-h-0 min-w-0 relative">
       <div class="chat-header" :class="{ 'chat-header-ai': aiSidebarOpen || insightsPanelOpen }">
-        <div class="flex min-w-0 items-center gap-3">
+        <div class="chat-header-identity">
+          <div class="chat-header-avatar" :class="{ 'privacy-blur': privacyMode }">
+            <img v-if="selectedContact.avatar" :src="selectedContact.avatar" alt="" referrerpolicy="no-referrer" @error="onAvatarError($event, selectedContact)">
+            <span v-else>{{ selectedContact.name.charAt(0) }}</span>
+          </div>
+          <div class="chat-header-heading">
           <h2 class="chat-header-title flex min-w-0 items-center gap-1.5 text-base font-medium">
             <span class="min-w-0 truncate" :class="{ 'privacy-blur': privacyMode }">{{ selectedContact.name }}</span>
             <span
@@ -18,11 +23,15 @@
               class="h-4 w-4 shrink-0"
             >
           </h2>
-          <span v-if="recognitionHeader" class="recognition-mood" :class="{ 'privacy-blur': privacyMode }" :title="recognitionHeader.detail">{{ recognitionHeader.title }}：{{ recognitionHeader.label }}</span>
+          <div class="chat-header-context">
+            <span class="chat-header-kind">{{ selectedContact.isGroup ? '群聊' : '聊天记录' }}</span>
+            <span v-if="recognitionHeader" class="recognition-mood" :class="{ 'privacy-blur': privacyMode }" :title="recognitionHeader.detail">{{ recognitionHeader.title }}：{{ recognitionHeader.label }}</span>
+          </div>
+          </div>
           <button
             v-if="groupAnnouncement"
             type="button"
-            class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[#07C160] hover:bg-[#07C160]/10"
+            class="chat-announcement-btn inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium"
             aria-haspopup="dialog"
             title="查看群公告"
             @click="openGroupAnnouncement"
@@ -34,9 +43,15 @@
             <span>群公告</span>
           </button>
         </div>
-        <div class="ml-auto flex shrink-0 items-center gap-2">
-          <button type="button" class="header-btn-icon" :class="{ 'header-btn-icon-active': aiSidebarOpen }" aria-label="AI 助手" title="AI 助手" :aria-pressed="aiSidebarOpen" @click="toggleAiSidebar">AI</button>
-          <button type="button" class="header-btn-icon w-auto whitespace-nowrap px-2" :class="{ 'header-btn-icon-active': insightsPanelOpen }" aria-label="聊天画像" title="聊天画像" :aria-pressed="insightsPanelOpen" @click="state.toggleInsightsPanel">画像</button>
+        <div class="chat-header-tools" aria-label="聊天工具">
+          <button type="button" class="header-btn-icon header-ai-button" :class="{ 'header-btn-icon-active': aiSidebarOpen }" aria-label="AI 助手" title="AI 助手" :aria-pressed="aiSidebarOpen" @click="toggleAiSidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z" /></svg>
+            <span>AI</span>
+          </button>
+          <button type="button" class="header-btn-icon header-portrait-button w-auto whitespace-nowrap px-2" :class="{ 'header-btn-icon-active': insightsPanelOpen }" aria-label="聊天画像" title="聊天画像" :aria-pressed="insightsPanelOpen" @click="state.toggleInsightsPanel">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3" /><path d="M6 20v-2a6 6 0 0 1 12 0v2M4 4v4M2 6h4M20 3v4M18 5h4" /></svg>
+            <span>画像</span>
+          </button>
           <button
             type="button"
             class="header-btn-icon"
@@ -214,13 +229,35 @@ export default defineComponent({
 </script>
 
 <style scoped>
-.recognition-mood { color: var(--app-text-secondary, #75877c); font-size: 11px; max-width: 260px; overflow-wrap: anywhere; }
-.chat-header { height: auto; min-height: 56px; flex-wrap: wrap; gap: 8px; }
-.chat-header > div:last-child { flex-wrap: wrap; min-width: 0; max-width: 100%; }
-/* 侧栏打开后给工具栏单独一行，保留聊天内容空间，避免会话名被挤成竖排。 */
-@media (min-width: 1001px) and (max-width: 1440px) {
-  .chat-header-ai { height: auto; min-height: 56px; flex-shrink: 0; flex-wrap: wrap; gap: 4px; padding-top: 8px; padding-bottom: 8px; }
-  .chat-header-ai > div:first-child { width: 100%; }
-  .chat-header-ai > div:last-child { margin-left: 0; flex-wrap: wrap; }
+.conversation-pane { container-type: inline-size; }
+.chat-header { height: auto; min-height: 84px; flex-shrink: 0; flex-wrap: wrap; gap: 14px; padding: 16px 24px; }
+.chat-header-identity { display: flex; flex: 1 1 220px; align-items: center; gap: 12px; min-width: 0; }
+.chat-header-avatar { display: flex; flex: 0 0 42px; width: 42px; height: 42px; align-items: center; justify-content: center; overflow: hidden; border-radius: 14px; background: var(--chat-subtle-bg); color: var(--chat-accent); font-size: 17px; font-weight: 600; }
+.chat-header-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.chat-header-heading { flex: 1; min-width: 0; }
+.chat-header-title { font-size: 18px; font-weight: 650; line-height: 1.5; }
+.chat-header-context { display: flex; align-items: baseline; flex-wrap: wrap; gap: 3px 9px; margin-top: 3px; color: var(--app-text-secondary); font-size: 11px; line-height: 1.5; }
+.chat-header-kind { flex-shrink: 0; }
+.recognition-mood { min-width: 0; max-width: 320px; overflow-wrap: anywhere; }
+.chat-announcement-btn { flex-shrink: 0; color: var(--chat-accent); }
+.chat-announcement-btn:hover { background: var(--chat-subtle-bg); }
+.chat-header-tools { display: flex; align-items: center; gap: 3px; min-width: 0; max-width: 100%; margin-left: auto; padding: 3px; }
+.header-btn-icon { flex-shrink: 0; width: 32px; height: 34px; border-radius: 10px; }
+.header-btn-icon svg { width: 17px; height: 17px; }
+.header-btn-icon:hover:not(:disabled), .header-btn-icon-active { background: var(--chat-subtle-bg); color: var(--chat-accent); }
+.header-ai-button, .header-portrait-button { width: auto; gap: 5px; padding: 0 9px; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.header-ai-button { color: var(--chat-ai-text); background: var(--chat-ai-bg); margin-right: 3px; }
+.message-filter-select { flex-shrink: 0; max-width: 112px; height: 34px; color: var(--app-text-secondary); background: var(--chat-subtle-bg); border-radius: 10px; }
+.header-btn-icon:focus-visible, .message-filter-select:focus-visible, .chat-announcement-btn:focus-visible { outline: 2px solid var(--chat-focus-ring); outline-offset: 2px; }
+@container (max-width: 840px) {
+  .chat-header { gap: 8px; padding: 14px 20px 10px; }
+  .chat-header-identity { flex-basis: 100%; }
+  .chat-header-tools { width: 100%; margin-left: 0; overflow-x: auto; scrollbar-width: thin; }
+}
+@container (max-width: 480px) {
+  .chat-header { padding-right: 14px; padding-left: 14px; }
+  .chat-header-avatar { flex-basis: 36px; width: 36px; height: 36px; border-radius: 12px; }
+  .chat-header-title { font-size: 15px; }
+  .chat-announcement-btn { padding-right: 0; }
 }
 </style>

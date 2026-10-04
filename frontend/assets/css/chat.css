@@ -48,7 +48,88 @@
 
 /* Browser layout units are already device-independent CSS pixels. */
 .session-list-panel {
-  width: var(--session-list-width, 264px);
+  width: var(--session-list-width, 300px);
+}
+
+/* 聊天阅读区：保留消息类型与定位行为，只统一空间和表面。 */
+.conversation-pane {
+  container-type: inline-size;
+  container-name: conversation;
+  color: var(--chat-bubble-received-text);
+}
+
+.message-list {
+  padding: 22px 26px 12px;
+  scrollbar-gutter: stable;
+}
+
+.message-row {
+  margin-bottom: 22px;
+}
+
+.message-row-body {
+  max-width: min(82%, 740px);
+  min-width: 0;
+}
+
+.message-content-column {
+  min-width: 0;
+}
+
+.message-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+}
+
+.message-sender-name {
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.message-time-divider {
+  max-width: 100%;
+  padding: 4px 12px;
+  border-radius: 12px;
+  background: var(--chat-subtle-bg);
+  overflow-wrap: anywhere;
+}
+
+.message-list .msg-bubble {
+  padding: 10px 14px;
+  font-size: 15px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.message-list .msg-bubble.bubble-tail-l {
+  box-shadow: 0 1px 2px rgba(30, 65, 45, 0.06);
+}
+
+.conversation-pane ::selection,
+.session-list-panel ::selection {
+  background: var(--session-list-item-selected);
+  color: var(--session-list-name);
+}
+
+.conversation-pane :is(button, summary, select, a):focus-visible,
+.session-list-panel :is(button, input, a):focus-visible {
+  outline: 2px solid var(--chat-focus-ring);
+  outline-offset: 3px;
+}
+
+@container conversation (max-width: 600px) {
+  .message-list { padding: 16px 14px 8px; }
+  .message-row-body { max-width: 94%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-pane *,
+  .session-list-panel *,
+  .sidebar-rail * {
+    transition: none !important;
+    animation: none !important;
+  }
 }
 
 /* 会话列表拖动条（中间栏右侧） */

@@ -96,10 +96,12 @@ const cells = reactive(
 
 let staggerTimers = []
 let settleToken = 0
+let pendingUpdate = false
 
 const clearStagger = () => {
   for (const t of staggerTimers) clearTimeout(t)
   staggerTimers = []
+  settleToken += 1
 }
 
 const clearAllTimers = () => {
@@ -148,33 +150,37 @@ const applyInstant = (chars) => {
 
 // 高速滚动：所有格子同拍快翻（pending 合并中途换字）
 const applySpin = (chars) => {
+  clearStagger()
   chars.forEach((ch, i) => flipCell(i, ch, props.spinMs))
 }
 
 // 落定：从左到右逐格错峰翻到目标字，最后一格落稳后 emit settled
 const applySettle = (chars) => {
   clearStagger()
-  settleToken += 1
   const token = settleToken
   chars.forEach((ch, i) => {
     staggerTimers.push(setTimeout(() => flipCell(i, ch, props.flipMs), i * props.staggerMs))
   })
   const total = (chars.length - 1) * props.staggerMs + props.flipMs + 60
   staggerTimers.push(setTimeout(() => {
-    if (token === settleToken) emit('settled')
+    if (token === settleToken) {
+      pendingUpdate = false
+      emit('settled')
+    }
   }, total))
 }
 
 const apply = () => {
   const chars = padChars(props.text)
-  if (props.reduced) {
+  if (props.paused) {
+    // 离页即取消翻板和落定回调；最新目标留到重新激活时完成通知。
     applyInstant(chars)
-    emit('settled')
     return
   }
-  if (props.paused) {
-    // 深藏后台时不再起新翻动，直接落到目标字，避免恢复时错乱
+  if (props.reduced) {
     applyInstant(chars)
+    pendingUpdate = false
+    emit('settled')
     return
   }
   if (props.spinning) {
@@ -184,7 +190,15 @@ const apply = () => {
   }
 }
 
-watch(() => [props.text, props.spinning], apply)
+watch(() => [props.text, props.spinning, props.reduced], () => {
+  pendingUpdate = true
+  apply()
+})
+
+watch(() => props.paused, (paused) => {
+  if (paused) applyInstant(padChars(props.text))
+  else if (pendingUpdate) apply()
+})
 
 onBeforeUnmount(clearAllTimers)
 </script>

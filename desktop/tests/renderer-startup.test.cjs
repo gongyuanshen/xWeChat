@@ -5,9 +5,9 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { loadWithRedirect, isInternalRedirect, resolveDesktopUiUrl } = require('../src/renderer-startup.cjs');
 
-test('首次使用页跳转完成后不重新加载首页', async () => {
+test('聊天页跳转完成后不重新加载首页', async () => {
   const contents = new EventEmitter();
-  contents.getURL = () => 'http://127.0.0.1:3000/agreement?redirect=/';
+  contents.getURL = () => 'http://127.0.0.1:3000/chat';
   let calls = 0;
   const win = { webContents: contents, loadURL: async () => {
     calls++;
@@ -21,7 +21,7 @@ test('首次使用页跳转完成后不重新加载首页', async () => {
 
 test('跳转先完成后收到中止事件也视为成功', async () => {
   const contents = new EventEmitter();
-  contents.getURL = () => 'http://localhost:3000/agreement';
+  contents.getURL = () => 'http://localhost:3000/chat';
   await loadWithRedirect({ webContents: contents, loadURL: async () => {
     contents.emit('did-finish-load');
     throw Object.assign(new Error('aborted'), { errno: -3 });
@@ -29,7 +29,7 @@ test('跳转先完成后收到中止事件也视为成功', async () => {
 });
 
 test('未完成、跨源和连接错误不会伪装成加载成功', async () => {
-  for (const destination of ['http://localhost:3000/', 'https://example.com/agreement']) {
+  for (const destination of ['http://localhost:3000/', 'https://example.com/chat']) {
     const contents = new EventEmitter();
     contents.getURL = () => destination;
     await assert.rejects(loadWithRedirect({ webContents: contents, loadURL: async () => {
@@ -46,7 +46,7 @@ test('未完成、跨源和连接错误不会伪装成加载成功', async () =>
 
 test('打包页面只接受同一目录内的跳转', () => {
   const url = file => pathToFileURL(path.resolve('app', file)).href;
-  assert.equal(isInternalRedirect(url('ui/index.html'), url('ui/agreement/index.html')), true);
+  assert.equal(isInternalRedirect(url('ui/index.html'), url('ui/chat/index.html')), true);
   assert.equal(isInternalRedirect(url('ui/index.html'), url('secret.html')), false);
   assert.equal(isInternalRedirect(url('ui/index.html'), 'about:blank'), false);
 });
@@ -67,9 +67,9 @@ test('开发页面一直不响应时，在期限内中止加载并释放监听�
   assert.equal(contents.listenerCount('did-finish-load'), 0);
 });
 
-test('总期限包含未完成的首次使用页跳转，停止事件不能伪装为成功', async () => {
+test('总期限包含未完成的聊天页跳转，停止事件不能伪装为成功', async () => {
   const contents = new EventEmitter();
-  contents.getURL = () => 'http://localhost:3000/agreement';
+  contents.getURL = () => 'http://localhost:3000/chat';
   contents.stop = () => contents.emit('did-finish-load');
   await assert.rejects(loadWithRedirect({ webContents: contents, loadURL: async () => {
     throw Object.assign(new Error('aborted'), { code: 'ERR_ABORTED' });

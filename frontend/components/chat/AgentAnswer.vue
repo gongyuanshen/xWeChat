@@ -21,7 +21,7 @@
   </div>
 </template>
 <script setup>
-import { computed, inject, nextTick, onBeforeUnmount, ref, unref, useId, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onDeactivated, ref, unref, useId, watch } from 'vue'
 import { renderAgentMarkdown, referenceUrl } from '~/utils/agentMarkdown'
 import { useApiBase } from '~/composables/useApiBase'
 import { Check, ExternalLink, LoaderCircle, X } from '@lucide/vue'
@@ -265,5 +265,7 @@ watch(() => props.text, async () => {
   trigger = answer.value?.querySelector(key ? `button[data-source="${key}"]` : `button[data-person="${person}"]`)
   if (!trigger) closePreview(); else { trigger.setAttribute('aria-expanded', 'true'); trigger.setAttribute('aria-controls', previewId); positionPreview() }
 })
-onBeforeUnmount(() => { closePreview(); closePersonProfile(); stopPersonProfilePositioning() })
+const closeTransientViews = () => { closePreview(); closePersonProfile(); stopPersonProfilePositioning(); selectedImage.value = null }
+onDeactivated(closeTransientViews)
+onBeforeUnmount(closeTransientViews)
 </script>

@@ -15,7 +15,8 @@
       <!-- 聊天列表 -->
       <div class="h-full flex flex-col min-h-0">
         <!-- 搜索栏 -->
-        <div class="session-list-search p-2.5 border-b">
+        <div class="session-list-search px-4 pt-5 pb-3">
+          <h2 class="session-list-heading mb-4 text-[22px] font-semibold tracking-tight">聊天</h2>
           <div class="flex items-center gap-2">
             <div ref="searchInputWrapperRef" class="contact-search-wrapper flex-1">
               <svg class="contact-search-icon" fill="none" stroke="currentColor" viewBox="0 0 16 16">
@@ -25,6 +26,7 @@
               <input
                 type="text"
                 placeholder="搜索联系人"
+                aria-label="搜索联系人"
                 v-model="searchQuery"
                 class="contact-search-input"
                 :class="{ 'privacy-blur': privacyMode }"
@@ -35,6 +37,7 @@
                 v-if="searchQuery"
                 type="button"
                 class="contact-search-clear"
+                aria-label="清除搜索"
                 @click="searchQuery = ''"
               >
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -48,6 +51,7 @@
               v-model="selectedAccount"
               @change="onAccountChange"
               class="account-select"
+              aria-label="切换账号"
             >
               <option v-if="!availableAccounts.length" disabled value="">{{ chatAccounts.loading ? '加载中...' : (chatAccounts.error || '无账号') }}</option>
               <option v-for="acc in availableAccounts" :key="acc" :value="acc">{{ acc }}</option>
@@ -56,10 +60,10 @@
         </div>
 
         <!-- 联系人列表 -->
-        <div class="session-list-scroll flex-1 overflow-y-auto min-h-0">
+        <div class="session-list-scroll flex-1 overflow-y-auto min-h-0 px-2">
           <div v-if="isLoadingContacts" class="px-3 py-4 h-full overflow-hidden">
-            <div v-for="i in 15" :key="i" class="flex h-[56px] items-center gap-2.5">
-              <div class="h-9 w-9 shrink-0 rounded-md bg-gray-200 skeleton-pulse"></div>
+            <div v-for="i in 15" :key="i" class="flex h-[64px] items-center gap-3">
+              <div class="h-10 w-10 shrink-0 rounded-[13px] bg-gray-200 skeleton-pulse"></div>
               <div class="flex-1 space-y-2">
                 <div class="h-3.5 bg-gray-200 rounded skeleton-pulse" :style="{ width: (60 + (i % 4) * 15) + 'px' }"></div>
                 <div class="h-3 bg-gray-200 rounded skeleton-pulse" :style="{ width: (80 + (i % 3) * 20) + 'px' }"></div>
@@ -72,16 +76,22 @@
           </div>
           <div v-else class="pb-4">
             <div v-for="contact in filteredContacts" :key="contact.id"
-              class="session-list-item flex h-[56px] cursor-pointer items-center px-3 transition-colors duration-150"
+              class="session-list-item mb-1 flex h-[64px] cursor-pointer items-center rounded-[14px] px-3 transition-colors duration-150"
+              role="button"
+              tabindex="0"
+              :aria-label="contact.name"
+              :aria-current="selectedContact?.id === contact.id ? 'true' : undefined"
               :class="{
                 'session-list-item--top': contact.isTop,
                 'session-list-item--selected': selectedContact?.id === contact.id
               }"
-              @click="selectContact(contact)">
-              <div class="flex w-full min-w-0 items-center gap-2.5">
+              @click="selectContact(contact)"
+              @keydown.enter.prevent="selectContact(contact)"
+              @keydown.space.prevent="selectContact(contact)">
+              <div class="flex w-full min-w-0 items-center gap-3">
                 <!-- 联系人头像 -->
                 <div class="relative flex-shrink-0" :class="{ 'privacy-blur': privacyMode }">
-                  <div class="session-list-avatar h-9 w-9 overflow-hidden rounded-md bg-gray-300">
+                  <div class="session-list-avatar h-10 w-10 overflow-hidden rounded-[13px] bg-gray-300">
                     <div v-if="contact.avatar" class="w-full h-full">
                       <img :src="contact.avatar" :alt="contact.name" class="w-full h-full object-cover" loading="lazy" referrerpolicy="no-referrer" @error="onAvatarError($event, contact)">
                     </div>
@@ -119,7 +129,7 @@
                       :title="contact.lastMessageTime"
                     >{{ formatSessionListTime(contact.lastMessageTime) }}</span>
                   </div>
-                  <p class="session-list-item-preview mt-0.5 truncate text-[12px] leading-5" :class="{ 'privacy-blur': privacyMode }">
+                  <p class="session-list-item-preview mt-1 truncate text-[12px] leading-5" :class="{ 'privacy-blur': privacyMode }">
                     <span
                       v-for="(seg, idx) in parseTextWithEmoji(
                         (contact.unreadCount > 0 ? `[${contact.unreadCount > 99 ? '99+' : contact.unreadCount}条] ` : '') +
@@ -234,7 +244,7 @@
 </template>
 
 <script>
-import { computed, defineComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useApi } from '~/composables/useApi'
 import { formatSessionListTime } from '~/lib/chat/formatters'
 
@@ -550,19 +560,25 @@ export default defineComponent({
       updateGeneralSearchPanelPosition()
     }
 
-    onMounted(() => {
+    const bindPanelPositioning = () => {
       if (typeof window === 'undefined') return
       window.addEventListener('resize', onWindowResize)
       window.addEventListener('scroll', onWindowResize, true)
-    })
+    }
 
-    onBeforeUnmount(() => {
+    const suspendSearchPanel = () => {
       if (closePanelTimer) clearTimeout(closePanelTimer)
+      closePanelTimer = null
+      generalSearchPanelOpen.value = false
       if (typeof window !== 'undefined') {
         window.removeEventListener('resize', onWindowResize)
         window.removeEventListener('scroll', onWindowResize, true)
       }
-    })
+    }
+    onMounted(bindPanelPositioning)
+    onActivated(bindPanelPositioning)
+    onDeactivated(suspendSearchPanel)
+    onBeforeUnmount(suspendSearchPanel)
 
     return {
       ...props.state,
@@ -594,3 +610,38 @@ export default defineComponent({
   }
 })
 </script>
+
+<style scoped>
+.session-list-heading {
+  color: var(--session-list-name);
+}
+
+.contact-search-wrapper {
+  min-width: 0;
+  height: 38px;
+  border-radius: 12px;
+}
+
+.contact-search-input {
+  height: 38px;
+  font-size: 13px;
+  background: transparent;
+}
+
+.session-list-item {
+  border-bottom: 0;
+}
+
+.session-list-item-name {
+  font-weight: 500;
+}
+
+.session-list-item--selected .session-list-item-name {
+  font-weight: 600;
+}
+
+.session-list-item:focus-visible {
+  outline: 2px solid var(--session-list-resizer);
+  outline-offset: -2px;
+}
+</style>

@@ -2,13 +2,14 @@
   <div
     class="sidebar-rail theme-scope border-r flex flex-col"
   >
-    <div class="flex-1 flex flex-col justify-start pt-0 gap-0">
+    <div class="sidebar-rail-content flex-1 flex flex-col justify-start gap-0">
       <!-- Avatar -->
-      <div class="w-full h-[52px] flex items-center justify-center">
+      <div class="sidebar-account w-full h-[72px] shrink-0 flex items-center justify-center">
         <button
           type="button"
-          class="group relative w-[34px] h-[34px] rounded-md overflow-hidden bg-gray-300 flex-shrink-0 ring-1 ring-transparent transition hover:ring-[#07b75b]/40"
+          class="sidebar-account-button group relative w-10 h-10 rounded-[14px] overflow-hidden bg-gray-300 flex-shrink-0 ring-1 ring-white/20 transition hover:ring-white/60"
           :title="avatarButtonTitle"
+          :aria-label="avatarButtonTitle"
           @click="openAccountDialog"
         >
           <img
@@ -29,28 +30,32 @@
       </div>
 
       <!-- Chat -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="聊天"
         @click="goChat"
+        aria-label="聊天"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isChatRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isChatRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isChatRoute }">
             <svg class="w-full h-full" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
               <path d="M12 19.8C17.52 19.8 22 15.99 22 11.3C22 6.6 17.52 2.8 12 2.8C6.48 2.8 2 6.6 2 11.3C2 13.29 2.8 15.12 4.15 16.57C4.6 17.05 4.82 17.29 4.92 17.44C5.14 17.79 5.21 17.99 5.23 18.4C5.24 18.59 5.22 18.81 5.16 19.26C5.1 19.75 5.07 19.99 5.13 20.16C5.23 20.49 5.53 20.71 5.87 20.72C6.04 20.72 6.27 20.63 6.72 20.43L8.07 19.86C8.43 19.71 8.61 19.63 8.77 19.59C8.95 19.55 9.04 19.54 9.22 19.54C9.39 19.53 9.64 19.57 10.14 19.65C10.74 19.75 11.37 19.8 12 19.8Z" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Moments -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="朋友圈"
         @click="goSns"
+        aria-label="朋友圈"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isSnsRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isSnsRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isSnsRoute }">
             <svg
               class="w-full h-full"
               viewBox="0 0 24 24"
@@ -69,115 +74,129 @@
               <line x1="14.31" y1="16" x2="2.83" y2="16" />
               <line x1="16.62" y1="12" x2="10.88" y2="21.94" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
 
 
       <!-- Favorites -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="收藏"
         @click="goFavorites"
+        aria-label="收藏"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isFavoritesRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isFavoritesRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isFavoritesRoute }">
             <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M6.5 4.5A2.5 2.5 0 0 1 9 2h6a2.5 2.5 0 0 1 2.5 2.5V21L12 17.5 6.5 21V4.5Z" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Contacts -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="联系人"
         @click="goContacts"
+        aria-label="联系人"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isContactsRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isContactsRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isContactsRoute }">
             <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M17 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2" />
               <circle cx="10" cy="7" r="4" />
               <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
               <path d="M16 3.13a4 4 0 0 1 0 7.75" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
-      <div
-          class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
-          title="服务号"
-          @click="goBiz"
+      <button
+        type="button"
+        class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
+        title="服务号"
+        @click="goBiz"
+        aria-label="服务号"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isBizRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isBizRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isBizRoute }">
             <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M11 5L6 9H2v6h4l5 4V5z"></path>
               <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path>
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Mini Programs -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="小程序"
         @click="goMiniPrograms"
+        aria-label="小程序"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon sidebar-rail-icon-mini-program w-[18px] h-[18px]" :class="{ 'sidebar-rail-icon-active': isMiniProgramsRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isMiniProgramsRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon sidebar-rail-icon-mini-program w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isMiniProgramsRoute }">
             <svg class="w-full h-full" viewBox="0 0 1025 1024" fill="currentColor" aria-hidden="true">
               <path d="M740.672 37.504c156.352 0 283.52 115.584 283.52 258.496 0 44.416-13.056 87.872-36.608 127.04-35.648 57.216-92.672 99.584-161.664 119.744a161.408 161.408 0 0 1-45.184 7.36 52.8 52.8 0 0 1-53.76-52.928c0-29.76 23.68-52.864 53.76-52.864 2.112 0 6.528 0 11.904-2.048 46.336-12.8 82.944-39.168 103.424-74.24 13.952-22.144 20.48-46.72 20.48-72.064 0-83.84-78.72-152.512-174.72-152.512a197.76 197.76 0 0 0-94.72 24.32c-50.816 28.544-80.896 76.16-80.896 128.192v443.904c0 89.984-50.752 172.672-134.848 219.328-45.184 25.408-96 38.272-147.712 38.272-156.288 0-283.52-115.648-283.52-258.56 0-44.352 13.12-87.872 36.608-127.04 35.648-57.216 92.736-99.584 161.664-119.68 19.328-5.312 32.384-7.36 45.184-7.36 30.272 0 53.824 23.36 53.824 52.864a52.8 52.8 0 0 1-53.76 52.928c-2.176 0-6.592 0-11.904 2.048-46.4 13.76-82.944 40.32-103.424 74.176-14.016 22.208-20.48 46.72-20.48 72.128 0 83.84 78.72 152.448 175.616 152.448a197.76 197.76 0 0 0 94.784-24.256c50.752-28.608 80.832-76.224 80.832-128.192V296.192c0-89.984 50.752-172.608 134.848-219.328a283.52 283.52 0 0 1 146.752-39.36z" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Finder / Live -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="视频号 / 直播"
         @click="goFinder"
+        aria-label="视频号 / 直播"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isFinderRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isFinderRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isFinderRoute }">
             <svg class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <rect x="3" y="5" width="14" height="14" rx="2" />
               <path d="M17 9l4-2v10l-4-2" />
               <path d="M8.5 9.2v5.6L13 12l-4.5-2.8Z" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Payments -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="转账 / 红包"
         @click="goPayments"
+        aria-label="转账 / 红包"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[16px] h-[16px]" :class="{ 'sidebar-rail-icon-active': isPaymentsRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isPaymentsRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isPaymentsRoute }">
             <svg class="w-full h-full" viewBox="0 0 1109 1024" fill="currentColor" aria-hidden="true">
               <path d="M391.183105 392.073178H42.628017a18.472141 18.472141 0 0 1-14.209339-30.976359l330.651321-355.233477a18.472141 18.472141 0 0 1 31.971013 12.646311v227.349426a18.472141 18.472141 0 0 0 18.472141 18.330047H1089.856308a18.614234 18.614234 0 0 1 18.472141 18.472141v90.93977a18.472141 18.472141 0 0 1-18.472141 18.472141H391.183105z m325.962239 239.853644H1065.700432a18.472141 18.472141 0 0 1 14.209339 30.976359l-330.367134 355.233477a18.472141 18.472141 0 0 1-31.971013-12.646311V778.851388a18.472141 18.472141 0 0 0-18.472141-18.472141H18.472141a18.472141 18.472141 0 0 1-18.472141-18.472141v-91.650237a18.472141 18.472141 0 0 1 18.472141-18.47214h698.673203z" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Wrapped -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="年度总结"
         @click="goWrapped"
+        aria-label="年度总结"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isWrappedRoute }">
+        <span :class="{ 'sidebar-rail-plate-active': isWrappedRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isWrappedRoute }">
             <svg
               class="w-full h-full"
               viewBox="0 0 24 24"
@@ -194,19 +213,21 @@
               <path d="M4 9h16" />
               <path d="M8.5 15l2-2 1.5 1.5 3-3" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Export -->
-      <div
+      <button
+        type="button"
         v-if="showGlobalExportEntry"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         title="导出"
         @click="openExportDialog"
+        aria-label="导出"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
-          <div class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': exportDialogOpen }">
+        <span :class="{ 'sidebar-rail-plate-active': exportDialogOpen }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': exportDialogOpen }">
             <svg
               class="w-full h-full"
               viewBox="0 0 24 24"
@@ -221,32 +242,38 @@
               <path d="M7.5 10.5L12 15l4.5-4.5" />
               <path d="M4 19h16" />
             </svg>
-          </div>
-        </div>
-      </div>
+          </span>
+        </span>
+      </button>
 
       <!-- Privacy -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         @click="privacyStore.toggle"
+        :aria-pressed="privacyMode"
         :title="privacyMode ? '关闭隐私模式' : '开启隐私模式'"
+        :aria-label="privacyMode ? '关闭隐私模式' : '开启隐私模式'"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
+        <span :class="{ 'sidebar-rail-plate-active': privacyMode }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
           <svg class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': privacyMode }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
             <path v-if="privacyMode" stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L9.88 9.88" />
             <path v-else stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178z" />
             <circle v-if="!privacyMode" cx="12" cy="12" r="3" />
           </svg>
-        </div>
-      </div>
+        </span>
+      </button>
 
       <!-- Theme -->
-      <div
+      <button
+        type="button"
         class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
         :title="themeToggleTitle"
         @click="themeStore.toggle"
+        :aria-pressed="themeStore.isDark"
+        :aria-label="themeToggleTitle"
       >
-        <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
+        <span :class="{ 'sidebar-rail-plate-active': themeStore.isDark }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
           <svg
             v-if="themeStore.isDark"
             class="sidebar-rail-icon sidebar-rail-icon-active w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]"
@@ -274,32 +301,36 @@
           >
             <path d="M21 12.79A9 9 0 1 1 11.21 3c-.08.5-.12 1.01-.12 1.54a8.25 8.25 0 0 0 8.37 8.25c.52 0 1.03-.04 1.54-.12Z" />
           </svg>
-        </div>
-      </div>
+        </span>
+      </button>
 
-      <div class="mt-auto">
+      <div class="mt-auto pt-3 pb-3">
         <!-- Guide -->
-        <div
+        <button
+          type="button"
           class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
           title="引导页"
           @click="goGuide"
+          aria-label="引导页"
         >
-          <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
+          <span class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
             <svg class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M3 10.5L12 3l9 7.5" />
               <path d="M5 9.5V20h14V9.5" />
               <path d="M10 20v-6h4v6" />
             </svg>
-          </div>
-        </div>
+          </span>
+        </button>
 
         <!-- Settings -->
-        <div
+        <button
+          type="button"
           class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
           @click="goSettings"
           title="设置"
+          aria-label="设置"
         >
-          <div class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-md flex items-center justify-center transition-colors bg-transparent">
+          <span :class="{ 'sidebar-rail-plate-active': settingsDialogOpen }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
             <svg class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': settingsDialogOpen }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path
                 stroke-linecap="round"
@@ -308,8 +339,8 @@
               />
               <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
-          </div>
-        </div>
+          </span>
+        </button>
       </div>
     </div>
   </div>
@@ -823,9 +854,9 @@ const deleteCurrentAccountData = async () => {
 
 <style scoped>
 .sidebar-rail {
-  width: 52px;
-  min-width: 52px;
-  max-width: 52px;
+  width: var(--sidebar-rail-width, 68px);
+  min-width: var(--sidebar-rail-width, 68px);
+  max-width: var(--sidebar-rail-width, 68px);
   background-color: var(--sidebar-rail-bg);
   border-color: var(--sidebar-rail-border);
   overflow-y: auto;
@@ -836,13 +867,42 @@ const deleteCurrentAccountData = async () => {
   display: none;
 }
 
+.sidebar-rail-content {
+  min-height: 100%;
+}
+
+.sidebar-account {
+  margin-bottom: 8px;
+}
+
+.sidebar-rail-action {
+  flex-shrink: 0;
+}
+
 .sidebar-rail-plate {
-  transition: background-color 0.15s ease;
+  transition: background-color 0.15s ease, transform 0.15s ease;
 }
 
 .sidebar-rail-action:hover .sidebar-rail-plate {
   background-color: var(--sidebar-rail-hover);
 }
+
+.sidebar-rail-action:active .sidebar-rail-plate {
+  transform: scale(0.95);
+}
+
+.sidebar-rail-action .sidebar-rail-plate-active,
+.sidebar-rail-action:hover .sidebar-rail-plate-active {
+  background-color: var(--sidebar-rail-active-bg);
+}
+
+.sidebar-rail-action:focus-visible,
+.sidebar-account-button:focus-visible {
+  outline: 2px solid var(--sidebar-rail-icon-color);
+  outline-offset: -3px;
+  border-radius: 14px;
+}
+
 .sidebar-rail-icon {
   color: var(--sidebar-rail-icon-color);
   transition: color 0.15s ease;
@@ -850,5 +910,12 @@ const deleteCurrentAccountData = async () => {
 
 .sidebar-rail-icon-active {
   color: var(--sidebar-rail-icon-active-color);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-rail-plate,
+  .sidebar-rail-icon {
+    transition: none;
+  }
 }
 </style>

@@ -35,7 +35,7 @@
   </nav>
 </template>
 <script setup>
-import { computed, getCurrentInstance, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import AgentAvatar from './AgentAvatar.vue'
 import { Ellipsis, LoaderCircle, MessageCircleMore, RotateCw, Search, SlidersHorizontal, SquarePen, Trash2 } from '@lucide/vue'
 const props = defineProps({ items: { type: Array, default: () => [] }, current: String, runningIds: { type: Array, default: () => [] }, loading: Boolean, busy: Boolean, error: String, nameFor: { type: Function, default: value => value }, avatarFor: { type: Function, default: () => '' } })
@@ -127,4 +127,5 @@ watch(() => props.busy, (busy, wasBusy) => { if (wasBusy && !busy && !props.erro
 watch(() => props.current, () => closeMenu())
 watch(selected, item => { if (menu.value && !item) closeMenu() })
 onBeforeUnmount(() => closeMenu())
+onDeactivated(() => closeMenu())
 </script>

@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Validate', 'RemoveGhostShortcuts')]
+    [ValidateSet('Validate', 'RemoveGhostShortcuts', 'GrantRuntimeAccess')]
     [string] $Mode,
     [Parameter(Mandatory = $true)]
     [string] $InstallDir,
@@ -110,6 +110,51 @@ function Test-InstallDirectory {
     }
 }
 
+function Grant-RuntimeAccess {
+    $targetPath = ConvertTo-NormalizedFullPath $InstallDir
+    if ([string]::IsNullOrWhiteSpace($targetPath)) {
+        throw 'InstallDir is required'
+    }
+    $rootPath = [System.IO.Path]::GetPathRoot($targetPath)
+    if ([string]::Equals($targetPath, $rootPath, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Runtime access cannot be granted to a filesystem root'
+    }
+    $root = New-Object System.IO.DirectoryInfo($targetPath)
+    if (-not $root.Exists) {
+        throw "Install directory does not exist: $targetPath"
+    }
+    if ($root.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Runtime directory contains a reparse point: $targetPath"
+    }
+
+    # Inspect each directory before entering it, so a legacy output junction
+    # cannot expose user data through inherited application-package permissions.
+    $pending = New-Object 'System.Collections.Generic.Queue[System.IO.DirectoryInfo]'
+    $pending.Enqueue($root)
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        foreach ($entry in $directory.EnumerateFileSystemInfos()) {
+            if ($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+                throw "Runtime directory contains a reparse point: $($entry.FullName)"
+            }
+            if ($entry.Attributes -band [System.IO.FileAttributes]::Directory) {
+                $pending.Enqueue($entry)
+            }
+        }
+    }
+    foreach ($relativePath in @('resources\app.asar', 'resources\backend\wechat-backend.exe')) {
+        if (-not [System.IO.File]::Exists((Join-Path $targetPath $relativePath))) {
+            throw "Missing packaged runtime file: $relativePath"
+        }
+    }
+
+    $icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+    $result = & $icacls $targetPath /grant '*S-1-15-2-2:(OI)(CI)(RX)' 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Cannot grant sandbox runtime access: $($result -join [Environment]::NewLine)"
+    }
+}
+
 function Remove-GhostInstallShortcuts {
     if ([string]::IsNullOrWhiteSpace($ExpectedExecutablePath)) {
         throw 'ExpectedExecutablePath is required'
@@ -149,6 +194,7 @@ try {
     switch ($Mode) {
         'Validate' { Test-InstallDirectory }
         'RemoveGhostShortcuts' { Remove-GhostInstallShortcuts }
+        'GrantRuntimeAccess' { Grant-RuntimeAccess }
     }
 } catch {
     [Console]::Error.WriteLine($_.Exception.Message)

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { defineComponent, h, reactive, ref } from 'vue'
+import { defineComponent, h, KeepAlive, reactive, ref } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { useChatInsights } from '../composables/chat/useChatInsights'
 import ChatInsightsPanel from '../components/chat/ChatInsightsPanel.vue'
@@ -9,19 +9,63 @@ const localModel = (state = 'ready') => ({ id: 'laya', name: 'Laya', revision: '
 const task = (id = 'one', overrides = {}) => ({ id, account: 'acc', username: 'friend', member_username: '', start: 1, end: 2, selected_model: choice, model: { model: 'm' }, status: 'completed', stage: '完成', progress: { read: 10, analyzed: 10, batches: 1 }, coverage: { total: 10, text: 10, skipped: 0, target_text: 10, participants: 2 }, data_source: 'realtime', portrait: null, error: null, references: [], ...overrides })
 const wrappers = []
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.useRealTimers() })
-function setup(handler = async () => [], renderPanel = false) {
+function setup(handler = async () => [], renderPanel = false, keepAlive = false) {
   const account = ref('acc'), contact = ref({ username: 'friend' }), open = ref(false)
   const request = vi.fn(async (path, options) => path === '/settings' ? { profiles: [{ id: 'p' }], selected_model: choice } : handler(path, options))
   let event
-  const events = vi.fn((account, callback) => { event = callback; return vi.fn() })
+  const closeEvents = vi.fn(), visible = ref(true)
+  const events = vi.fn((account, callback) => { event = callback; return closeEvents })
   let state
-  const wrapper = mount(defineComponent({ setup() {
+  const component = defineComponent({ setup() {
     state = useChatInsights({ account, contact, open, api: { request, events }, shared: reactive({}) })
     return () => renderPanel ? h(ChatInsightsPanel, { state, contact: contact.value, showSettings: true }) : null
-  } }), { global: { stubs: { AgentModelPicker: true } } })
+  } })
+  const wrapper = mount(keepAlive ? defineComponent({ setup: () => () => h(KeepAlive, null, () => visible.value ? h(component) : null) }) : component, { global: { stubs: { AgentModelPicker: true } } })
   wrappers.push(wrapper)
-  return { account, contact, open, request, state, wrapper, event: value => event(value) }
+  return { account, contact, open, request, state, wrapper, visible, closeEvents, event: value => event(value) }
 }
+
+describe('缓存聊天页的画像生命周期', () => {
+  it('离开时关闭订阅与轮询，返回恢复当前任务结果而不创建或取消分析', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let saved = task('saved', { engine: 'api', status: 'running' })
+    const c = setup(async path => path === '/insights/tasks' ? [saved] : saved, false, true)
+    c.state.engine.value = 'api'; c.open.value = true; await flushPromises()
+    expect(c.state.activeTask.value.id).toBe('saved')
+    const selectedModel = c.state.modelChoice.value, previousTask = c.state.activeTask.value
+    c.closeEvents.mockClear(); c.visible.value = false; await flushPromises()
+    expect(c.closeEvents).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    saved = { ...saved, status: 'completed', portrait: { summary: { text: '后台已完成', sources: [] } } }
+    const requests = c.request.mock.calls.length
+    c.event({ kind: 'insight', body: { task_id: 'saved' } })
+    await vi.advanceTimersByTimeAsync(9000); await flushPromises()
+    expect(c.request).toHaveBeenCalledTimes(requests)
+    expect(c.state.activeTask.value).toBe(previousTask)
+    expect(c.state.engine.value).toBe('api')
+    expect(c.state.modelChoice.value).toBe(selectedModel)
+    c.visible.value = true; await flushPromises()
+    expect(c.state.activeTask.value).toMatchObject({ id: 'saved', status: 'completed', portrait: saved.portrait })
+    expect(c.request.mock.calls.some(([, options]) => ['POST', 'DELETE'].includes(options?.method))).toBe(false)
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('暂停本地模型下载状态轮询，后台下载不被取消，回来继续读取状态', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    let status = localModel('downloading')
+    const c = setup(async path => path === '/insights/local-model' ? status : [], false, true)
+    c.open.value = true; await flushPromises()
+    c.visible.value = false; await flushPromises()
+    const requests = c.request.mock.calls.length
+    status = localModel('ready')
+    await vi.advanceTimersByTimeAsync(9000); await flushPromises()
+    expect(c.request).toHaveBeenCalledTimes(requests)
+    expect(c.state.localModel.value.state).toBe('downloading')
+    c.visible.value = true; await flushPromises()
+    expect(c.state.localModel.value.state).toBe('ready')
+    expect(c.request.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false)
+  })
+})
 
 describe('聊天画像状态', () => {
   it('移除历史入口保留当前画像标签和依据，保留结果可查看且重新挂载仍恢复，新任务回普通列表', async () => {

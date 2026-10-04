@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue'
 
 const STORAGE_KEY = 'chat-agent-panel-width'
 const DEFAULT_WIDTH = 440
@@ -58,5 +58,7 @@ export function useAgentPanelResize(panel, expanded, options = {}) {
     window.removeEventListener('resize', measure); window.removeEventListener('blur', finish)
     window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', finish); window.removeEventListener('pointercancel', finish)
   })
+  onDeactivated(() => finish())
+  onActivated(measure)
   return { width, minimum, maximum, resizing, start, finish, reset, keyboard }
 }

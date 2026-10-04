@@ -113,11 +113,27 @@ WDA_CustomInitDone:
 !macroend
 
 !macro customInstall
+  Call WDA_GrantRuntimeAccess
   ${If} $WDA_SelectedOutputDir == ""
     Call WDA_InitOutputDirSelection
   ${EndIf}
   Call WDA_WritePendingOutputDirSetting
 !macroend
+
+Function WDA_GrantRuntimeAccess
+  Call WDA_PrepareInstallDirScript
+  ; PowerShell 5 must initialize its own module paths, even when the installer
+  ; was launched from PowerShell 7. This changes only this process environment.
+  System::Call 'Kernel32::SetEnvironmentVariableW(w "PSModulePath", p 0)'
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\wda-install-dir.ps1" -Mode GrantRuntimeAccess -InstallDir "$INSTDIR"'
+  Pop $0
+  Pop $1
+  ${If} $0 != "0"
+    MessageBox MB_ICONSTOP|MB_OK "无法设置程序运行所需的读取权限，安装已停止。$\r$\n$1" /SD IDOK
+    SetErrorLevel 2
+    Abort
+  ${EndIf}
+FunctionEnd
 
 Function WDA_RemoveLegacyOutputLink
   Call WDA_UseCurrentUserAppData

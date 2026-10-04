@@ -12,7 +12,7 @@ function isInternalRedirect(start, destination) {
   } catch { return false; }
 }
 
-// 首次使用页会中止初始导航；仅在同源目标实际完成加载后接受该跳转。
+// 页面跳转可能中止初始导航；仅在同源目标实际完成加载后接受该跳转。
 async function loadWithRedirect(win, url, timeoutMs = 5000, navigationTimeoutMs = 60000) {
   const contents = win.webContents;
   let finished = false;

@@ -1,6 +1,6 @@
 <template>
   <div
-    class="message-input-workspace flex flex-col shrink-0 border-t border-[var(--app-border,#e5e7eb)] bg-[var(--chat-page-bg,#ffffff)] dark:bg-[#1e1e1e] relative select-text"
+    class="message-input-workspace flex flex-col shrink-0 relative select-text"
     :style="{ height: `${inputHeight}px`, minHeight: pendingAttachment ? '320px' : selectedAttachments.length ? '260px' : undefined }"
   >
     <!-- Top Draggable Resizer Handle -->
@@ -69,7 +69,7 @@
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
-          <span v-else>✨</span>
+          <svg v-else class="chat-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4L12 3Z" /></svg>
           <span>{{ isGeneratingAiReply ? '生成中...' : 'AI 建议' }}</span>
         </button>
 
@@ -81,7 +81,7 @@
           title="添加 PNG 或 JPEG 图片，可多选（Windows 桌面版）"
           @click="handlePickAttachment('image')"
         >
-          <span>▧</span>
+          <svg class="chat-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4" /><circle cx="8" cy="8" r="1.5" /><path d="m21 15-5-5L5 21" /></svg>
           <span>{{ selectingAttachment === 'image' ? '选图中...' : '图片' }}</span>
         </button>
 
@@ -93,7 +93,7 @@
           title="添加文件，可多选（Windows 桌面版，PNG/JPEG 将作为图片发送）"
           @click="handlePickAttachment('file')"
         >
-          <span>📎</span>
+          <svg class="chat-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21 11-8.4 8.4a6 6 0 0 1-8.5-8.5l9-9a4 4 0 0 1 5.7 5.7l-9 9a2 2 0 0 1-2.8-2.8l8.4-8.4" /></svg>
           <span>{{ selectingAttachment === 'file' ? '选择中...' : '文件' }}</span>
         </button>
 
@@ -112,7 +112,7 @@
           title="清空输入框与错误提示"
           @click="clearDraft"
         >
-          <span>🗑️</span>
+          <svg class="chat-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></svg>
           <span>清空</span>
         </button>
       </div>
@@ -124,7 +124,7 @@
       <div v-if="selectedAttachments.length" class="chat-input-attachments max-h-32 overflow-y-auto shrink-0 mb-1" aria-label="待发送附件">
         <div v-for="attachment in selectedAttachments" :key="attachment.id" class="chat-input-attachment flex items-center gap-2 mb-1 text-xs">
           <img v-if="attachment.kind === 'image'" :src="attachment.previewDataUrl" :alt="attachment.name" class="chat-input-image-preview w-12 h-10 object-contain rounded border border-gray-200 dark:border-gray-700" />
-          <span v-else class="chat-input-file-preview text-2xl" aria-hidden="true">📄</span>
+          <svg v-else class="chat-input-file-preview h-8 w-8 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z" /><path d="M14 2v6h6M8 13h8M8 17h5" /></svg>
           <div class="min-w-0 flex-1">
             <div class="chat-input-attachment-name truncate" :title="attachment.name">{{ attachment.name }}</div>
             <div class="chat-input-attachment-size text-gray-500">{{ formatFileSize(String(attachment.sizeBytes)) }}</div>
@@ -136,6 +136,7 @@
       <textarea
         ref="textareaRef"
         v-model="draftText"
+        aria-label="输入消息"
         class="chat-input-textarea flex-1 w-full resize-none outline-none bg-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 disabled:opacity-60 disabled:cursor-not-allowed leading-relaxed overflow-y-auto"
         :placeholder="placeholderText"
         :disabled="isDisabled || isSending"
@@ -171,6 +172,7 @@
             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
           </svg>
           <span>{{ isSending ? '发送中...' : '发送' }}</span>
+          <svg v-if="!isSending" class="chat-tool-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4L22 2ZM22 2 11 13" /></svg>
         </button>
       </div>
     </div>
@@ -178,7 +180,7 @@
 </template>
 
 <script setup>
-import { computed, ref, unref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, unref, watch, onDeactivated, onMounted, onUnmounted, nextTick } from 'vue'
 import { useApi as defaultUseApi } from '~/composables/useApi'
 import { formatFileSize } from '~/lib/chat/formatters'
 import MessageRecognitionControl from '~/components/chat/MessageRecognitionControl.vue'
@@ -555,6 +557,11 @@ onUnmounted(() => {
   }
 })
 
+onDeactivated(() => {
+  targetRevision += 1
+  onPointerUp()
+})
+
 defineExpose({
   draftText,
   isSending,
@@ -570,10 +577,41 @@ defineExpose({
 
 <style scoped>
 .message-input-workspace {
-  background-color: var(--chat-page-bg, #ffffff);
-  border-top-color: var(--app-border, #e5e7eb);
+  margin: 0 24px 20px;
+  border: 1px solid var(--chat-input-border);
+  border-radius: 18px;
+  background-color: var(--chat-input-bg);
 }
-.chat-input-toolbar { overflow-x: auto; }
-.chat-input-tools { flex-wrap: nowrap; white-space: nowrap; }
+.message-input-workspace:focus-within { border-color: var(--chat-focus-ring); }
+.chat-input-resizer { border-radius: 18px 18px 0 0; }
+.chat-input-resizer > div { background: var(--chat-input-border); }
+.chat-input-resizer:hover { background: var(--chat-subtle-bg); }
+.chat-input-resizer:hover > div { background: var(--chat-focus-ring); }
+.chat-input-toolbar { min-height: 38px; padding: 3px 10px 7px; overflow-x: auto; border-color: var(--app-border-subtle); scrollbar-width: thin; }
+.chat-input-tools { gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
 .chat-input-tools > * { flex-shrink: 0; }
+.chat-input-tools > button { height: 28px; gap: 6px; border-radius: 9px; padding: 4px 8px; color: var(--app-text-secondary); }
+.chat-input-tools > button:hover:not(:disabled) { color: var(--chat-accent); background: var(--chat-subtle-bg); }
+.chat-input-tools > .chat-input-btn-ai { color: var(--chat-ai-text); background: var(--chat-ai-bg); padding-right: 11px; padding-left: 11px; }
+.chat-input-tools > .chat-input-btn-ai:hover:not(:disabled) { color: var(--chat-ai-text); background: var(--chat-ai-bg); filter: brightness(.97); }
+.chat-tool-icon { width: 15px; height: 15px; flex-shrink: 0; }
+.chat-input-body { padding: 9px 14px 10px; }
+.chat-input-textarea { background: transparent; color: var(--app-text-primary); caret-color: var(--chat-focus-ring); font-size: 14px; line-height: 1.65; }
+.chat-input-textarea::placeholder { color: var(--chat-sender-name); }
+.chat-input-footer { padding-top: 5px; }
+.chat-input-footer > div { color: var(--app-text-secondary); }
+.chat-input-btn-send { min-width: 78px; height: 32px; gap: 8px; border-radius: 10px; background: var(--chat-accent); color: var(--chat-input-bg); box-shadow: none; }
+.chat-input-btn-send:hover:not(:disabled) { background: var(--chat-accent-hover); }
+.chat-input-btn-send-attachments { border-color: var(--chat-accent); color: var(--chat-accent); border-radius: 10px; }
+.chat-input-btn-send-attachments:hover:not(:disabled) { background: var(--chat-subtle-bg); }
+.chat-input-tools > button:focus-visible, .chat-input-footer button:focus-visible, .chat-input-resizer:focus-visible { outline: 2px solid var(--chat-focus-ring); outline-offset: 2px; }
+@container (max-width: 840px) {
+  .message-input-workspace { margin-right: 20px; margin-left: 20px; margin-bottom: 16px; }
+}
+@container (max-width: 480px) {
+  .message-input-workspace { margin-right: 12px; margin-left: 12px; margin-bottom: 12px; border-radius: 14px; }
+  .chat-input-body { padding-right: 10px; padding-left: 10px; }
+  .chat-input-footer { flex-wrap: wrap; }
+  .chat-input-footer > div { font-size: 10px; }
+}
 </style>

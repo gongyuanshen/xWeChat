@@ -20,7 +20,7 @@ const {
   uninstallerArguments,
 } = require("../scripts/smoke-windows-package.cjs");
 
-function makePackagedRuntime() {
+function makePackagedRuntime(applicationName = "xwechat.exe") {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wda-win-smoke-test-"));
   const backendRoot = path.join(root, "resources", "backend");
   const nativeRoot = path.join(backendRoot, "native");
@@ -33,7 +33,7 @@ function makePackagedRuntime() {
   ]) {
     fs.writeFileSync(path.join(backendRoot, fileName), "test");
   }
-  fs.writeFileSync(path.join(root, "WeChatDataAnalysis.exe"), "test");
+  fs.writeFileSync(path.join(root, applicationName), "test");
   return root;
 }
 
@@ -42,11 +42,26 @@ test("Windows packaged smoke resolves the backend and complete native trio", (t)
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const runtime = resolvePackagedRuntime(root);
-  assert.equal(path.basename(runtime.application), "WeChatDataAnalysis.exe");
+  assert.equal(path.basename(runtime.application), "xwechat.exe");
   assert.equal(path.basename(runtime.backend), "wechat-backend.exe");
   assert.equal(path.basename(runtime.client), "wechatdb_client.dll");
   assert.equal(path.basename(runtime.broker), "wechatdb_broker.exe");
   assert.equal(path.basename(runtime.manifest), "wechatdb_native_build.json");
+});
+
+test("Windows packaged smoke honors the configured Windows executable name", (t) => {
+  const root = makePackagedRuntime("xwechat-custom.exe");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const runtime = resolvePackagedRuntime(root, {
+    config: {
+      build: {
+        productName: "xwechat",
+        win: { executableName: "xwechat-custom" },
+      },
+    },
+  });
+  assert.equal(runtime.application, path.join(root, "xwechat-custom.exe"));
 });
 
 test("Windows packaged smoke rejects a partial native trio", (t) => {

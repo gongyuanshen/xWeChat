@@ -2,6 +2,10 @@
 /.work/
 /.superpowers/
 /.agents/
+/.impeccable/
+/DESIGN.md
+/design-qa.md
+/docs/project-cleanup.md
 __pycache__/
 *.py[oc]
 .DS_Store
@@ -13,6 +17,9 @@ wheels/
 # Virtual environments
 .venv
 /output/
+/data/
+/keys/
+/local_search_models/
 /.native-core-cache-v1/
 /.native-core-license-v1/
 .playwright-cli/
@@ -20,6 +27,22 @@ wheels/
 /.pytest-tmp-*/
 /.testdeps/
 /private/
+*.pfx
+*.p12
+*.jks
+*.keystore
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+output-location.txt
+output-location.path
+open-output.cmd
 /work/
 /.idea
 /.history/

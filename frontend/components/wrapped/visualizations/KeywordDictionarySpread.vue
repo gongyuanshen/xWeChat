@@ -185,10 +185,13 @@
           <!-- ══════════ 玻璃取词镜 ══════════ -->
           <div
             v-if="!reducedMotion"
+            class="kd-lens-position"
+            :style="lensStyle"
+          >
+          <div
             ref="lensEl"
             class="kd-lens"
             :class="{ 'kd-lens--drag': lensDragging }"
-            :style="lensStyle"
             role="slider"
             tabindex="0"
             :aria-label="`取词镜，当前 ${current.word}`"
@@ -215,6 +218,7 @@
             <span class="kd-lens-caustic" aria-hidden="true" />
             <span class="kd-lens-chroma" aria-hidden="true" />
             <span class="kd-lens-spec" aria-hidden="true" />
+          </div>
           </div>
 
           <div class="kd-vignette" aria-hidden="true" />
@@ -560,14 +564,21 @@ const clampLensY = (y) => {
 const lensX = ref(clampLensX(layout.value.idxLeft + layout.value.lensAnchorX))
 const lensY = ref(clampLensY(layout.value.idxTop + layout.value.headH + layout.value.rowH / 2))
 const lensDragging = ref(false)
+let lensTween = null
+
+const stopLensTween = () => {
+  lensTween?.kill()
+  lensTween = null
+}
 
 const lensStyle = computed(() => ({
-  left: `${lensX.value - layout.value.lensR}px`,
-  top: `${lensY.value - layout.value.lensR}px`
+  // 定位与镜片入场分层，GSAP 清理缩放时不能清掉 Vue 管理的位移。
+  transform: `translate3d(${lensX.value - layout.value.lensR}px, ${lensY.value - layout.value.lensR}px, 0)`
 }))
 
 // 不带动画地把镜片直接落到某个词目上（首帧 / 数据换了 / 换画幅）
 const placeLens = (word) => {
+  stopLensTween()
   const g = rowGeometry.value.find((r) => r.word === word)
   if (!g) return
   lensX.value = clampLensX(g.x + layout.value.lensAnchorX)
@@ -614,10 +625,8 @@ const lensRows = computed(() => {
       word: n.g.word,
       count: n.g.count,
       style: {
-        left: `${n.g.x - (cx - L.lensR)}px`,
-        top: `${L.lensR + y[i] - L.rowH / 2}px`,
         width: `${L.colW}px`,
-        transform: `scale(${n.scale.toFixed(3)})`,
+        transform: `translate3d(${n.g.x - (cx - L.lensR)}px, ${L.lensR + y[i] - L.rowH / 2}px, 0) scale(${n.scale.toFixed(3)})`,
         transformOrigin: `${(cx - n.g.x).toFixed(1)}px 50%`,
         opacity: String(clamp(0.42 + n.bulge * 0.68, 0, 1))
       }
@@ -664,6 +673,7 @@ const selectByWord = (word) => {
 const step = (dir) => goToIndex(currentIndex.value + dir)
 
 const snapLensTo = (word) => {
+  stopLensTween()
   const g = rowGeometry.value.find((r) => r.word === word)
   if (!g) return
   const tx = clampLensX(g.x + layout.value.lensAnchorX)
@@ -673,11 +683,13 @@ const snapLensTo = (word) => {
     lensY.value = ty
     return
   }
-  gsap.to({ x: lensX.value, y: lensY.value }, {
+  lensTween = gsap.to({ x: lensX.value, y: lensY.value }, {
     x: tx,
     y: ty,
     duration: 0.44,
     ease: 'power3.out',
+    paused: props.paused,
+    onComplete: () => { lensTween = null },
     onUpdate () {
       lensX.value = this.targets()[0].x
       lensY.value = this.targets()[0].y
@@ -687,9 +699,9 @@ const snapLensTo = (word) => {
 
 const playFlip = () => {
   if (props.reducedMotion || exportMode.value || !leafEl.value) return
-  if (flipTl) { try { flipTl.kill() } catch {} }
+  flipTl?.kill()
   flipping.value = true
-  flipTl = gsap.timeline({ onComplete: () => { flipping.value = false } })
+  flipTl = gsap.timeline({ paused: props.paused, onComplete: () => { flipping.value = false } })
   // 铰链在中缝上：左右跨页绕右边缘转，经折装绕册页下缘翻
   const stacked = layout.value.mode === 'stack'
   flipTl.fromTo(leafEl.value,
@@ -733,6 +745,7 @@ let lensDrag = null
 const onLensDown = (e) => {
   if (props.reducedMotion) return
   e.preventDefault()
+  stopLensTween()
   const p = designPoint(e)
   lensDrag = { id: e.pointerId, dx: lensX.value - p.x, dy: lensY.value - p.y, moved: false }
   lensDragging.value = true
@@ -797,19 +810,25 @@ const playEntrance = () => {
   const word = leafEl.value.querySelector('.kd-hw-word')
   if (word) {
     entryTweens.push(gsap.fromTo(word,
-      { opacity: 0, y: 22, letterSpacing: '0.02em' },
-      { opacity: 1, y: 0, letterSpacing: '-0.045em', duration: 0.86, ease: 'power3.out', delay: 0.22, clearProps: 'letterSpacing' }))
+      { opacity: 0, y: 22 },
+      { opacity: 1, y: 0, duration: 0.86, ease: 'power3.out', delay: 0.22, clearProps: 'opacity,transform', paused: props.paused }))
   }
   const q = leafEl.value.querySelectorAll('.kd-metaline, .kd-def, .kd-cite, .kd-see')
   entryTweens.push(gsap.fromTo(q,
     { opacity: 0, y: 12 },
-    { opacity: 1, y: 0, duration: 0.6, stagger: 0.07, ease: 'power2.out', delay: 0.4, clearProps: 'opacity,transform' }))
+    { opacity: 1, y: 0, duration: 0.6, stagger: 0.07, ease: 'power2.out', delay: 0.4, clearProps: 'opacity,transform', paused: props.paused }))
   if (lensEl.value) {
     entryTweens.push(gsap.fromTo(lensEl.value,
       { opacity: 0, scale: 0.82 },
-      { opacity: 1, scale: 1, duration: 0.7, ease: 'back.out(1.6)', delay: 0.72, clearProps: 'transform' }))
+      { opacity: 1, scale: 1, duration: 0.7, ease: 'back.out(1.6)', delay: 0.72, clearProps: 'transform', paused: props.paused }))
   }
 }
+
+watch(() => props.paused, (paused) => {
+  entryTweens.forEach((tween) => tween.paused(paused))
+  flipTl?.paused(paused)
+  lensTween?.paused(paused)
+})
 
 /* 导出模式：把在飞的入场 / 翻页 / 镜片补间全部推到末尾。
    还原不用管：合上词典由 Card06 负责，那会把本组件整个卸掉；
@@ -860,8 +879,11 @@ watch(layout, () => {
 onBeforeUnmount(() => {
   ro?.disconnect?.()
   ro = null
-  if (flipTl) { try { flipTl.kill() } catch {} }
+  flipTl?.kill()
   flipTl = null
+  stopLensTween()
+  entryTweens.forEach((tween) => tween.kill())
+  entryTweens = []
   gsap.killTweensOf(leafEl.value)
   gsap.killTweensOf(lensEl.value)
   window.removeEventListener('pointermove', onLensMove)
@@ -1408,8 +1430,16 @@ onBeforeUnmount(() => {
 }
 
 /* ── 玻璃取词镜 ── */
+.kd-lens-position {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 6;
+}
 .kd-lens {
   position: absolute;
+  left: 0;
+  top: 0;
   width: 168px;
   height: 168px;
   border-radius: 50%;
@@ -1442,6 +1472,8 @@ onBeforeUnmount(() => {
 
 .kd-lrow {
   position: absolute;
+  left: 0;
+  top: 0;
   cursor: inherit;
   text-shadow: -0.35px 0 rgba(72, 140, 230, 0.34), 0.35px 0 rgba(226, 132, 66, 0.34);
 }

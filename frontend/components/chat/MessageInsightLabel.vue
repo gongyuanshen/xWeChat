@@ -33,13 +33,17 @@ watch([() => props.message.content, () => props.message.renderType, identity, ca
   <small v-else-if="error" role="alert">{{ error }}</small>
 </template>
 <style scoped>
-.message-insight-label { margin-top: 5px; max-width: 100%; color: var(--app-text-secondary, #75877c); font-size: 11px; line-height: 1.5; }
-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; width: fit-content; max-width: 100%; list-style: none; cursor: pointer; }
+.message-insight-label { margin-top: 7px; max-width: 100%; color: var(--app-text-secondary); font-size: 11px; line-height: 1.5; }
+summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px; width: fit-content; max-width: 100%; list-style: none; cursor: pointer; }
 summary::-webkit-details-marker { display: none; }
-summary:focus-visible { outline: 2px solid #079b57; outline-offset: 3px; border-radius: 2px; }
-.insight-pair { display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%; }
-.insight-key { flex-shrink: 0; }
-.insight-value { color: var(--app-text-primary, #25352d); overflow-wrap: anywhere; }
-p { margin: 5px 0 0; max-width: 280px; overflow-wrap: anywhere; }
-small { color: #b42318; }
+summary:focus-visible { outline: 2px solid var(--chat-focus-ring); outline-offset: 3px; border-radius: 10px; }
+.insight-pair { display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%; padding: 2px 8px; border-radius: 10px; background: var(--chat-subtle-bg); }
+.insight-pair:last-child { background: var(--chat-ai-bg); }
+.insight-key { flex-shrink: 0; color: var(--app-text-secondary); }
+.insight-pair:last-child .insight-key { color: var(--chat-ai-text); }
+.insight-value { color: var(--app-text-primary); overflow-wrap: anywhere; }
+summary:hover .insight-value { text-decoration: underline; text-underline-offset: 3px; }
+p { margin: 7px 0 0; padding: 8px 10px; max-width: 300px; border-radius: 10px; background: var(--chat-input-bg); border: 1px solid var(--chat-input-border); overflow-wrap: anywhere; }
+small { color: #b42318; font-size: 11px; }
+html[data-theme='dark'] small { color: #fda29b; }
 </style>

@@ -3,7 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentRun from '../components/chat/AgentRun.vue'
 import AgentSubtasks from '../components/chat/AgentSubtasks.vue'
 import AgentAnswer from '../components/chat/AgentAnswer.vue'
-import AgentMaterials from '../components/chat/AgentMaterials.vue'
 import { mergeRunEvent, mergeTimeline, mergeReferenceData, groupTimelineTools } from '../utils/agentTimeline'
 import { renderAgentMarkdown, copyAgentText } from '../utils/agentMarkdown'
 

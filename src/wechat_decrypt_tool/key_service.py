@@ -77,8 +77,8 @@ def _image_key_account_match_variants(value: Any) -> set[str]:
     """Return account names that should be considered equivalent for image key matching.
 
     Windows WeChat 4.x stores account data under a folder such as
-    ``wxid_o6wp2aat9mu312_8d63`` while wx_key may report the account as
-    ``wxid_o6wp2aat9mu312``.  The trailing four-hex folder suffix is not part
+    ``wxid_testuser000001_a001`` while wx_key may report the account as
+    ``wxid_testuser000001``.  The trailing four-hex folder suffix is not part
     of the logical account id, so both names must match.  Do not strip
     arbitrary suffixes: names like ``wxid_demo_extra`` may be a distinct
     account in tests or legacy data.

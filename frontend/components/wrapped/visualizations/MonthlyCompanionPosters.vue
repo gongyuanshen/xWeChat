@@ -697,6 +697,7 @@ const syncCamera = () => {
   camera.updateProjectionMatrix()
   renderer.setSize(w, h, false)
   if (canvasEl.value) canvasEl.value.style.height = `${h}px`
+  startLoop()
 }
 
 const goTo = (index) => {
@@ -705,12 +706,16 @@ const goTo = (index) => {
   const want = -target * STEP
   const diff = ((want - rot.target + PERIOD / 2) % PERIOD + PERIOD) % PERIOD - PERIOD / 2
   rot.target += diff
+  startLoop()
 }
 
 const step = (dt) => {
   const prev = rot.current
-  const k = reducedMotion.value ? 999 : 7.2
-  rot.current += (rot.target - rot.current) * (1 - Math.exp(-k * dt))
+  rot.current = reducedMotion.value
+    ? rot.target
+    : rot.current + (rot.target - rot.current) * (1 - Math.exp(-7.2 * dt))
+  // 小于万分之一格的位移已经不可见；落到精确终点后停止重绘。
+  if (Math.abs(rot.target - rot.current) < STEP * 0.0001) rot.current = rot.target
   if (!dragging.value) rot.velocity = (rot.current - prev) / Math.max(dt, 0.001)
   rig.rotation.y = rot.current
 
@@ -743,19 +748,25 @@ const step = (dt) => {
 }
 
 const tick = () => {
-  rafId = requestAnimationFrame(tick)
-  if (destroyed || !renderer || !scene || !camera) return
+  rafId = 0
+  if (destroyed || !props.active || document.hidden || !renderer || !scene || !camera) return
   if (viewport.w <= 1) return
   const now = performance.now()
   const dt = lastT ? Math.min(0.05, (now - lastT) / 1000) : 1 / 60
   lastT = now
   step(dt)
   const px = reducedMotion.value ? 0 : pointer.x * panX
-  const py = reducedMotion.value ? 0 : pointer.y * panY
-  camera.position.x += (px - camera.position.x) * 0.06
-  camera.position.y += ((camBaseY - py) - camera.position.y) * 0.06
+  const py = camBaseY - (reducedMotion.value ? 0 : pointer.y * panY)
+  // 与原先 60Hz 下每帧 0.06 一致，高刷新率和偶发掉帧时也保持相同跟手速度。
+  const damping = reducedMotion.value ? 1 : 1 - Math.pow(0.94, dt * 60)
+  camera.position.x += (px - camera.position.x) * damping
+  camera.position.y += (py - camera.position.y) * damping
+  if (Math.abs(px - camera.position.x) < 0.0001) camera.position.x = px
+  if (Math.abs(py - camera.position.y) < 0.0001) camera.position.y = py
   camera.lookAt(camera.position.x * 0.4, lookY, 0)
   renderer.render(scene, camera)
+  if (rot.current !== rot.target || camera.position.x !== px || camera.position.y !== py) startLoop()
+  else lastT = 0
 }
 
 // ---------- 交互 ----------
@@ -788,6 +799,7 @@ const onDragMove = (e) => {
   rot.target += d
   rot.current += d
   rot.velocity = d * 60
+  startLoop()
 }
 
 const onDragUp = (e) => {
@@ -800,6 +812,7 @@ const onDragUp = (e) => {
   if (drag.moved > 6) suppressClickUntil = Date.now() + 260
   const projected = rot.target + rot.velocity * 0.13
   rot.target = -STEP * Math.round(-projected / STEP)
+  startLoop()
 }
 
 // 点两侧的海报，把它请到 C 位
@@ -829,16 +842,18 @@ const onStageMove = (e) => {
   if (!r.width || !r.height) return
   pointer.x = Math.min(1, Math.max(-1, ((e.clientX - r.left) / r.width) * 2 - 1))
   pointer.y = Math.min(1, Math.max(-1, ((e.clientY - r.top) / r.height) * 2 - 1))
+  startLoop()
 }
 
 const onStageLeave = () => {
   pointer.x = 0
   pointer.y = 0
+  startLoop()
 }
 
 // ---------- 生命周期 ----------
 const startLoop = () => {
-  if (rafId || destroyed) return
+  if (rafId || destroyed || !props.active || document.hidden || !renderer || !scene || !camera) return
   rafId = requestAnimationFrame(tick)
 }
 
@@ -853,6 +868,7 @@ const repaintAll = () => {
     drawPoster(posters[i].cv.getContext('2d'), i)
     posters[i].tex.needsUpdate = true
   }
+  startLoop()
 }
 
 const init = async () => {
@@ -863,7 +879,7 @@ const init = async () => {
     if (destroyed) return
     if (document?.fonts?.ready) { try { await document.fonts.ready } catch {} }
     await preloadAvatars()
-    if (destroyed || !canvasEl.value) return
+    if (destroyed || !props.active || document.hidden || !canvasEl.value) return
     // 先把版式定下来再画海报，省掉「按横幅画一遍再按竖幅重画一遍」
     const bx0 = readBox()
     if (bx0) applyPosterMode(resolvePosterFit(bx0.w, bx0.h))
@@ -917,8 +933,19 @@ const teardown = () => {
 
 onMounted(() => {
   if (!import.meta.client) return
+  document.addEventListener('visibilitychange', onVisibilityChange)
   if (props.active) void init()
 })
+
+const onVisibilityChange = () => {
+  if (document.hidden) stopLoop()
+  else if (props.active) {
+    if (!renderer) void init()
+    else startLoop()
+  }
+}
+
+watch(reducedMotion, () => startLoop())
 
 watch(() => props.active, (v) => {
   if (!import.meta.client) return
@@ -947,6 +974,7 @@ watch(exportMode, (on) => {
       entryPending = false
       rot.current = rot.target
       rot.velocity = 0
+      startLoop()
     } else {
       // 还没 init：这一次入场本来就还欠着，init() 会读 exportMode 直接落位
       exportOwesEntry = true
@@ -961,6 +989,7 @@ watch(exportMode, (on) => {
   entryPending = true
   rot.current = rot.target - STEP * ENTRY_LAG
   rot.velocity = 0
+  startLoop()
 })
 
 watch(privacyMode, () => {
@@ -979,6 +1008,7 @@ watch(dataSignature, async (sig, prev) => {
 
 onBeforeUnmount(() => {
   destroyed = true
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   teardown()
 })
 </script>

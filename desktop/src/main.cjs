@@ -37,6 +37,7 @@ const { Worker } = require("worker_threads");
 const { crc32 } = require("node:zlib");
 const { chooseChatImage, chooseChatFile, importChatAttachments, disposeChatAttachmentTemps } = require("./chat-image-picker.cjs");
 const chatAttachmentTempDirectories = new Set();
+let chatAttachmentImportsInProgress = 0;
 const {
   cleanupOutputDirectoryBackup,
   getDefaultOutputDirPath,
@@ -1077,6 +1078,11 @@ async function applyOutputDirChange(nextValue) {
       sourceWasEmpty: false,
       message: "output 目录未变化",
     };
+  }
+
+  // 附件队列保存绝对路径；迁移会让仍在使用的文件和退出清理路径失效。
+  if (chatAttachmentImportsInProgress || chatAttachmentTempDirectories.size) {
+    throw new Error('本次运行仍有粘贴附件缓存，请先处理待发送附件，退出并重新打开应用后再迁移 output 目录');
   }
 
   let wasBackendRunning = false;
@@ -2892,12 +2898,20 @@ function registerWindowIpc() {
   });
 
   ipcMain.handle('chat:importAttachments', async (event, entries) => {
+    chatAttachmentImportsInProgress += 1;
     try {
+      if (outputDirChangeInProgress || loadDesktopSettings().pendingOutputDir !== null) {
+        throw new Error('output 目录正在迁移或等待恢复，暂时无法添加附件');
+      }
+      const outputDir = resolveOutputDir({ ensureExists: false });
+      if (!outputDir) throw new Error('无法定位 output 目录，不能保存粘贴附件');
       return await importChatAttachments({ event, parentWindow: mainWindow, entries, nativeImage,
-        tempRoot: app.getPath('temp'), tempDirectories: chatAttachmentTempDirectories });
+        tempRoot: path.join(outputDir, 'cache', 'chat-attachments'), tempDirectories: chatAttachmentTempDirectories });
     } catch (err) {
       logMain(`[main] chat:importAttachments failed: ${err?.stack || err}`);
       throw err;
+    } finally {
+      chatAttachmentImportsInProgress -= 1;
     }
   });
 

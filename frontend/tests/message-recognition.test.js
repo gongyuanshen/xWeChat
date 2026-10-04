@@ -1,5 +1,5 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import { defineComponent, ref } from 'vue'
+import { defineComponent, h, KeepAlive, ref } from 'vue'
 import { createHash, webcrypto } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useMessageRecognition } from '../composables/chat/useMessageRecognition'
@@ -9,7 +9,7 @@ const wrappers = []
 beforeEach(() => vi.stubGlobal('crypto', webcrypto))
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.useRealTimers() })
 async function settle() { await flushPromises(); await new Promise(resolve => setTimeout(resolve, 15)); await flushPromises() }
-function setup({ saved = false, messages = [message(1)], contact: initialContact = { username: 'friend' }, intercept } = {}) {
+function setup({ saved = false, messages = [message(1)], contact: initialContact = { username: 'friend' }, intercept, keepAlive = false } = {}) {
   const account = ref('acc'), contact = ref(initialContact), loaded = ref(messages), engine = ref('api'), choice = ref({ profile_id: 'p', model_id: 'm' })
   let enabled = saved, sequence = 0, batch = null, callback, state
   const cache = new Map()
@@ -21,11 +21,88 @@ function setup({ saved = false, messages = [message(1)], contact: initialContact
     if (path.endsWith('/batches')) { if (options.body.context.length && Math.max(...options.body.context.map(r => r.time)) > Math.min(...options.body.messages.map(r => r.time))) throw new Error('前文不能晚于批次目标消息'); batch = { id: `batch${++sequence}`, scope_id: options.body.username, status: 'running', progress: { total: options.body.messages.length, analyzed: 0 }, delivery_mode: 'stream', items: [], mood: null, error: null, messages: options.body.messages }; return batch }
     return batch
   })
-  wrappers.push(mount(defineComponent({ setup() { state = useMessageRecognition({ account, contact, messages: loaded, engine, modelChoice: choice, api: { request, events: (_, fn) => { callback = fn; return vi.fn() } } }); return () => null } })))
+  const visible = ref(true), closeEvents = vi.fn()
+  const component = defineComponent({ setup() { state = useMessageRecognition({ account, contact, messages: loaded, engine, modelChoice: choice, api: { request, events: (_, fn) => { callback = fn; return closeEvents } } }); return () => null } })
+  wrappers.push(mount(keepAlive ? defineComponent({ setup: () => () => h(KeepAlive, null, () => visible.value ? h(component) : null) }) : component))
   const emit = body => callback({ kind: 'insight_live', body: { scope_id: contact.value.username, batch_id: batch.id, ...body } })
   const finish = async (status = 'completed') => { const items = batch.messages.map(record); items.forEach(r => cache.set(r.identity, r)); batch = { ...batch, items, status, progress: { total: items.length, analyzed: items.length }, error: status === 'failed' ? { code: 'MODEL', message: '模型失败', diagnostic_id: 'd' } : null }; emit({ status, error: batch.error }); await settle() }
-  return { state, request, loaded, account, contact, engine, choice, emit, finish, cache, record, batch: () => batch }
+  return { state, request, loaded, account, contact, engine, choice, emit, finish, cache, record, visible, closeEvents, batch: () => batch }
 }
+
+describe('缓存聊天页的识别生命周期', () => {
+  it('离开时停止轮询和自动提交，返回读取漏掉的结果并仅识别新增消息', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    const c = setup({ saved: true, keepAlive: true }); await settle()
+    expect(c.request.mock.calls.filter(([path]) => path.endsWith('/state'))).toHaveLength(1)
+    const selectedModel = c.choice.value
+    c.closeEvents.mockClear(); c.visible.value = false; await settle()
+    expect(c.closeEvents).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+    const requests = c.request.mock.calls.length
+    c.loaded.value.push(message(2)); await settle(); await c.finish()
+    await vi.advanceTimersByTimeAsync(9000); await settle()
+    expect(c.request).toHaveBeenCalledTimes(requests)
+    expect(c.state.enabled.value).toBe(true)
+    expect(c.choice.value).toBe(selectedModel)
+    c.visible.value = true; await settle()
+    expect(c.state.labels.value['s:1']).toBeTruthy()
+    expect(c.request.mock.calls.filter(([path]) => path.endsWith('/batches')).map(([, options]) => options.body.messages.map(r => r.identity))).toEqual([['s:1'], ['s:2']])
+    expect(c.request.mock.calls.some(([path]) => path.endsWith('/settings') || path.endsWith('/cancel'))).toBe(false)
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('返回发生在旧同步请求完成之前仍保留强制刷新，不重复分析已完成消息', async () => {
+    let hold = false, resolveState, oldBatch
+    const c = setup({ saved: true, keepAlive: true, intercept: (path, options) => {
+      if (hold && path.endsWith('/state') && options.body.messages.length === 1 && options.body.messages[0].identity === 's:2') {
+        hold = false
+        return new Promise(resolve => { resolveState = resolve })
+      }
+    } }); await settle()
+    oldBatch = c.batch(); hold = true; c.loaded.value.push(message(2)); await settle()
+    expect(resolveState).toBeTypeOf('function')
+    c.visible.value = false; await settle(); await c.finish()
+    c.visible.value = true; await settle()
+    resolveState({ scope_id: 'friend', enabled: true, items: [], batch: oldBatch, mood: null }); await settle()
+    const states = c.request.mock.calls.filter(([path]) => path.endsWith('/state'))
+    expect(states.at(-1)[1].body.messages.map(r => r.identity)).toEqual(['s:1', 's:2'])
+    expect(c.state.labels.value['s:1']).toBeTruthy()
+    expect(c.request.mock.calls.filter(([path]) => path.endsWith('/batches')).map(([, options]) => options.body.messages.map(r => r.identity))).toEqual([['s:1'], ['s:2']])
+    expect(c.state.loading.value).toBe(false)
+  })
+
+  it('未开启识别的缓存页返回后仍关闭且不创建批次', async () => {
+    const c = setup({ keepAlive: true }); await settle()
+    c.visible.value = false; await settle(); c.loaded.value.push(message(2)); await settle()
+    c.visible.value = true; await settle()
+    expect(c.state.enabled.value).toBe(false)
+    expect(c.request.mock.calls.filter(([path]) => path.endsWith('/batches') || path.endsWith('/settings'))).toEqual([])
+    expect(c.state.pending.value).toBe(2)
+  })
+
+  it('离开后在途批次完成保留队列，回来确认已存结果后才派发下一批', async () => {
+    let resolveBatch, submitted, completed
+    const c = setup({ saved: true, keepAlive: true, messages: Array.from({ length: 21 }, (_, i) => message(i + 1)), intercept: (path, options) => {
+      if (path.endsWith('/batches') && !submitted) {
+        submitted = options.body.messages
+        return new Promise(resolve => { resolveBatch = resolve })
+      }
+      if (path.endsWith('/state') && completed) return { scope_id: 'friend', enabled: true, items: completed.items, batch: completed, mood: null }
+    } }); await settle()
+    expect(submitted).toHaveLength(20)
+    c.visible.value = false; await settle()
+    completed = { id: 'in-flight', scope_id: 'friend', status: 'completed', items: submitted.map(c.record), progress: { total: 20, analyzed: 20 }, mood: null, error: null }
+    resolveBatch(completed); await settle()
+    const posts = () => c.request.mock.calls.filter(([path]) => path.endsWith('/batches'))
+    expect(posts()).toHaveLength(1)
+    expect(c.state.pending.value).toBe(1)
+    expect(c.state.enabled.value).toBe(true)
+    c.visible.value = true; await settle()
+    expect(posts()).toHaveLength(2)
+    expect(posts()[1][1].body.messages.map(r => r.identity)).toEqual(['s:21'])
+    expect(Object.keys(c.state.labels.value)).toHaveLength(20)
+  })
+})
 
 describe('已加载消息自动识别', () => {
   it.each([{ username: 'friend' }, { username: 'group@chatroom' }])('私聊与群聊同步、识别、追加前文及迟到标签均排除本人（%j）', async contact => {

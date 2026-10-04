@@ -1,5 +1,5 @@
 {
-  "name": "xwechat-desktop",
+  "name": "wechat-data-analysis-desktop",
   "private": true,
   "version": "2.7.0",
   "main": "src/main.cjs",
@@ -13,7 +13,8 @@
     "build:icon": "node scripts/build-icon.cjs",
     "smoke:win": "node scripts/smoke-windows-package.cjs",
     "smoke:win:real": "node scripts/smoke-windows-real-database.cjs",
-    "dist": "npm run dist:win",
+    "dist": "npm run dist:win:unsigned",
+    "dist:win:unsigned": "node scripts/build-windows-unsigned.cjs",
     "dist:win": "npm run build:ui && npm run build:backend && npm run build:icon && electron-builder --win --x64 --publish never"
   },
   "dependencies": {
@@ -29,14 +30,13 @@
     "directories": {
       "output": "dist"
     },
-    "afterPack": "scripts/after-pack.cjs",
-    "afterSign": "scripts/after-sign.cjs",
     "electronFuses": {
       "runAsNode": true
     },
     "files": [
       "src/**/*",
       "!src/wcdb-sidecar.cjs",
+      "!node_modules/ffmpeg-static/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -64,6 +64,8 @@
           "ffmpeg.exe",
           "ffmpeg.LICENSE",
           "ffmpeg.README",
+          "ffmpeg.exe.LICENSE",
+          "ffmpeg.exe.README",
           "LICENSE"
         ]
       }

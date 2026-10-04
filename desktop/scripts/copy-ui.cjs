@@ -20,5 +20,13 @@ for (const ent of fs.readdirSync(dstDir, { withFileTypes: true })) {
 }
 fs.cpSync(srcDir, dstDir, { recursive: true });
 
+// HTML exports need stable icon names; Nuxt imports emit hashed asset names.
+// Preserve generated/public assets, matching the exporter's copy precedence.
+fs.cpSync(
+  path.join(repoRoot, "frontend", "assets", "images", "wechat"),
+  path.join(dstDir, "assets", "images", "wechat"),
+  { recursive: true, force: false }
+);
+
 // eslint-disable-next-line no-console
 console.log(`Copied UI: ${srcDir} -> ${dstDir}`);

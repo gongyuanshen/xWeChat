@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, provide, ref, useId } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, provide, ref, useId } from 'vue'
 import ContextIcon from '../ai-elements/context/ContextIcon.vue'
 import { ContextKey } from '../ai-elements/context/context'
 const props = defineProps({ budget: Object })
@@ -52,17 +52,24 @@ const closeOnEscape = event => {
   event.stopPropagation()
 }
 let resizeObserver
-onMounted(() => {
-  resizeObserver = new ResizeObserver(positionTooltip)
+const bindTooltip = () => {
+  if (!resizeObserver) resizeObserver = new ResizeObserver(positionTooltip)
   resizeObserver.observe(trigger.value.closest('.agent-input-box') || trigger.value.parentElement)
   window.addEventListener('resize', positionTooltip)
   document.addEventListener('keydown', closeOnEscape, true)
-})
-onBeforeUnmount(() => {
+}
+const suspendTooltip = () => {
+  hovered.value = false
+  focused.value = false
+  dismissed.value = true
   resizeObserver?.disconnect()
   window.removeEventListener('resize', positionTooltip)
   document.removeEventListener('keydown', closeOnEscape, true)
-})
+}
+onMounted(bindTooltip)
+onActivated(bindTooltip)
+onDeactivated(suspendTooltip)
+onBeforeUnmount(suspendTooltip)
 provide(ContextKey, {
   usedTokens: computed(() => props.budget?.used || 0),
   maxTokens: computed(() => known.value ? (props.budget.window_percent != null ? props.budget.model_window : props.budget.input_capacity) : 0),

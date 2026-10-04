@@ -1,20 +1,10 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 import tailwindcss from '@tailwindcss/vite'
-import {
-  FIRST_USE_AGREEMENT_STORAGE_KEY,
-  FIRST_USE_AGREEMENT_VERSION,
-} from './lib/first-use-agreement'
-import { createFirstUseBootstrapScript } from './lib/first-use-bootstrap-script'
 
 const frontendHost = String(process.env.NUXT_HOST || '').trim()
 const frontendPort = Number.parseInt(String(process.env.NUXT_PORT || process.env.PORT || '3000').trim(), 10)
 const backendPort = String(process.env.WECHAT_TOOL_PORT || '10392').trim() || '10392'
 const devProxyTarget = `http://127.0.0.1:${backendPort}/api`
-const firstUseBootstrapScript = createFirstUseBootstrapScript({
-  storageKey: FIRST_USE_AGREEMENT_STORAGE_KEY,
-  version: FIRST_USE_AGREEMENT_VERSION,
-  countdownMilliseconds: 20_000,
-})
 
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
@@ -71,13 +61,6 @@ export default defineNuxtConfig({
         { charset: 'utf-8' },
         { name: 'viewport', content: 'width=device-width, initial-scale=1' },
         { name: 'description', content: 'xwechat - 个人微信数据分析与互动工具' }
-      ],
-      script: [
-        {
-          key: 'first-use-bootstrap',
-          innerHTML: firstUseBootstrapScript,
-          tagPosition: 'head',
-        }
       ],
       link: [
         { rel: 'icon', type: 'image/png', href: '/logo.png' }

@@ -261,3 +261,135 @@ test('粘贴批次解码失败时拒绝整批并清理已创建截图，保留�
     entries: [{ name: '截图.png', bytes: new ArrayBuffer(1) }, { path: path.join(f.dir, 'missing.pdf') }] }), { code: 'ENOENT' });
   assert.deepEqual(fs.readdirSync(f.dir), ['照片.png']);
 });
+
+test('配置 output 内尚不存在的多级附件缓存目录会在首个虚拟附件写入前建立', async (t) => {
+  const f = fixture(t);
+  const tempRoot = path.join(f.dir, 'configured-output', 'cache', 'chat-attachments');
+  const tempDirectories = new Set();
+  const bytes = Uint8Array.from(Buffer.from('original screenshot bytes')).buffer;
+  assert.equal(fs.existsSync(tempRoot), false);
+
+  const result = await pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories,
+    entries: [{ name: '截图.png', bytes }] });
+
+  const screenshot = result.attachments[0];
+  const relative = path.relative(tempRoot, screenshot.path);
+  assert.equal(path.isAbsolute(relative), false);
+  assert.equal(relative.startsWith('..'), false);
+  assert.equal(fs.readFileSync(screenshot.path, 'utf8'), 'original screenshot bytes');
+  assert.equal(tempDirectories.size, 1);
+  pickerModule.disposeChatAttachmentTemps(tempDirectories);
+  assert.deepEqual(fs.readdirSync(tempRoot), []);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), 'selected image bytes');
+});
+
+test('旧系统 Temp 已被清空且删除时新粘贴只写配置 output，不重新创建旧 Temp', async (t) => {
+  const f = fixture(t);
+  const oldTemp = path.join(f.dir, 'old-windows-temp');
+  fs.mkdirSync(oldTemp);
+  fs.writeFileSync(path.join(oldTemp, 'old-screenshot.png'), 'old');
+  fs.rmSync(oldTemp, { recursive: true });
+  const tempRoot = path.join(f.dir, 'configured-output', 'chat-attachments');
+  const tempDirectories = new Set();
+
+  const result = await pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories,
+    entries: [{ name: '新截图.png', bytes: Uint8Array.from(Buffer.from('new screenshot')).buffer }] });
+
+  assert.equal(fs.existsSync(oldTemp), false);
+  assert.equal(fs.readFileSync(result.attachments[0].path, 'utf8'), 'new screenshot');
+  assert.equal(path.dirname([...tempDirectories][0]), tempRoot);
+  pickerModule.disposeChatAttachmentTemps(tempDirectories);
+});
+
+test('虚拟附件拒绝缺失或相对缓存根目录，不能隐式写到进程工作目录', async (t) => {
+  const f = fixture(t);
+  const tempDirectories = new Set();
+  const entries = [{ name: '截图.png', bytes: new ArrayBuffer(1) }];
+  const originalCwd = process.cwd();
+  process.chdir(f.dir);
+  try {
+    for (const tempRoot of [undefined, '', 'relative-chat-cache']) {
+      await assert.rejects(pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories, entries }),
+        error => /绝对路径/.test(error.message));
+    }
+  } finally {
+    process.chdir(originalCwd);
+  }
+  assert.equal(tempDirectories.size, 0);
+  assert.deepEqual(fs.readdirSync(f.dir), ['照片.png']);
+});
+
+test('纯磁盘粘贴无需缓存根目录，不复制文件也不把用户原件登记为临时目录', async (t) => {
+  const f = fixture(t);
+  const document = f.writeFile('原件.pdf', 'source document');
+  const tempDirectories = new Set();
+
+  const result = await pickerModule.importChatAttachments({ ...f, tempDirectories,
+    entries: [{ path: document }, { path: f.file }] });
+
+  assert.deepEqual(result.attachments.map(item => item.path), [document, f.file]);
+  assert.equal(tempDirectories.size, 0);
+  pickerModule.disposeChatAttachmentTemps(tempDirectories);
+  assert.equal(fs.readFileSync(document, 'utf8'), 'source document');
+  assert.equal(fs.readFileSync(f.file, 'utf8'), 'selected image bytes');
+});
+
+test('配置缓存根路径被普通文件占用时原样报错，不能回退到其他临时位置', async (t) => {
+  const f = fixture(t);
+  const tempRoot = f.writeFile('output-cache-is-a-file', 'keep this file');
+  const tempDirectories = new Set();
+
+  await assert.rejects(pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories,
+    entries: [{ name: '截图.png', bytes: new ArrayBuffer(1) }] }),
+  error => ['EEXIST', 'ENOTDIR', 'ENOENT'].includes(error.code));
+
+  assert.equal(tempDirectories.size, 0);
+  assert.equal(fs.readFileSync(tempRoot, 'utf8'), 'keep this file');
+  assert.deepEqual(fs.readdirSync(f.dir).sort(), ['output-cache-is-a-file', '照片.png'].sort());
+});
+
+test('混合粘贴后续磁盘源丢失只清理失败批次，已有缓存与用户原件仍可读取', async (t) => {
+  const f = fixture(t);
+  const tempRoot = path.join(f.dir, 'configured-output', 'chat-attachments');
+  fs.mkdirSync(tempRoot, { recursive: true });
+  const tempDirectories = new Set();
+  const existing = await pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories,
+    entries: [{ name: '先前截图.png', bytes: Uint8Array.from(Buffer.from('keep earlier screenshot')).buffer }] });
+  const beforeDirectories = [...tempDirectories];
+  const beforeChildren = fs.readdirSync(tempRoot);
+
+  await assert.rejects(pickerModule.importChatAttachments({ ...f, tempRoot, tempDirectories,
+    entries: [
+      { path: f.file },
+      { name: '新截图.png', bytes: Uint8Array.from(Buffer.from('new screenshot')).buffer },
+      { path: path.join(f.dir, 'missing-source.pdf') },
+    ] }), { code: 'ENOENT' });
+
+  assert.deepEqual([...tempDirectories], beforeDirectories);
+  assert.deepEqual(fs.readdirSync(tempRoot), beforeChildren);
+  assert.equal(fs.readFileSync(existing.attachments[0].path, 'utf8'), 'keep earlier screenshot');
+  assert.equal(fs.readFileSync(f.file, 'utf8'), 'selected image bytes');
+  pickerModule.disposeChatAttachmentTemps(tempDirectories);
+});
+
+test('外部删除已登记缓存后退出清理仍暴露 ENOENT，并继续清理其他自建批次', async (t) => {
+  const f = fixture(t);
+  const tempDirectories = new Set();
+  const create = name => pickerModule.importChatAttachments({ ...f, tempRoot: f.dir, tempDirectories,
+    entries: [{ name, bytes: Uint8Array.from(Buffer.from('screenshot')).buffer }] });
+  const deleted = await create('外部删除.png');
+  const retained = await create('正常清理.png');
+  const deletedDirectory = [...tempDirectories][0];
+  fs.rmSync(deletedDirectory, { recursive: true });
+
+  assert.throws(() => pickerModule.disposeChatAttachmentTemps(tempDirectories), error => {
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.errors.length, 1);
+    assert.equal(error.errors[0].code, 'ENOENT');
+    return true;
+  });
+  assert.equal(fs.existsSync(deleted.attachments[0].path), false);
+  assert.equal(fs.existsSync(retained.attachments[0].path), false);
+  assert.deepEqual([...tempDirectories], [deletedDirectory]);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), 'selected image bytes');
+});

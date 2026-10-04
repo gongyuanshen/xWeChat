@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { agentModelSelection } from '../../lib/agent-model-selection'
 
 const modelKey = choice => JSON.stringify(['profile_id', 'model_id', 'reasoning_effort', 'thinking_mode', 'thinking_budget'].map(key => choice[key] ?? null))
@@ -26,12 +26,13 @@ export function useChatInsights({ account, contact, open, api, shared }) {
   })
   const scope = computed(() => JSON.stringify([account.value, contact.value?.username, member.value, engine.value, engine.value === 'api' ? modelChoice.value : null]))
   let generation = 0, selected = 0, detailRequest = 0, labelRequest = 0, memberRequest = 0, profilesRequest = 0, historyRequest = 0
-  let disposed = false, refreshing = false, refreshQueued = false, closeEvents, timer, localRequest = 0
+  let disposed = false, suspended = false, refreshing = false, refreshQueued = false, closeEvents, timer, localRequest = 0
   const invalidateDetail = () => { detailRequest++; refreshing = false; refreshQueued = false }
   const current = ticket => !disposed && ticket === generation
   const query = () => ({ account: account.value, username: contact.value.username, member_username: member.value, engine: engine.value })
   const showError = (err, ticket) => { if (current(ticket)) error.value = `${err.message}${err.diagnostic_id ? ` · 诊断 ${err.diagnostic_id}` : ''}` }
   const loadProfiles = async () => {
+    if (suspended) return
     const ticket = ++profilesRequest, modelTicket = modelSelection.beginLoad()
     profilesLoading.value = true; profilesError.value = ''
     try {
@@ -43,7 +44,7 @@ export function useChatInsights({ account, contact, open, api, shared }) {
     finally { if (!disposed && ticket === profilesRequest) profilesLoading.value = false }
   }
   const requestLocalModel = async (action, body) => {
-    if (localBusy.value || (!action && localLoading.value)) return
+    if (suspended || localBusy.value || (!action && localLoading.value)) return
     const request = ++localRequest
     localLoading.value = !action; localBusy.value = Boolean(action); localError.value = ''
     try {
@@ -62,11 +63,13 @@ export function useChatInsights({ account, contact, open, api, shared }) {
     return requestLocalModel('import', { path: localModelPath.value.trim() })
   }
   const loadLabels = async () => {
+    if (suspended) return
     const task = activeTask.value, ticket = generation, version = selected, request = ++labelRequest
     if (!task || !labelsEnabled.value) return
     try {
       const result = {}; let offset = 0, total
       do {
+        if (suspended) return
         const page = await api.request(`/insights/tasks/${encodeURIComponent(task.id)}/messages`, { query: { account: account.value, limit: 100, offset } })
         if (!current(ticket) || version !== selected || request !== labelRequest || !labelsEnabled.value) return
         if (!Array.isArray(page.items) || !Number.isInteger(page.total) || page.total < 0) throw new Error('消息标签分页返回格式异常')
@@ -83,6 +86,7 @@ export function useChatInsights({ account, contact, open, api, shared }) {
     await loadLabels()
   }
   const refresh = async () => {
+    if (suspended) return
     if (refreshing) { refreshQueued = true; return }
     const task = activeTask.value, ticket = generation, version = selected, request = ++detailRequest
     if (!task) return
@@ -102,6 +106,7 @@ export function useChatInsights({ account, contact, open, api, shared }) {
     }
   }
   const loadHistory = async () => {
+    if (suspended) return
     const ticket = generation, version = selected, request = ++historyRequest
     if (!account.value || !contact.value?.username) return
     const taskId = activeTask.value?.id, selectedScope = query(), selectedModel = engine.value === 'api' ? { ...modelChoice.value } : null
@@ -118,7 +123,7 @@ export function useChatInsights({ account, contact, open, api, shared }) {
         if (currentTask) await adopt(currentTask)
         return
       }
-      if (selectedModel && (!selectedModel.profile_id || !selectedModel.model_id)) return
+      if (suspended || (selectedModel && (!selectedModel.profile_id || !selectedModel.model_id))) return
       const saved = await api.request('/insights/tasks', { query: { ...selectedScope, include_hidden: true, limit: 1, offset: 0,
         ...(selectedModel ? { selected_model: JSON.stringify(selectedModel) } : {}) } })
       if (!current(ticket) || version !== selected || request !== historyRequest) return
@@ -198,10 +203,10 @@ export function useChatInsights({ account, contact, open, api, shared }) {
   }
   const connect = () => {
     closeEvents?.(); closeEvents = undefined
-    if (!open.value || !account.value) return
+    if (suspended || !open.value || !account.value) return
     const ticket = generation
     closeEvents = api.events(account.value, event => {
-      if (current(ticket) && event.kind === 'insight' && event.body.task_id === activeTask.value?.id) void refresh()
+      if (!suspended && current(ticket) && event.kind === 'insight' && event.body.task_id === activeTask.value?.id) void refresh()
     })
   }
   watch([account, () => contact.value?.username], () => { selectedMember.value = ''; members.value = []; membersLoading.value = false; labelsEnabled.value = false }, { flush: 'sync' })
@@ -218,12 +223,21 @@ export function useChatInsights({ account, contact, open, api, shared }) {
   })
   watch(open, value => { connect(); if (value) { loadEngine(); void loadHistory() } })
   watch(labelsEnabled, value => { labelRequest++; if (value) void loadLabels(); else labels.value = {} })
-  onMounted(() => {
-    if (open.value) { connect(); loadEngine(); void loadHistory() }
+  const startPolling = () => {
     timer = setInterval(() => {
       if (open.value && running.value) void refresh()
       if (open.value && engine.value === 'laya' && ['downloading', 'verifying'].includes(localModel.value?.state)) void loadLocalModel()
     }, 3000)
+  }
+  onMounted(() => {
+    if (open.value) { connect(); loadEngine(); void loadHistory() }
+    startPolling()
+  })
+  onDeactivated(() => { suspended = true; closeEvents?.(); closeEvents = undefined; clearInterval(timer) })
+  onActivated(() => {
+    if (!suspended) return
+    suspended = false; startPolling()
+    if (open.value) { connect(); loadEngine(); if (activeTask.value) void refresh(); else void loadHistory() }
   })
   onUnmounted(() => { disposed = true; generation++; closeEvents?.(); clearInterval(timer) })
   return { range, engine, localModel, localLoading, localBusy, localError, localModelPath, loadLocalModel, downloadLocalModel, pauseLocalModel, importLocalModel,

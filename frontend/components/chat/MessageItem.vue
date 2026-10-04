@@ -1,6 +1,6 @@
 <template>
   <div
-    class="mb-4"
+    class="message-row mb-4"
     :class="[
       (highlightServerIdStr && message.serverIdStr && highlightServerIdStr === message.serverIdStr) ? 'message-locate-highlight' : '',
       (highlightMessageId === message.id) ? 'bg-emerald-100/50 rounded-md px-2 py-1 -mx-2' : ''
@@ -22,7 +22,7 @@
     </div>
 
     <div v-else class="flex items-center" :class="message.isSent ? 'justify-end' : 'justify-start'">
-      <div class="flex items-start max-w-md" :class="message.isSent ? 'flex-row-reverse' : ''">
+      <div class="message-row-body flex items-start max-w-md" :class="message.isSent ? 'flex-row-reverse' : ''">
         <div
           class="relative"
           @mouseenter="onMessageAvatarMouseEnter(message)"
@@ -60,7 +60,7 @@
         </div>
 
         <div
-          class="flex flex-col relative group"
+          class="message-content-column flex flex-col relative group"
           :class="[message.isSent ? 'items-end' : 'items-start', { 'privacy-blur': privacyMode }]"
           @contextmenu="openMediaContextMenu($event, message, 'message')"
         >

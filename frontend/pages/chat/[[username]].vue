@@ -1,5 +1,5 @@
 <template>
-  <div class="chat-page-shell relative h-screen w-full min-w-0 flex overflow-hidden">
+  <div ref="chatPageRef" class="chat-page-shell relative h-screen w-full min-w-0 flex overflow-hidden">
     <SessionListPanel :state="chatState" />
 
     <div class="chat-page-main flex-1 flex flex-col min-h-0 min-w-0">
@@ -25,7 +25,8 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { storeToRefs } from 'pinia'
 
 import ResourceSidebar from '~/components/chat/ResourceSidebar.vue'
@@ -60,6 +61,7 @@ import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { useChatRealtimeStore } from '~/stores/chatRealtime'
 import { usePrivacyStore } from '~/stores/privacy'
 
+defineOptions({ name: 'ChatPage' })
 definePageMeta({
   key: 'chat'
 })
@@ -69,6 +71,10 @@ useHead({
 })
 
 const route = useRoute()
+const chatPageRef = ref(null)
+const chatPageActive = ref(true)
+let chatInitialized = false
+let savedScrollPositions = []
 const api = useApi()
 const apiBase = useApiBase()
 const { openDialog: openSettingsDialog } = useSettingsDialog()
@@ -375,6 +381,7 @@ const selectContact = async (contact, options = {}) => {
     syncRoute: options.syncRoute !== false
   })
 
+  if (selectedContact.value?.username !== nextUsername) savedScrollPositions = []
   selectedContact.value = contact
   if (!nextUsername) return
 
@@ -388,7 +395,7 @@ const selectContact = async (contact, options = {}) => {
     })
   }
 
-  if (options.syncRoute !== false && nextUsername) {
+  if (chatPageActive.value && options.syncRoute !== false && nextUsername) {
     const current = routeUsername.value || ''
     if (current !== nextUsername) {
       await navigateTo(buildChatPath(nextUsername), { replace: options.replaceRoute !== false })
@@ -397,9 +404,15 @@ const selectContact = async (contact, options = {}) => {
 }
 
 const applyRouteSelection = async (options = {}) => {
+  if (!chatPageActive.value) return
   const selectionReason = String(options.reason || 'route-selection').trim() || 'route-selection'
   const requested = routeUsername.value || ''
   const fallbackToFirstWhenMissing = !!options.fallbackToFirstWhenMissing
+  // Returning via the chat icon should resume the conversation, not select row one.
+  if (!requested && selectedContact.value?.username) {
+    await navigateTo(buildChatPath(selectedContact.value.username), { replace: true })
+    return
+  }
   if ((!contacts.value || contacts.value.length === 0) && requested) {
     if (selectedContact.value?.username === requested) {
       return
@@ -617,7 +630,7 @@ const stopVoiceBatchPolling = () => {
 
 const scheduleVoiceBatchPoll = () => {
   stopVoiceBatchPolling()
-  if (!process.client || !voiceSidebarOpen.value || !isVoiceBatchActive()) return
+  if (!process.client || !chatPageActive.value || !voiceSidebarOpen.value || !isVoiceBatchActive()) return
   voiceBatchPollTimer = window.setTimeout(() => {
     voiceBatchPollTimer = null
     void pollVoiceBatch()
@@ -836,6 +849,7 @@ let accountChangeQueued = false
 let accountChangeDisposed = false
 
 const resetAccountScopedState = () => {
+  savedScrollPositions = []
   selectedContact.value = null
   resetMessageState()
   searchState.resetSearchState()
@@ -855,7 +869,7 @@ let lastRealtimeSessionsRefreshAt = 0
 const runRealtimeSessionsRefresh = () => {
   realtimeSessionsRefreshTimer = null
   if (!realtimeSessionsRefreshQueued) return
-  if (!process.client || document.visibilityState === 'hidden') return
+  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
   if (accountBootstrapInProgress || accountChangeInProgress) return
   if (realtimeSessionsRefreshFuture) return
 
@@ -884,6 +898,10 @@ const cancelQueuedRealtimeSessionsRefresh = () => {
 }
 
 const onAccountChange = async () => {
+  if (!chatPageActive.value) {
+    accountChangeQueued = true
+    return
+  }
   // A second selection can arrive while the previous account's session
   // request is being aborted.  Coalesce those changes and replay the latest
   // selected account instead of dropping the watcher event.
@@ -1034,6 +1052,74 @@ const onVisibilityChange = () => {
   }
 }
 
+const attachChatViewListeners = () => {
+  document.addEventListener('click', onGlobalClick)
+  document.addEventListener('keydown', onGlobalKeyDown)
+  document.addEventListener('mousemove', onFloatingWindowMouseMove)
+  document.addEventListener('mouseup', onFloatingWindowMouseUp)
+  document.addEventListener('touchmove', onFloatingWindowMouseMove)
+  document.addEventListener('touchend', onFloatingWindowMouseUp)
+  document.addEventListener('touchcancel', onFloatingWindowMouseUp)
+  window.addEventListener('focus', onWindowFocus)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+}
+
+const detachChatViewListeners = () => {
+  document.removeEventListener('click', onGlobalClick)
+  document.removeEventListener('keydown', onGlobalKeyDown)
+  document.removeEventListener('mousemove', onFloatingWindowMouseMove)
+  document.removeEventListener('mouseup', onFloatingWindowMouseUp)
+  document.removeEventListener('touchmove', onFloatingWindowMouseMove)
+  document.removeEventListener('touchend', onFloatingWindowMouseUp)
+  document.removeEventListener('touchcancel', onFloatingWindowMouseUp)
+  window.removeEventListener('focus', onWindowFocus)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+}
+
+onBeforeRouteLeave(() => {
+  savedScrollPositions = [...chatPageRef.value.querySelectorAll('.overflow-y-auto')]
+    .map(element => [element, element.scrollTop])
+  for (const media of chatPageRef.value.querySelectorAll('audio, video')) media.pause()
+})
+
+onActivated(async () => {
+  chatPageActive.value = true
+  attachChatViewListeners()
+  if (!chatInitialized) return
+  if (accountChangeQueued) {
+    accountChangeQueued = false
+    await onAccountChange()
+  } else {
+    await applyRouteSelection({ reason: 'route-resume' })
+  }
+  await nextTick()
+  if (!chatPageActive.value) return
+  for (const [element, scrollTop] of savedScrollPositions) element.scrollTop = scrollTop
+  savedScrollPositions = []
+  updateJumpToBottomState()
+  if (realtimeEnabled.value) {
+    queueRealtimeRefresh()
+    queueRealtimeSessionsRefresh()
+  }
+  if (voiceSidebarOpen.value) void pollVoiceBatch()
+  void consumeAiNavigation()
+})
+
+onDeactivated(() => {
+  chatPageActive.value = false
+  detachChatViewListeners()
+  cancelQueuedRealtimeSessionsRefresh()
+  stopVoiceBatchPolling()
+  stopSessionListResize()
+  onFloatingWindowMouseUp()
+  closeContextMenu()
+  clearContactProfileHoverHideTimer()
+  closeContactProfileCard()
+  closeImagePreview()
+  closeVideoPreview()
+  closeGroupAnnouncement()
+})
+
 onMounted(async () => {
   if (!process.client) return
 
@@ -1044,16 +1130,6 @@ onMounted(async () => {
     selectedAccount: selectedAccount.value,
     desktopShell: isDesktopShell()
   })
-
-  document.addEventListener('click', onGlobalClick)
-  document.addEventListener('keydown', onGlobalKeyDown)
-  document.addEventListener('mousemove', onFloatingWindowMouseMove)
-  document.addEventListener('mouseup', onFloatingWindowMouseUp)
-  document.addEventListener('touchmove', onFloatingWindowMouseMove)
-  document.addEventListener('touchend', onFloatingWindowMouseUp)
-  document.addEventListener('touchcancel', onFloatingWindowMouseUp)
-  window.addEventListener('focus', onWindowFocus)
-  document.addEventListener('visibilitychange', onVisibilityChange)
 
   logChatBootstrap('loadContacts:start', {
     selectedAccount: selectedAccount.value
@@ -1070,6 +1146,7 @@ onMounted(async () => {
     selectedAccount: selectedAccount.value,
     contactCount: contacts.value.length
   })
+  chatInitialized = true
 
   const deferInitialConversationBoot = isDesktopShell()
   await waitForNextPaint()
@@ -1099,16 +1176,8 @@ onUnmounted(() => {
   accountChangeDisposed = true
   accountChangeQueued = false
 
-  document.removeEventListener('click', onGlobalClick)
-  document.removeEventListener('keydown', onGlobalKeyDown)
-  document.removeEventListener('mousemove', onFloatingWindowMouseMove)
-  document.removeEventListener('mouseup', onFloatingWindowMouseUp)
-  document.removeEventListener('touchmove', onFloatingWindowMouseMove)
-  document.removeEventListener('touchend', onFloatingWindowMouseUp)
-  document.removeEventListener('touchcancel', onFloatingWindowMouseUp)
-  window.removeEventListener('focus', onWindowFocus)
+  detachChatViewListeners()
   window.removeEventListener(PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT, onProjectVoiceTranscriptsInvalidated)
-  document.removeEventListener('visibilitychange', onVisibilityChange)
 
   if (locateServerIdTimer) clearTimeout(locateServerIdTimer)
   locateServerIdTimer = null
@@ -1120,7 +1189,7 @@ onUnmounted(() => {
 })
 
 watch(realtimeMessageEventSeq, (next, previous) => {
-  if (!process.client || document.visibilityState === 'hidden') return
+  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
   if (next === previous) return
   if (accountBootstrapInProgress || accountChangeInProgress) return
   const event = realtimeMessageEvent.value
@@ -1137,13 +1206,14 @@ watch(realtimeMessageEventSeq, (next, previous) => {
 })
 
 watch(realtimeChangeSeq, (next, previous) => {
-  if (!process.client || document.visibilityState === 'hidden') return
+  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
   if (next === previous || realtimeMessageEvent.value?.type !== 'conversation_updated') return
   if (accountBootstrapInProgress || accountChangeInProgress) return
   queueRealtimeSessionsRefresh()
 })
 
 watch(realtimeToggleSeq, async () => {
+  if (!chatPageActive.value) return
   const action = String(realtimeLastToggleAction.value || '')
   if (action === 'enabled') {
     await refreshSessionsForSelectedAccount({ sourceOverride: 'auto' })
@@ -1295,15 +1365,18 @@ const locateInsightSource = async source => {
   }
 }
 const consumeAiNavigation = async () => {
+  if (!chatPageActive.value) return
   const target = aiNavigation.value
   if (!target) return
   aiDiagnosticApi.diagnostic('navigation.started', { task_id: target.task_id, component: 'notification' })
   try {
   await chatAccounts.ensureLoaded()
+  if (!chatPageActive.value || aiNavigation.value !== target) return
   if (target.account !== selectedAccount.value) chatAccounts.setSelectedAccount(target.account)
   await nextTick()
   // 等待现有账号切换流程结束，防止定位结果被初始会话加载覆盖。
   for (let i = 0; i < 100 && (accountBootstrapInProgress || accountChangeInProgress); i++) await new Promise(resolve => setTimeout(resolve, 100))
+  if (!chatPageActive.value) return
   if (aiNavigation.value !== target) { aiDiagnosticApi.diagnostic('response.stale', { task_id: target.task_id, component: 'notification' }); return }
   aiSidebarOpen.value = true
   aiFocusTaskId.value = target.task_id || ''

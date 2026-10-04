@@ -1,4 +1,4 @@
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 
 const active = value => ['queued', 'running'].includes(value?.status)
 const keyOf = value => `${value.identity}:${value.time}:${value.fingerprint}`
@@ -22,7 +22,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
     return { title: group ? '群聊氛围（其他成员近20条）' : '对方最新情绪', label: currentMood?.label || '证据不足',
       detail: currentMood ? `已分析 ${currentMood.sample_count} 条 · 有效情绪 ${currentMood.known_count} 条` : '尚无已分析消息' }
   })
-  let generation = 0, settingVersion = 0, disposed = false, syncing = false, syncAgain = false, submitting = false, refreshing = false, refreshAgain = false
+  let generation = 0, settingVersion = 0, disposed = false, suspended = false, syncing = false, syncAgain = false, syncForceAgain = false, submitting = false, refreshing = false, refreshAgain = false
   let closeEvents, queue = [], refs = [], known = new Set(), hashes = new Map(), retryNext = false
   const current = ticket => !disposed && ticket === generation
   const fail = (err, ticket) => { if (current(ticket)) error.value = describeError(err) }
@@ -56,6 +56,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
     if (value.status === 'failed') error.value = describeError(value.error)
   }
   const refresh = async () => {
+    if (suspended) return
     if (refreshing) { refreshAgain = true; return }
     const selectedBatch = batch.value, ticket = generation
     if (!selectedBatch || !enabled.value) return
@@ -75,10 +76,10 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
   }
   const connect = () => {
     closeEvents?.(); closeEvents = undefined
-    if (!enabled.value || !scopeId.value) return
+    if (suspended || !enabled.value || !scopeId.value) return
     const ticket = generation
     closeEvents = api.events(account.value, event => {
-      if (!current(ticket) || !enabled.value || event.kind !== 'insight_live' || event.body.scope_id !== scopeId.value) return
+      if (suspended || !current(ticket) || !enabled.value || event.kind !== 'insight_live' || event.body.scope_id !== scopeId.value) return
       const body = event.body
       if (body.label) mergeItems([body.label])
       if (body.mood) adoptMood(body.mood)
@@ -91,7 +92,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
     })
   }
   const dispatch = async () => {
-    if (!enabled.value || !ready.value || saving.value || syncing || submitting || refreshing || active(batch.value) || error.value || !queue.length) return
+    if (suspended || !enabled.value || !ready.value || saving.value || syncing || submitting || refreshing || active(batch.value) || error.value || !queue.length) return
     const ticket = generation, operation = settingVersion, selectedScope = { ...scope.value }
     // 历史页追加队尾时保留 FIFO；遇时间回退拆批，避免把未来消息作为旧消息的前文。
     let count = Math.min(20, queue.length)
@@ -108,13 +109,14 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
     finally { if (current(ticket)) { submitting = false; if (!active(batch.value) && !error.value) void dispatch() } }
   }
   const sync = async (force = false) => {
-    if (syncing) { syncAgain = true; return }
+    if (suspended) return
+    if (syncing) { syncAgain = true; syncForceAgain ||= force; return }
     if (!validScope.value) return
     const ticket = generation, operation = settingVersion, selectedScope = { ...scope.value }
     syncing = true; loading.value = true
     try {
       await nextTick()
-      if (!current(ticket)) return
+      if (suspended || !current(ticket)) return
       const raw = messages.value.filter(m => !m.isSent && ['text', 'quote'].includes(m.renderType) && typeof m.content === 'string' && m.content.trim().length > 0 && !(m.renderType === 'quote' && m.content === '[引用消息]'))
       const material = await Promise.all(raw.map(async m => {
         const identity = identityOf(m), cache = hashes.get(identity)
@@ -122,7 +124,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
         if (current(ticket)) hashes.set(identity, { text: m.content, fingerprint })
         return { identity, time: m.createTime, fingerprint }
       }))
-      if (!current(ticket)) return
+      if (suspended || !current(ticket)) return
       refs = material
       const valid = new Set(refs.map(keyOf))
       known = new Set([...known].filter(key => valid.has(key)))
@@ -130,6 +132,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
       records.value = Object.fromEntries(Object.entries(records.value).filter(([, r]) => valid.has(keyOf(r))))
       const missing = force ? refs : refs.filter(r => !known.has(keyOf(r)))
       for (let offset = 0; offset < missing.length || (!ready.value && offset === 0); offset += 200) {
+        if (suspended) return
         const chunk = missing.slice(offset, offset + 200)
         const beforeRequest = records.value
         const value = await api.request('/insights/live/state', { method: 'POST', retry: 0, body: { ...selectedScope, messages: chunk } })
@@ -151,7 +154,7 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
     finally {
       if (current(ticket)) {
         syncing = false; loading.value = false
-        if (syncAgain) { syncAgain = false; void sync() }
+        if (syncAgain) { const forceNext = syncForceAgain; syncAgain = false; syncForceAgain = false; void sync(forceNext) }
         else void dispatch()
       }
     }
@@ -181,12 +184,18 @@ export function useMessageRecognition({ account, contact, messages, engine, mode
   watch(scopeKey, () => {
     generation++; settingVersion++; closeEvents?.(); closeEvents = undefined
     enabled.value = false; ready.value = false; loading.value = false; saving.value = false; error.value = ''; records.value = {}; batch.value = null; mood.value = null; scopeId.value = ''; pending.value = 0
-    queue = []; refs = []; known = new Set(); hashes = new Map(); retryNext = false; syncing = false; syncAgain = false; submitting = false; refreshing = false; refreshAgain = false
+    queue = []; refs = []; known = new Set(); hashes = new Map(); retryNext = false; syncing = false; syncAgain = false; syncForceAgain = false; submitting = false; refreshing = false; refreshAgain = false
     void sync()
   }, { immediate: true, flush: 'sync' })
   watch(() => messages.value.map(m => [m.id, m.serverIdStr, m.createTime, m.renderType, m.content, m.isSent]), () => { void sync() }, { deep: true })
   let timer
-  onMounted(() => { timer = setInterval(() => { if (enabled.value && active(batch.value) && !error.value) void refresh() }, 3000) })
+  const startPolling = () => { timer = setInterval(() => { if (enabled.value && active(batch.value) && !error.value) void refresh() }, 3000) }
+  onMounted(startPolling)
+  onDeactivated(() => { suspended = true; closeEvents?.(); closeEvents = undefined; clearInterval(timer) })
+  onActivated(() => {
+    if (!suspended) return
+    suspended = false; startPolling(); void sync(true)
+  })
   onUnmounted(() => { disposed = true; generation++; closeEvents?.(); clearInterval(timer) })
   return { enabled, ready, loading, saving, error, labels, batch, mood, header, pending, validScope, setEnabled, retry, refresh }
 }

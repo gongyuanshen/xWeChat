@@ -47,15 +47,26 @@ test("development launcher owns the Electron process tree directly", () => {
   assert.doesNotMatch(source, /const electronCommand = "electron";/);
 });
 
-test("desktop package ships the platform ffmpeg binary and license", () => {
+test("desktop package ships ffmpeg only as an external resource with its license", () => {
+  const { FileMatcher, getNodeModuleFileMatcher } = require("app-builder-lib/out/fileMatcher.js");
   const resource = packageJson.build.extraResources.find(
     (item) => item && item.from === "node_modules/ffmpeg-static"
   );
   assert.ok(resource);
   assert.equal(resource.to, "ffmpeg");
-  assert.ok(resource.filter.includes("ffmpeg"));
-  assert.ok(resource.filter.includes("ffmpeg.exe"));
-  assert.ok(resource.filter.includes("LICENSE"));
+  const binary = require("ffmpeg-static");
+  const destination = path.join(desktopRoot, "dist", "ffmpeg-filter-check");
+  const resourceFilter = new FileMatcher(
+    path.join(desktopRoot, resource.from), destination, (value) => value, resource.filter
+  ).createFilter();
+  for (const file of [binary, `${binary}.LICENSE`, `${binary}.README`, path.join(path.dirname(binary), "LICENSE")]) {
+    assert.equal(resourceFilter(file, fs.statSync(file)), true, `missing ffmpeg resource: ${path.basename(file)}`);
+  }
+  const dependencyFilter = getNodeModuleFileMatcher(
+    desktopRoot, destination, (value) => value, packageJson.build.win,
+    { config: packageJson.build, debugLogger: { isEnabled: false } }
+  ).createFilter();
+  assert.equal(dependencyFilter(binary, fs.statSync(binary)), false, "ffmpeg binary must not be duplicated in application dependencies");
 });
 
 test("Windows package uses private-PKI signing while preserving producer signatures", () => {
@@ -94,7 +105,6 @@ test("Windows release uses protected cloud private-PKI signing and installer smo
   assert.ok(fs.existsSync(smokeScript), smokeScript);
   const smokeSource = fs.readFileSync(smokeScript, "utf8");
   assert.match(smokeSource, /wechat-backend\.exe/);
-  assert.match(smokeSource, /WeChatDataAnalysis\.exe/);
   assert.match(smokeSource, /wechatdb_client\.dll/);
   assert.match(smokeSource, /wechatdb_broker\.exe/);
   assert.match(smokeSource, /\/api\/health/);
