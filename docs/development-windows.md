@@ -1,6 +1,6 @@
 # Windows 源码开发与运行
 
-安装包和免安装压缩包的后续发行已暂停，相关构建及发布代码已移除。当前先完善可独立维护的聊天数据读取与导出底层，完成真实数据验证后再恢复发行。仓库保留源码、测试、依赖锁文件和必要的开发资源。
+项目已切换为纯独立数据链路，桌面应用打包通过独立流水线恢复。仓库提供源码、测试、依赖锁文件及一键打包脚本（支持 Windows NSIS 安装包、免安装压缩包及 Python Wheel 分发包）。
 
 ## 开发环境与启动
 
@@ -37,7 +37,7 @@ npm --prefix desktop run dev
 
 只启动 API 时执行 `uv run main.py`，不需要设置模式变量。`GET /api/health` 保留 `data_mode=offline`、`default_source=decrypted` 字段，用于现有客户端识别独立快照来源；这两个值不再对应可切换的运行模式。
 
-Python 分发构建使用 `uv build`。sdist 和 wheel 收集 Python 源码、资源、元数据及本地 WXGF 图片/动画解码库 `VoipEngine.dll`；旧 client/broker、完整性扩展、大图 Hook 和其他原生二进制继续排除，也不夹带本机前端依赖。安装后的命令行入口为 `wechat-decrypt`。此验证不代表 Electron EXE/安装包构建已恢复；其发行链路仍暂停。
+Python 分发构建使用 `uv build`。sdist 和 wheel 收集 Python 源码、资源、元数据及本地 WXGF 图片/动画解码库 `VoipEngine.dll`；旧 client/broker、完整性扩展、大图 Hook 和其他原生二进制继续排除，也不夹带本机前端依赖。安装后的命令行入口为 `wechat-decrypt`。桌面端应用通过 `npm --prefix desktop run dist` 打包。
 
 数据库密钥可以手动提供，也可以先保持微信登录，在解密页面填写对应账号的 `db_storage` 路径后点击获取。独立模式调用源码内存扫描，绑定进程实际加载的 DLL，并用该账号的会话库和消息库验证；失败明确报错，不切换到旧 Hook，不启动或重启微信。扫描完成后，退出微信并复制完整账号 `db_storage`，保留 `.db` 与对应 `-wal`，再用现有解密页面或 `POST /api/decrypt` 的 JSON 请求体提交 `key` 与副本路径。不要把密钥写进命令行或验收报告。
 

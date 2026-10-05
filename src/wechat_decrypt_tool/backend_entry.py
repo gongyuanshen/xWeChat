@@ -1,6 +1,7 @@
 """Module entry point for source launches and backend settings restarts."""
 
 import multiprocessing
+import sys
 
 import uvicorn
 
@@ -15,6 +16,16 @@ from wechat_decrypt_tool.runtime_settings import (
 
 
 def main() -> None:
+    if "--smoke-backend" in sys.argv[1:]:
+        import json
+        payload = {
+            "ok": True,
+            "frozen": bool(getattr(sys, "frozen", False)),
+            "platform": sys.platform,
+        }
+        print(json.dumps(payload, ensure_ascii=True))
+        return
+
     start_desktop_parent_watchdog_from_env()
     from wechat_decrypt_tool.api import app
 
