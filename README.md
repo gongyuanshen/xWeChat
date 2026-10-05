@@ -37,7 +37,7 @@
 ## ✨ 当前核心功能
 
 > *注：当前版本已重构并聚焦于核心能力，界面展示图后续补充，以下为功能文字说明。*
-> 还在开发中
+> *项目从一开始就是娱乐性质的，很多功能看起来有用但其实使用起来是限制很多的，用起来很难受的，一次本项目不可拿来当成真正的客户端使用，只适合娱乐使用。秉着可以不用但是不能没有的原则才加上了这些看着有用实则用起来很难受的功能。
 
 ## ⚖️ 免责声明与严禁商用
 
@@ -58,3 +58,4 @@
 ### 核心上游与功能基石
 - **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**：微信 4.x 数据解密与分析工具，本项目二次开发的底层基础项目。
 - **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**：微信聊天分析工具，本项目 AI 聊天画像、情绪感知、意图识别与 MBTI 推测功能的直接来源与核心基石。
+- **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**：一个本地的微信聊天记录导出和年度报告应用
