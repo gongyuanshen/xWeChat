@@ -9,21 +9,23 @@ import os
 import re
 import sqlite3
 import struct
+import tempfile
 import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-from .account_source_policy import source_metadata_prefers_decrypted_snapshot
-from .app_paths import get_output_databases_dir
+from .account_source_policy import source_metadata_is_imported_snapshot
+
 from .chat_accounts import list_chat_account_names, resolve_chat_account_context
 from .chat_helpers import _decode_message_content
 from .logging_config import get_logger
 from .sqlite_diagnostics import is_usable_sqlite_db
+from .snapshot_registry import resolve_account_database_dir
 
 logger = get_logger(__name__)
 
@@ -68,7 +70,7 @@ def _is_valid_decrypted_sqlite(path: Path) -> bool:
 
 
 def _list_decrypted_accounts() -> list[str]:
-    """列出可用聊天账号名（direct WCDB + legacy decrypted 兼容）。"""
+    """列出可用的已解密聊天账号名。"""
     return list_chat_account_names()
 
 
@@ -94,6 +96,28 @@ def _detect_image_media_type(data: bytes) -> str:
     if data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
         return "image/webp"
     return "application/octet-stream"
+
+
+def _validate_image_bytes(data: bytes, *, expected_md5: Optional[str] = None) -> str:
+    """Validate the complete original image, including every animation frame."""
+    import io
+    from PIL import Image
+
+    media_type = _detect_image_media_type(data[:64])
+    if not media_type.startswith("image/"):
+        raise ValueError("Unsupported image format: expected JPEG, PNG, GIF or WebP")
+    try:
+        with Image.open(io.BytesIO(data)) as decoded:
+            decoded.verify()
+        with Image.open(io.BytesIO(data)) as decoded:
+            for frame in range(getattr(decoded, "n_frames", 1)):
+                decoded.seek(frame)
+                decoded.load()
+    except (OSError, ValueError, SyntaxError, IndexError) as exc:
+        raise ValueError("Invalid decoded media image") from exc
+    if expected_md5 is not None and hashlib.md5(data).hexdigest() != expected_md5:
+        raise ValueError("Image MD5 does not match the requested media identity")
+    return media_type
 
 
 def _is_probably_valid_image(data: bytes, media_type: str) -> bool:
@@ -442,14 +466,14 @@ def _extract_emoticon_message_urls(text: str) -> list[str]:
 def _emoticon_message_db_paths(account_dir: Path) -> list[Path]:
     return sorted(
         p
-        for p in Path(account_dir).glob("message_*.db")
+        for p in resolve_account_database_dir(account_dir).glob("message_*.db")
         if p.is_file() and p.name.lower() != "message_resource.db"
     )
 
 
 def _emoticon_source_fingerprint(account_dir: Path) -> str:
     parts: list[str] = []
-    paths = [Path(account_dir) / "emoticon.db", *_emoticon_message_db_paths(account_dir)]
+    paths = [resolve_account_database_dir(account_dir) / "emoticon.db", *_emoticon_message_db_paths(account_dir)]
     for path in paths:
         try:
             st = path.stat()
@@ -564,8 +588,12 @@ def _extract_emoticon_builtin_expr_id(packed_info_data: Any) -> Optional[int]:
     return None
 
 
-@lru_cache(maxsize=2048)
 def _lookup_emoticon_info(account_dir_str: str, md5: str) -> dict[str, str]:
+    return _lookup_emoticon_info_cached(str(resolve_account_database_dir(Path(account_dir_str))), md5)
+
+
+@lru_cache(maxsize=2048)
+def _lookup_emoticon_info_cached(account_dir_str: str, md5: str) -> dict[str, str]:
     account_dir = Path(account_dir_str)
     md5s = str(md5 or "").strip().lower()
     if not md5s:
@@ -855,8 +883,9 @@ def _collect_emoticon_download_catalog_cached(
 
 
 def _collect_emoticon_download_catalog(account_dir: Path) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    fingerprint = _emoticon_source_fingerprint(Path(account_dir))
-    return _collect_emoticon_download_catalog_cached(str(Path(account_dir)), fingerprint)
+    database_dir = resolve_account_database_dir(account_dir)
+    fingerprint = _emoticon_source_fingerprint(database_dir)
+    return _collect_emoticon_download_catalog_cached(str(database_dir), fingerprint)
 
 
 def _collect_emoticon_download_candidates(account_dir: Path) -> list[str]:
@@ -1001,72 +1030,13 @@ def _try_fetch_emoticon_from_remote(
     )
 
 
-class _WxAMConfig(ctypes.Structure):
-    _fields_ = [
-        ("mode", ctypes.c_int),
-        ("reserved", ctypes.c_int),
-    ]
-
-
-@lru_cache(maxsize=1)
-def _get_wxam_decoder():
-    if os.name != "nt":
-        return None
-    dll_path = _PACKAGE_ROOT / "native" / "VoipEngine.dll"
-    if not dll_path.exists():
-        logger.warning(f"WxAM decoder DLL not found: {dll_path}")
-        return None
-    try:
-        voip_engine = ctypes.WinDLL(str(dll_path))
-        fn = voip_engine.wxam_dec_wxam2pic_5
-        fn.argtypes = [
-            ctypes.c_int64,
-            ctypes.c_int,
-            ctypes.c_int64,
-            ctypes.POINTER(ctypes.c_int),
-            ctypes.c_int64,
-        ]
-        fn.restype = ctypes.c_int64
-        logger.info(f"WxAM decoder loaded: {dll_path}")
-        return fn
-    except Exception as e:
-        logger.warning(f"Failed to load WxAM decoder DLL: {dll_path} ({e})")
-        return None
-
-
-def _wxgf_to_image_bytes(data: bytes) -> Optional[bytes]:
+def _wxgf_to_image_bytes(
+    data: bytes, *, checkpoint: Optional[Callable[[], None]] = None,
+) -> Optional[bytes]:
     if not data or not data.startswith(b"wxgf"):
         return None
-    fn = _get_wxam_decoder()
-    if fn is None:
-        return None
-
-    max_output_size = 52 * 1024 * 1024
-    for mode in (0, 3):
-        try:
-            config = _WxAMConfig()
-            config.mode = int(mode)
-            config.reserved = 0
-
-            input_buffer = ctypes.create_string_buffer(data, len(data))
-            output_buffer = ctypes.create_string_buffer(max_output_size)
-            output_size = ctypes.c_int(max_output_size)
-
-            result = fn(
-                ctypes.addressof(input_buffer),
-                int(len(data)),
-                ctypes.addressof(output_buffer),
-                ctypes.byref(output_size),
-                ctypes.addressof(config),
-            )
-            if result != 0 or output_size.value <= 0:
-                continue
-            out = output_buffer.raw[: int(output_size.value)]
-            if _detect_image_media_type(out[:32]) != "application/octet-stream":
-                return out
-        except Exception:
-            continue
-    return None
+    from .wxgf_codec import decode_wxgf
+    return decode_wxgf(data, checkpoint=checkpoint)
 
 
 def _try_strip_media_prefix(data: bytes) -> tuple[bytes, str]:
@@ -1152,7 +1122,7 @@ def _load_account_source_info(account_dir: Path) -> dict[str, Any]:
     # Imported archives are local decrypted snapshots. A key captured on the
     # current computer may refer to another WeChat data directory for the same
     # wxid, so never merge that host path into an imported snapshot marker.
-    if source_metadata_prefers_decrypted_snapshot(data):
+    if source_metadata_is_imported_snapshot(data):
         return data
 
     try:
@@ -1178,9 +1148,8 @@ def _load_account_source_info(account_dir: Path) -> dict[str, Any]:
 def _clean_weflow_account_dir_name(dir_name: str) -> str:
     """按 WeFlow 的账号目录规则清理 wxid。
 
-    WeFlow 在连接 WCDB 前会把形如 `xxx_abcd` 的账号目录清理为 `xxx`，
-    再传给 native `wcdb_set_my_wxid`。这里保持同样规则，避免 suffix 目录名
-    影响实时读取。
+    WeFlow 将形如 `xxx_abcd` 的账号目录清理为 `xxx`；保留该规则，
+    避免目录冲突后缀影响账号身份匹配。
     """
     trimmed = str(dir_name or "").strip()
     if not trimmed:
@@ -1344,7 +1313,7 @@ def _guess_wxid_dir_from_common_paths(account_name: str) -> Optional[Path]:
 
 def _resolve_account_wxid_dir(account_dir: Path) -> Optional[Path]:
     info = _load_account_source_info(account_dir)
-    if source_metadata_prefers_decrypted_snapshot(info):
+    if source_metadata_is_imported_snapshot(info):
         return None
     wxid_dir = str(info.get("wxid_dir") or "").strip()
     if wxid_dir:
@@ -1359,7 +1328,7 @@ def _resolve_account_wxid_dir(account_dir: Path) -> Optional[Path]:
 
 def _resolve_account_db_storage_dir(account_dir: Path) -> Optional[Path]:
     info = _load_account_source_info(account_dir)
-    if source_metadata_prefers_decrypted_snapshot(info):
+    if source_metadata_is_imported_snapshot(info):
         return None
     db_storage_path = str(info.get("db_storage_path") or "").strip()
     if db_storage_path:
@@ -1705,6 +1674,7 @@ class MediaPathIndex:
         media_kinds: Optional[Iterable[str]] = None,
     ) -> None:
         self.account_dir = account_dir
+        self.database_dir = resolve_account_database_dir(account_dir)
         self.usernames = list(dict.fromkeys([str(item or "").strip() for item in (usernames or []) if str(item or "").strip()]))
         self.media_kinds = {
             str(kind or "").strip()
@@ -2047,7 +2017,7 @@ class MediaPathIndex:
 
     def _iter_signature_targets(self) -> list[tuple[str, Path, int]]:
         targets: list[tuple[str, Path, int]] = []
-        hardlink_db_path = self.account_dir / "hardlink.db"
+        hardlink_db_path = self.database_dir / "hardlink.db"
         if hardlink_db_path.exists():
             targets.append(("hardlink.db", hardlink_db_path, 0))
 
@@ -2300,7 +2270,7 @@ class MediaPathIndex:
             self.stats["resourceFiles"] += 1
 
     def _load_hardlink_index(self) -> None:
-        hardlink_db_path = self.account_dir / "hardlink.db"
+        hardlink_db_path = self.database_dir / "hardlink.db"
         if not hardlink_db_path.exists():
             return
 
@@ -2409,6 +2379,7 @@ class MediaPathIndex:
                             path,
                             account_dir=self.account_dir,
                             weixin_root=self.wxid_dir,
+                            media_kind="file" if bucket_name == "data" else "image",
                         )
                     except Exception:
                         continue
@@ -2622,7 +2593,7 @@ class MediaPathIndex:
             return path
 
         if self.wxid_dir:
-            hardlink_db_path = self.account_dir / "hardlink.db"
+            hardlink_db_path = self.database_dir / "hardlink.db"
             for candidate_kind in preferred:
                 path = _resolve_media_path_from_hardlink(
                     hardlink_db_path=hardlink_db_path,
@@ -3210,15 +3181,27 @@ def _decrypt_wechat_dat_v4(data: bytes, xor_key: int, aes_key: bytes) -> bytes:
     from Crypto.Cipher import AES
     from Crypto.Util import Padding
 
+    if len(data) < 15:
+        raise ValueError("Truncated DAT header: expected 15 bytes")
     header, rest = data[:0xF], data[0xF:]
-    signature, aes_size, xor_size = struct.unpack("<6sLLx", header)
-    aes_size += AES.block_size - aes_size % AES.block_size
+    signature, plain_aes_size, xor_size = struct.unpack("<6sLLx", header)
+    if signature not in {b"\x07\x08V1\x08\x07", b"\x07\x08V2\x08\x07"}:
+        raise ValueError("Unsupported DAT signature or version")
+    # The declared AES length excludes PKCS#7 padding. Aligned plaintext still
+    # adds a full block (chatlog a16b689/pkg/util/dat2img/dat2img.go:Dat2ImageV4).
+    aes_size = plain_aes_size + AES.block_size - plain_aes_size % AES.block_size
+    if aes_size > len(rest):
+        raise ValueError("Truncated DAT AES segment")
+    if xor_size > len(rest) - aes_size:
+        raise ValueError("DAT XOR tail overlaps the AES segment")
 
     aes_data = rest[:aes_size]
     raw_data = rest[aes_size:]
 
     cipher = AES.new(aes_key[:16], AES.MODE_ECB)
     decrypted_data = Padding.unpad(cipher.decrypt(aes_data), AES.block_size)
+    if len(decrypted_data) != plain_aes_size:
+        raise ValueError("DAT AES plaintext length disagrees with the header")
 
     if xor_size > 0:
         raw_data = rest[aes_size:-xor_size]
@@ -3234,9 +3217,11 @@ def _load_media_keys(account_dir: Path) -> dict[str, Any]:
     # A V2-template-verified account record is authoritative. It must replace a
     # stale legacy `_media_keys.json` pair as one unit rather than field by field.
     try:
-        from .key_store import get_account_keys_from_store, normalize_key_store_path
+        from .key_store import get_account_keys_from_store, load_account_keys_store, normalize_key_store_path
 
-        verified_keys = get_account_keys_from_store(Path(account_dir).name)
+        verified_keys = load_account_keys_store(strict=True).get(Path(account_dir).name, {})
+        if not isinstance(verified_keys, dict):
+            raise ValueError(f"Account media key record must contain a JSON object: {Path(account_dir).name}")
         verified_xor_raw = str(verified_keys.get("image_xor_key") or "").strip()
         verified_aes = str(verified_keys.get("image_aes_key") or "").strip()[:16]
         stored_source = normalize_key_store_path(verified_keys.get("image_key_source_wxid_dir"))
@@ -3269,7 +3254,7 @@ def _load_media_keys(account_dir: Path) -> dict[str, Any]:
                     "code": verified_keys.get("image_key_code"),
                 }
     except Exception:
-        pass
+        raise
 
     p = account_dir / "_media_keys.json"
     data: dict[str, Any] = {}
@@ -3280,17 +3265,21 @@ def _load_media_keys(account_dir: Path) -> dict[str, Any]:
             loaded = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 data.update(loaded)
+            else:
+                raise ValueError(f"Media key cache must contain a JSON object: {p}")
         except Exception:
-            data = {}
+            raise
 
     # Newer key flows store image keys in the shared account key store, while
     # the media decoder historically looked only at `_media_keys.json`. Read
-    # both so realtime v4 `.dat` images can decode immediately after key fetch.
+    # both so v4 `.dat` images can decode immediately after key fetch.
     if data.get("xor") is None or not str(data.get("aes") or "").strip():
         try:
             from .key_store import get_account_keys_from_store
 
-            keys = get_account_keys_from_store(Path(account_dir).name)
+            # Keep one consistent strict read for verified selection and legacy
+            # field completion. A read error must never select another source.
+            keys = (verified_keys)
             if isinstance(keys, dict):
                 if keys.get("image_key_verified") is True:
                     keys = {}
@@ -3309,7 +3298,7 @@ def _load_media_keys(account_dir: Path) -> dict[str, Any]:
                     if aes_raw:
                         data["aes"] = aes_raw[:16]
         except Exception:
-            pass
+            raise
     data.setdefault("verified", False)
     data.setdefault("source", "legacy_media_cache")
     return data
@@ -3373,165 +3362,151 @@ def _try_find_decrypted_resource(account_dir: Path, md5: str) -> Optional[Path]:
         for suffix in suffixes:
             for ext in exts:
                 candidate = directory / f"{md5}{suffix}.{ext}"
-                if candidate.exists():
+                if candidate.is_file():
                     return candidate
+            # Attachments can use any file extension. Require the whole stem,
+            # so another digest or a similarly prefixed filename cannot match.
+            matches = sorted(
+                (entry for entry in directory.iterdir()
+                 if entry.stem.lower() == f"{md5}{suffix}".lower() and entry.is_file()),
+                key=lambda entry: entry.name.lower(),
+            )
+            if matches:
+                return matches[0]
     return None
+
+
+@lru_cache(maxsize=8)
+def _local_emoticon_message_identities(database_dir: str, fingerprint: str) -> dict[str, frozenset[str]]:
+    """Read primary/extern pairs from the same message in a fixed DB revision."""
+    identities: dict[str, set[str]] = {}
+    for db_path in _emoticon_message_db_paths(Path(database_dir)):
+        conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            tables = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            for (name,) in tables:
+                if not name.lower().startswith(("msg_", "chat_")):
+                    continue
+                rows = conn.execute(
+                    f"SELECT compress_content, message_content FROM {_quote_sqlite_ident(name)} WHERE local_type=47"
+                )
+                for compressed, content in rows:
+                    text = _decode_message_content(compressed, content)
+                    original = _extract_emoticon_message_md5(text)
+                    external = _extract_emoticon_message_extern_md5(text)
+                    if original and external:
+                        identities.setdefault(original, set()).add(external)
+        finally:
+            conn.close()
+    return {key: frozenset(values) for key, values in identities.items()}
+
+
+def _read_independent_media(
+    path: Path, account_dir: Optional[Path], media_kind: str,
+    checkpoint: Optional[Callable[[], None]] = None,
+    expected_md5: str = "",
+) -> tuple[bytes, str]:
+    """Decode local media using the existing documented-in-code DAT algorithms.
+
+    Unknown containers, missing keys and invalid output are errors. WXGF uses
+    the isolated local codec, including its original animation metadata.
+    """
+    local_data = None
+    if account_dir is not None and media_kind == "emoji":
+        from .local_emoticon import LocalEmoticonError, is_local_emoticon_path, read_local_emoticon
+
+        wxid_dir = _resolve_account_wxid_dir(account_dir)
+        if wxid_dir is not None and is_local_emoticon_path(path, wxid_dir):
+            from .key_service import _get_image_key_kvcomm_dirs
+
+            keys = _load_media_keys(account_dir)
+            kvcomm_dirs = (
+                _get_image_key_kvcomm_dirs(account_dir)
+                if keys.get("verified") is True and keys.get("code") is None else ()
+            )
+            database_dir = resolve_account_database_dir(account_dir)
+            identities = _local_emoticon_message_identities(
+                str(database_dir), _emoticon_source_fingerprint(database_dir)
+            ).get(expected_md5.lower(), frozenset())
+            if len(identities) > 1:
+                raise LocalEmoticonError("Conflicting local emoticon identities in message records")
+            local_data = read_local_emoticon(
+                path, database_dir / "emoticon.db",
+                wxid_dir, expected_md5, keys, kvcomm_dirs=kvcomm_dirs,
+                expected_extern_md5=next(iter(identities), ""),
+            )
+    data = local_data if local_data is not None else path.read_bytes()
+    if data.startswith(b"wxgf"):
+        data = _wxgf_to_image_bytes(data, checkpoint=checkpoint)
+    media_type = _detect_image_media_type(data[:64])
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        media_type = "video/mp4"
+    if media_type == "application/octet-stream":
+        if b"wxgf" in data[:16]:
+            raise ValueError(f"Unsupported prefixed WXGF container: {path}")
+        version = _detect_wechat_dat_version(data)
+        if media_kind == "file" and version == 0:
+            # Unmarked attachments are ordinary file bytes. V1/V2 have explicit
+            # encryption signatures and are decoded below; do not guess file encryption.
+            return data, media_type
+        keys = _load_media_keys(account_dir) if account_dir is not None else {}
+        xor_key = keys.get("xor")
+        if type(xor_key) is not int or not 0 <= xor_key <= 255:
+            raise ValueError(f"Missing or invalid media XOR key for {path}")
+        if version == 0:
+            data = _decrypt_wechat_dat_v3(data, xor_key)
+        elif version in {1, 2}:
+            aes_key = b"cfcd208495d565ef" if version == 1 else str(keys.get("aes") or "").encode("ascii")
+            if len(aes_key) != 16:
+                raise ValueError(f"Missing or invalid media AES key for {path}")
+            data = _decrypt_wechat_dat_v4(data, xor_key, aes_key)
+        else:
+            raise ValueError(f"Unsupported or truncated media format: {path}")
+        if data.startswith(b"wxgf"):
+            data = _wxgf_to_image_bytes(data, checkpoint=checkpoint)
+        elif b"wxgf" in data[:16]:
+            raise ValueError(f"Unsupported prefixed WXGF container: {path}")
+        media_type = _detect_image_media_type(data[:64])
+        if media_kind == "file":
+            return data, media_type
+        if len(data) >= 12 and data[4:8] == b"ftyp":
+            media_type = "video/mp4"
+    if media_type == "application/octet-stream":
+        raise ValueError(f"Decrypted media format is unsupported or invalid: {path}")
+    if media_type.startswith("image/"):
+        try:
+            _validate_image_bytes(data)
+        except ValueError as exc:
+            raise ValueError(f"Invalid decoded media image: {path}") from exc
+    if media_kind in {"image", "emoji", "video_thumb"} and not media_type.startswith("image/"):
+        raise ValueError(f"Expected image media but received {media_type}: {path}")
+    if media_kind == "video" and media_type != "video/mp4":
+        raise ValueError(f"Expected video media but received {media_type}: {path}")
+    if media_kind == "video":
+        from .independent_video import validate_video
+        validate_video(data, ffmpeg=_find_ffmpeg_executable(), source=path, checkpoint=checkpoint)
+    return data, media_type
 
 
 def _read_and_maybe_decrypt_media(
     path: Path,
     account_dir: Optional[Path] = None,
     weixin_root: Optional[Path] = None,
+    *,
+    media_kind: str = "",
+    checkpoint: Optional[Callable[[], None]] = None,
+    expected_md5: str = "",
 ) -> tuple[bytes, str]:
+    return _read_independent_media(path, account_dir, media_kind, checkpoint, expected_md5)
     # Fast path: already a normal image
-    with open(path, "rb") as f:
-        head = f.read(64)
 
-    mt = _detect_image_media_type(head)
-    if mt != "application/octet-stream":
-        return path.read_bytes(), mt
-
-    if head.startswith(b"wxgf"):
-        data0 = path.read_bytes()
-        converted0 = _wxgf_to_image_bytes(data0)
-        if converted0:
-            mt0 = _detect_image_media_type(converted0[:32])
-            if mt0 != "application/octet-stream":
-                return converted0, mt0
-
-    try:
-        idx = head.find(b"wxgf")
-    except Exception:
-        idx = -1
-    if 0 < idx <= 4:
-        try:
-            data0 = path.read_bytes()
-            payload0 = data0[idx:]
-            converted0 = _wxgf_to_image_bytes(payload0)
-            if converted0:
-                mt0 = _detect_image_media_type(converted0[:32])
-                if mt0 != "application/octet-stream":
-                    return converted0, mt0
-        except Exception:
-            pass
-
-    try:
-        data_pref = path.read_bytes()
-        # Only accept prefix stripping when it looks like a real image/video,
-        # otherwise encrypted/random bytes may trigger false positives.
-        stripped, mtp = _try_strip_media_prefix(data_pref)
-        if mtp != "application/octet-stream":
-            if mtp.startswith("image/") and (not _is_probably_valid_image(stripped, mtp)):
-                pass
-            else:
-                return stripped, mtp
-    except Exception:
-        pass
-
-    data = path.read_bytes()
 
     # Try WeChat .dat v1/v2 decrypt.
-    version = _detect_wechat_dat_version(data)
-    if version in (0, 1, 2):
-        # 不在本项目内做任何密钥提取；仅使用用户保存的密钥（_media_keys.json）。
-        xor_key: Optional[int] = None
-        aes_key16 = b""
-        if account_dir is not None:
-            try:
-                keys2 = _load_media_keys(account_dir)
-
-                x2 = keys2.get("xor")
-                if x2 is not None:
-                    xor_key = int(x2)
-                    if not (0 <= int(xor_key) <= 255):
-                        xor_key = None
-                    else:
-                        logger.debug("使用 _media_keys.json 中保存的 xor key")
-
-                aes_str = str(keys2.get("aes") or "").strip()
-                if len(aes_str) >= 16:
-                    aes_key16 = aes_str[:16].encode("ascii", errors="ignore")
-            except Exception:
-                xor_key = None
-                aes_key16 = b""
-        try:
-            if version == 0 and xor_key is not None:
-                out = _decrypt_wechat_dat_v3(data, xor_key)
-                try:
-                    out2, mtp2 = _try_strip_media_prefix(out)
-                    if mtp2 != "application/octet-stream":
-                        return out2, mtp2
-                except Exception:
-                    pass
-                if out.startswith(b"wxgf"):
-                    converted = _wxgf_to_image_bytes(out)
-                    if converted:
-                        out = converted
-                        logger.info(f"wxgf->image: {path} -> {len(out)} bytes")
-                    else:
-                        logger.info(f"wxgf->image failed: {path}")
-                mt0 = _detect_image_media_type(out[:32])
-                if mt0 != "application/octet-stream":
-                    return out, mt0
-            elif version == 1 and xor_key is not None:
-                out = _decrypt_wechat_dat_v4(data, xor_key, b"cfcd208495d565ef")
-                try:
-                    out2, mtp2 = _try_strip_media_prefix(out)
-                    if mtp2 != "application/octet-stream":
-                        return out2, mtp2
-                except Exception:
-                    pass
-                if out.startswith(b"wxgf"):
-                    converted = _wxgf_to_image_bytes(out)
-                    if converted:
-                        out = converted
-                        logger.info(f"wxgf->image: {path} -> {len(out)} bytes")
-                    else:
-                        logger.info(f"wxgf->image failed: {path}")
-                mt1 = _detect_image_media_type(out[:32])
-                if mt1 != "application/octet-stream":
-                    return out, mt1
-                return out, "application/octet-stream"
-            elif version == 2 and xor_key is not None and aes_key16:
-                out = _decrypt_wechat_dat_v4(data, xor_key, aes_key16)
-                try:
-                    out2, mtp2 = _try_strip_media_prefix(out)
-                    if mtp2 != "application/octet-stream":
-                        return out2, mtp2
-                except Exception:
-                    pass
-                if out.startswith(b"wxgf"):
-                    converted = _wxgf_to_image_bytes(out)
-                    if converted:
-                        out = converted
-                        logger.info(f"wxgf->image: {path} -> {len(out)} bytes")
-                    else:
-                        logger.info(f"wxgf->image failed: {path}")
-                mt2b = _detect_image_media_type(out[:32])
-                if mt2b != "application/octet-stream":
-                    return out, mt2b
-                return out, "application/octet-stream"
-        except Exception:
-            pass
 
     # Fallback: try guessing XOR key by magic (only after key-based decrypt attempts).
     # For V4 signature files, XOR guessing is not applicable and may be expensive.
-    if version in (0, -1):
-        dec, mt2 = _try_xor_decrypt_by_magic(data)
-        if dec is not None and mt2:
-            return dec, mt2
 
     # Fallback: return as-is.
-    mt3 = _guess_media_type_by_path(path, fallback="application/octet-stream")
-    if mt3.startswith("image/") and (not _is_probably_valid_image(data, mt3)):
-        mt3 = "application/octet-stream"
-    if mt3 == "video/mp4":
-        try:
-            if not (len(data) >= 8 and data[4:8] == b"ftyp"):
-                mt3 = "application/octet-stream"
-        except Exception:
-            mt3 = "application/octet-stream"
-    return data, mt3
 
 
 def _ensure_decrypted_resource_for_md5(
@@ -3539,13 +3514,16 @@ def _ensure_decrypted_resource_for_md5(
     md5: str,
     source_path: Path,
     weixin_root: Optional[Path] = None,
+    *,
+    media_kind: str = "",
 ) -> Optional[Path]:
     if not md5 or not source_path:
         return None
 
     md5_lower = str(md5).lower()
+    local_emoji = (media_kind == "emoji")
     existing = _try_find_decrypted_resource(account_dir, md5_lower)
-    if existing:
+    if existing and (not local_emoji or hashlib.md5(existing.read_bytes()).hexdigest() == md5_lower):
         return existing
 
     try:
@@ -3554,7 +3532,10 @@ def _ensure_decrypted_resource_for_md5(
     except Exception:
         return None
 
-    data, mt0 = _read_and_maybe_decrypt_media(source_path, account_dir=account_dir, weixin_root=weixin_root)
+    data, mt0 = _read_and_maybe_decrypt_media(
+        source_path, account_dir=account_dir, weixin_root=weixin_root,
+        media_kind=media_kind, expected_md5=md5_lower,
+    )
     mt2 = str(mt0 or "").strip()
     if (not mt2) or mt2 == "application/octet-stream":
         mt2 = _detect_image_media_type(data[:32])
@@ -3582,6 +3563,18 @@ def _ensure_decrypted_resource_for_md5(
     else:
         ext = Path(str(source_path.name)).suffix.lstrip(".").lower() or "dat"
     output_path = _get_decrypted_resource_path(account_dir, md5_lower, ext)
+    if local_emoji:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        # Only explicitly requested materialization publishes this verified result.
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".part", delete=False) as handle:
+            temporary = Path(handle.name)
+            try:
+                handle.write(data)
+                handle.close()
+                os.replace(temporary, output_path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        return output_path
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if not output_path.exists():
@@ -3849,16 +3842,30 @@ def _resolve_media_path_for_kind(
 
     kind_key = str(kind or "").strip().lower()
 
-    # 优先查找解密后的资源目录（图片、表情、视频缩略图）
+    # An original emoji verified by its message digest can bypass local decoding.
+    # Older converted caches may contain only frame zero; prefer their exact source.
+    decrypted_path = None
     if kind_key in {"image", "emoji", "video_thumb"}:
         decrypted_path = _try_find_decrypted_resource(account_dir, md5.lower())
-        if decrypted_path:
+        if decrypted_path and (
+            (kind_key != "emoji") or (hashlib.md5(decrypted_path.read_bytes()).hexdigest() == md5.lower())
+        ):
             logger.debug(f"找到解密资源: {decrypted_path}")
             return decrypted_path
 
     # 回退到原始逻辑：从微信数据目录查找
     wxid_dir = _resolve_account_wxid_dir(account_dir)
-    hardlink_db_path = account_dir / "hardlink.db"
+    if (wxid_dir is not None) and (kind_key == "emoji"):
+        from .local_emoticon import find_local_emoticon
+
+        local = find_local_emoticon(
+            resolve_account_database_dir(account_dir) / "emoticon.db", wxid_dir, str(md5)
+        )
+        if local is not None:
+            return local
+    if decrypted_path is not None:
+        return decrypted_path
+    hardlink_db_path = resolve_account_database_dir(account_dir) / "hardlink.db"
     db_storage_dir = _resolve_account_db_storage_dir(account_dir)
 
     roots: list[Path] = []

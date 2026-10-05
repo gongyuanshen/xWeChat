@@ -11,7 +11,7 @@ import {
 const sidebarSource = readFileSync(resolve(process.cwd(), 'components/SidebarRail.vue'), 'utf8')
 
 
-test('uses the native self username instead of the suffixed account directory', () => {
+test('uses the self username instead of the suffixed account directory', () => {
   const info = {
     account: 'SimpleChinese_a73c',
     selfUsername: 'SimpleChinese',
@@ -37,7 +37,7 @@ test('keeps compatibility with an older backend by normalizing WeFlow directory 
 test('explicit backend identity wins over directory-name inference', () => {
   assert.equal(
     resolveAccountSelfUsername('alias_a73c', {
-      realtime: { nativeWxid: 'wxid_real_user' },
+      selfUsername: 'wxid_real_user',
     }),
     'wxid_real_user',
   )

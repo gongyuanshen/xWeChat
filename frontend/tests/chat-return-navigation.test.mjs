@@ -68,7 +68,7 @@ test('聊天视图离开时停用全局快捷键，回来恢复滚动且不重�
   const scroll = { scrollTop: 320 }, calls = []
   const context = {
     document, window, chatPageActive: { value: true }, chatInitialized: true,
-    savedScrollPositions: [], accountChangeQueued: false, realtimeEnabled: { value: false }, voiceSidebarOpen: { value: false },
+    savedScrollPositions: [], accountChangeQueued: false, voiceSidebarOpen: { value: false },
     chatPageRef: { value: { querySelectorAll: selector => selector === '.overflow-y-auto' ? [scroll] : [{ pause: () => calls.push('pause') }] } },
     onActivated: fn => { context.activate = fn }, onDeactivated: fn => { context.deactivate = fn },
     onBeforeRouteLeave: fn => { context.leave = fn }, nextTick: async () => {},
@@ -76,7 +76,7 @@ test('聊天视图离开时停用全局快捷键，回来恢复滚动且不重�
     onFloatingWindowMouseMove: () => {}, onFloatingWindowMouseUp: () => {},
     onWindowFocus: () => {}, onVisibilityChange: () => {},
     applyRouteSelection: async () => {}, updateJumpToBottomState: () => {}, consumeAiNavigation: () => {},
-    cancelQueuedRealtimeSessionsRefresh: () => {}, stopVoiceBatchPolling: () => {}, stopSessionListResize: () => {},
+    stopVoiceBatchPolling: () => {}, stopSessionListResize: () => {},
     closeContextMenu: () => {}, clearContactProfileHoverHideTimer: () => {}, closeContactProfileCard: () => {},
     closeImagePreview: () => {}, closeVideoPreview: () => {}, closeGroupAnnouncement: () => {},
   }

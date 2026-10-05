@@ -76,7 +76,9 @@ export const createMessageNormalizer = ({
     const contact = getSelectedContact?.() || null
     const username = String(contact?.username || '').trim()
     const localMediaVersion = Number(getLocalMediaVersion?.() || 0)
-    const serverIdStr = String(msg.serverIdStr || (msg.serverId != null ? String(msg.serverId) : '')).trim()
+    const rawServerId = msg.serverIdStr || msg.serverId
+    const serverIdStr = typeof rawServerId === 'number' && !Number.isSafeInteger(rawServerId)
+      ? '' : String(rawServerId ?? '').trim()
     const isSent = !!msg.isSent
     const rawSenderDisplayName = String(msg.senderDisplayName || '').trim()
     const rawSenderUsername = String(msg.senderUsername || '').trim()
@@ -295,6 +297,7 @@ export const createMessageNormalizer = ({
       createTime: Number(msg.createTime || 0),
       isSent,
       isRevoked: !!msg.isRevoked,
+      revokeOriginalStatus: msg.revokeOriginalStatus,
       revokeTime: Number(msg.revokeTime || 0),
       revokedServerId: String(msg.revokedServerId || '').trim(),
       revokedLocalId: Number(msg.revokedLocalId || 0),

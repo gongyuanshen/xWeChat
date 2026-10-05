@@ -12,10 +12,6 @@ async def main(args):
     data = args.data.resolve()
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(data)
     os.environ['WECHAT_TOOL_OUTPUT_DIR'] = str(data / 'output')
-    if args.native_core_dir:
-        os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
-        from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-        configure_native_core_entrypoint()
     from wechat_decrypt_tool.ai.storage import AIStore
     from wechat_decrypt_tool.ai.service import AIService
     from wechat_decrypt_tool.ai.providers import ModelService, public_profile
@@ -116,7 +112,6 @@ if __name__ == '__main__':
     parser.add_argument('--api-key-env', default='', help='仅从进程环境读取临时测试密钥，不写入配置或结果')
     parser.add_argument('--account', default='')
     parser.add_argument('--conversation', default='')
-    parser.add_argument('--native-core-dir', type=Path)
     parser.add_argument('--resume-run', default='')
     parser.add_argument('--followup-run', default='', help='在既有真实验收任务的 AI 对话中追问，保留之前的结果记录')
     parser.add_argument('--revalidate', action='store_true', help='在隔离库中重新验证既有图的最终正文，保留历史验收结果')

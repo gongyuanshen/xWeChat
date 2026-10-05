@@ -9,10 +9,11 @@ from typing import Any, Optional
 from fastapi import HTTPException
 
 from .account_identity import canonical_account_name, is_internal_account_directory_name
-from .account_source_policy import source_metadata_prefers_decrypted_snapshot
+from .account_source_policy import source_metadata_is_imported_snapshot
 from .app_paths import get_output_databases_dir
 from .key_store import get_account_keys_from_store, load_account_keys_store, normalize_key_store_path
 from .sqlite_diagnostics import is_usable_sqlite_db
+from .snapshot_registry import resolve_account_database_dir
 
 
 # Source aliases append a four-character discriminator to the wxid.  Wxids
@@ -42,18 +43,7 @@ class ChatAccountContext:
 
     @property
     def mode(self) -> str:
-        if self.prefers_decrypted_snapshot:
-            return "decrypted"
-        if self.db_storage_path or self.wxid_dir:
-            return "direct"
-        return "decrypted" if self.has_decrypted_dbs else "unknown"
-
-    @property
-    def prefers_decrypted_snapshot(self) -> bool:
-        return bool(
-            self.has_decrypted_dbs
-            and source_metadata_prefers_decrypted_snapshot(self.source_info)
-        )
+        return "decrypted"
 
     @property
     def keys_ready(self) -> bool:
@@ -80,7 +70,8 @@ def _is_valid_decrypted_sqlite(path: Path) -> bool:
 
 
 def _has_decrypted_chat_dbs(account_dir: Path) -> bool:
-    return _is_valid_decrypted_sqlite(account_dir / "session.db") and _is_valid_decrypted_sqlite(account_dir / "contact.db")
+    database_dir = resolve_account_database_dir(account_dir)
+    return _is_valid_decrypted_sqlite(database_dir / "session.db") and _is_valid_decrypted_sqlite(database_dir / "contact.db")
 
 
 def _load_source_json(account_dir: Path) -> dict[str, Any]:
@@ -194,11 +185,13 @@ def _context_for_name(account: str) -> Optional[ChatAccountContext]:
     if not account_name:
         return None
     account_dir = (get_output_databases_dir() / account_name).resolve()
+    # Pointer validation must occur outside the legacy optional-metadata catch.
+    database_dir = resolve_account_database_dir(account_dir)
     has_dbs = False
     source_from_dir: dict[str, Any] = {}
     try:
         if account_dir.exists() and account_dir.is_dir():
-            has_dbs = _has_decrypted_chat_dbs(account_dir)
+            has_dbs = _has_decrypted_chat_dbs(database_dir)
             source_from_dir = _load_source_json(account_dir)
     except Exception:
         has_dbs = False
@@ -210,7 +203,7 @@ def _context_for_name(account: str) -> Optional[ChatAccountContext]:
     # A manually imported archive is an immutable decrypted snapshot. Do not
     # silently graft a key-store path from this computer onto it; that would
     # make `source=auto` show the host WeChat database instead of the archive.
-    if has_dbs and source_metadata_prefers_decrypted_snapshot(source_from_dir):
+    if has_dbs and source_metadata_is_imported_snapshot(source_from_dir):
         source_info = dict(source_from_dir)
     else:
         # For direct accounts, the key-store source is the latest capture and
@@ -263,7 +256,7 @@ def _dedupe_source_alias_contexts(
             continue
 
         base_has_canonical_data = base.has_decrypted_dbs or not ctx.has_decrypted_dbs
-        if base.prefers_decrypted_snapshot and base.has_decrypted_dbs:
+        if base.has_decrypted_dbs:
             continue
         if _contexts_share_source(base, ctx) and base_has_canonical_data:
             continue
@@ -302,10 +295,10 @@ def list_chat_account_contexts() -> list[ChatAccountContext]:
     contexts: list[ChatAccountContext] = []
     for name in sorted(names):
         ctx = _context_for_name(name)
-        if ctx is not None:
+        if ctx is not None and ctx.has_decrypted_dbs:
             contexts.append(ctx)
     contexts = _dedupe_source_alias_contexts(contexts)
-    contexts.sort(key=lambda c: (0 if c.mode == "direct" else 1, c.name.lower()))
+    contexts.sort(key=lambda c: c.name.lower())
     return contexts
 
 
@@ -318,7 +311,7 @@ def resolve_chat_account_context(account: Optional[str]) -> ChatAccountContext:
     if not contexts:
         raise HTTPException(
             status_code=404,
-            detail="No chat accounts found. Please save a db key/db_storage path or decrypt first.",
+            detail="No chat snapshots found. Please decrypt or import an account first.",
         )
 
     raw_selected = str(account or "").strip()
@@ -341,12 +334,7 @@ def resolve_chat_account_context(account: Optional[str]) -> ChatAccountContext:
         alias_ctx = _context_for_name(selected) if alias_match is not None else None
         base_ctx = by_name.get(alias_match.group(1)) if alias_match is not None else None
         if (
-            alias_ctx is not None
-            and base_ctx is not None
-            and (
-                base_ctx.prefers_decrypted_snapshot
-                or _contexts_share_source(alias_ctx, base_ctx)
-            )
+            alias_ctx is not None and base_ctx is not None
         ):
             ctx = base_ctx
     if ctx is None:

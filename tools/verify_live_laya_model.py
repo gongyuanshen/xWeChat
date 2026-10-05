@@ -65,8 +65,7 @@ async def run(root):
             raise
 
     began = time.monotonic()
-    with patch.object(insights, 'source_for_account', lambda account: 'snapshot'), \
-         patch.object(insight_live, 'self_username', lambda account: SELF), \
+    with patch.object(insight_live, 'self_username', lambda account: SELF), \
          patch.object(LayaRuntime, 'predict', measured_predict), \
          patch('httpx.AsyncClient.request', side_effect=AssertionError('Network forbidden')), \
          patch('httpx.Client.request', side_effect=AssertionError('Network forbidden')):

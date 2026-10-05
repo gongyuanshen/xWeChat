@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import hashlib
 import math
@@ -995,7 +996,7 @@ def compute_voice_call_stats(*, account_dir: Path, year: int) -> dict[str, Any]:
     my_username = resolve_wrapped_self_username(account_dir)
 
     # 会话 username 从表名反解（msg_<md5(username)> / chat_<md5(username)>）。
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -1198,7 +1199,7 @@ def compute_voice_call_stats(*, account_dir: Path, year: int) -> dict[str, Any]:
             contact_usernames.append(item[0])
     if longest_voice is not None and longest_voice[2]:
         contact_usernames.append(longest_voice[2])
-    contact_rows = _load_contact_rows(account_dir / "contact.db", contact_usernames)
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", contact_usernames)
 
     def build_partner_obj(item: Optional[tuple[str, int, int]]) -> Optional[dict[str, Any]]:
         if item is None:

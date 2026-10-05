@@ -1,3 +1,5 @@
+import asyncio
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -6,12 +8,7 @@ from pydantic import BaseModel, Field
 
 from ..logging_config import get_logger
 from ..key_store import get_account_keys_from_store, normalize_key_store_path
-from ..key_service import (
-    _resolve_v4_probe_db_file,
-    get_db_key_workflow,
-    get_image_key_integrated_workflow,
-    get_image_key_memory_workflow,
-)
+from ..key_service import get_db_key_workflow, get_image_key_integrated_workflow, get_image_key_memory_workflow
 from ..media_helpers import _load_media_keys, _resolve_account_dir
 from ..path_fix import PathFixRoute
 from ..platform_support import current_platform
@@ -315,7 +312,7 @@ async def get_wechat_db_key(
     key_mode: Optional[str] = None,
 ):
     """
-    Windows 优先使用 key_v4，失败时由前端明确确认后再使用 Hook。
+    Windows 使用独立内存扫描并验证数据库密钥。
     """
     try:
         logger.info(
@@ -324,11 +321,24 @@ async def get_wechat_db_key(
             str(db_storage_path or "").strip(),
             str(key_mode or "auto").strip(),
         )
-        keys_data = get_db_key_workflow(
+        cancel_event = threading.Event()
+        scan_task = asyncio.create_task(asyncio.to_thread(
+            get_db_key_workflow,
             wechat_install_path=wechat_install_path,
             db_storage_path=db_storage_path,
             key_mode=key_mode or "auto",
-        )
+            cancel_event=cancel_event,
+        ))
+        try:
+            while not scan_task.done():
+                await asyncio.wait({scan_task}, timeout=0.1)
+                if not scan_task.done() and request is not None and await request.is_disconnected():
+                    raise asyncio.CancelledError('Database key scan client disconnected')
+            keys_data = await scan_task
+        finally:
+            if not scan_task.done():
+                cancel_event.set()
+                scan_task.cancel()
 
         return {
             "status": 0,
@@ -338,16 +348,6 @@ async def get_wechat_db_key(
 
     except TimeoutError as e:
         mode = str(key_mode or "auto").strip().lower()
-        if mode in {"v4", "key_v4", "memory", "memory_scan"}:
-            return {
-                "status": -2,
-                "errmsg": f"扫内存失败: {str(e)}",
-                "data": {
-                    "method": "key_v4",
-                    "can_fallback_to_hook": True,
-                    "key_v4_error": str(e),
-                }
-            }
         return {
             "status": -1,
             "errmsg": str(e).strip() or "获取超时，请确保微信没有开启自动登录并且在弹窗中完成了登录",
@@ -355,22 +355,11 @@ async def get_wechat_db_key(
         }
     except Exception as e:
         mode = str(key_mode or "auto").strip().lower()
-        if mode in {"v4", "key_v4", "memory", "memory_scan"}:
-            return {
-                "status": -2,
-                "errmsg": f"扫内存失败: {str(e)}",
-                "data": {
-                    "method": "key_v4",
-                    "can_fallback_to_hook": True,
-                    "key_v4_error": str(e),
-                }
-            }
         return {
             "status": -1,
             "errmsg": f"获取失败: {str(e)}",
             "data": {}
         }
-
 
 
 @router.get("/api/get_image_key", summary="获取并保存微信图片密钥")

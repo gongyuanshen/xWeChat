@@ -13,15 +13,10 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, SecretStr
 
 from ..chat_export_service import export_prepared_chat_archive
-from ..export_integrity import (
-    export_css,
-    load_wce_integrity_native,
-    native_file_integrity_sidecar_paths,
-    remove_file_export_artifacts,
-    write_file_integrity_sidecars,
-    write_protected_html_file,
-)
-from ..native_core_export import (
+from ..archive_checksums import write_file_checksums
+from ..independent_html import export_css, protect_html_document
+from ..archive_checksums import remove_file_export_artifacts
+from ..export_crypto import (
     decode_export_content_key,
     encrypt_export_file_and_remove_source,
     erase_export_content_key,
@@ -303,6 +298,11 @@ def _collect_pages(loader, *, page_size: int = 500) -> tuple[list[dict[str, Any]
     first_response: dict[str, Any] = {}
     while True:
         response = loader(offset, page_size)
+        if response["status"] != "success":
+            raise HTTPException(status_code=500, detail={
+                "code": "record_source_failed", "status": response["status"],
+                "message": response.get("message"),
+            })
         if not first_response:
             first_response = response
         page = response.get("items") if isinstance(response, dict) else []
@@ -324,7 +324,7 @@ def _load_records(request: Request, req: RecordExportRequest) -> tuple[list[dict
     common = {
         "account": req.account,
         "q": _clean_text(req.query),
-        "source": "realtime",
+        "source": "auto",
     }
     if req.dataset == "favorites":
         return _collect_pages(
@@ -398,7 +398,7 @@ def _load_records(request: Request, req: RecordExportRequest) -> tuple[list[dict
                 )
             normalized = dict(response or {})
             normalized["items"] = normalized.get("data") if isinstance(normalized.get("data"), list) else []
-            normalized["dataSource"] = _clean_text(normalized.get("source")) or "realtime"
+            normalized["dataSource"] = normalized.get("source")
             return normalized
 
         return _collect_pages(load_biz_page)
@@ -659,7 +659,7 @@ def _render_project_records_html(payload: dict[str, Any]) -> str:
     heading = subject_name if dataset == "biz" and subject_name else label
     count = len(payload.get("items") or [])
     account = _clean_text(payload.get("account"))
-    source = "实时库" if _clean_text(payload.get("dataSource")) == "realtime" else "已解密数据"
+    source = "已解密数据"
     grid_class = {
         "mini-programs": "mini",
         "finder": "finder",
@@ -713,7 +713,7 @@ def _render_txt(payload: dict[str, Any]) -> str:
     lines = [
         f"{_DATASET_LABELS.get(payload['dataset'], payload['dataset'])}导出",
         f"账号: {payload.get('account', '')}",
-        f"数据源: {payload.get('dataSource', 'realtime')}",
+        f"数据源: {payload.get('dataSource', 'decrypted')}",
         f"数量: {len(payload.get('items') or [])}",
         "",
     ]
@@ -770,7 +770,6 @@ def _render_excel(payload: dict[str, Any]) -> bytes:
 
 @router.post("/api/records/export", summary="导出收藏和通用记录")
 def export_records(request: Request, req: RecordExportRequest):
-    load_wce_integrity_native()
     output_raw = _clean_text(req.output_dir)
     if not output_raw:
         raise HTTPException(status_code=400, detail="output_dir is required.")
@@ -783,6 +782,9 @@ def export_records(request: Request, req: RecordExportRequest):
         raise HTTPException(status_code=400, detail=f"Failed to prepare output_dir: {exc}") from exc
 
     items, source_response = _load_records(request, req)
+    data_source = source_response.get("dataSource")
+    if data_source != "decrypted":
+        raise HTTPException(status_code=500, detail="Records source did not report a valid dataSource.")
     selected_types = _normalized_types(req.types)
     items = _filter_records(req.dataset, items, selected_types)
     account = _clean_text(source_response.get("account") or req.account)
@@ -813,6 +815,7 @@ def export_records(request: Request, req: RecordExportRequest):
         try:
             job = export_prepared_chat_archive(
                 account=account or req.account,
+                source=data_source,
                 output_dir=output_dir,
                 file_name=f"{stem}.zip",
                 title="收藏",
@@ -835,7 +838,7 @@ def export_records(request: Request, req: RecordExportRequest):
             "account": account,
             "dataset": req.dataset,
             "format": req.format,
-            "dataSource": _clean_text(source_response.get("dataSource")) or "realtime",
+            "dataSource": data_source,
             "outputPath": str(job.zip_path),
             "count": len(items),
             "messagesExported": int(job.progress.messages_exported or 0),
@@ -850,7 +853,7 @@ def export_records(request: Request, req: RecordExportRequest):
         "account": account,
         "username": _clean_text(req.username),
         "subjectName": _clean_text(req.subject_name),
-        "dataSource": _clean_text(source_response.get("dataSource")) or "realtime",
+        "dataSource": data_source,
         "database": _clean_text(source_response.get("database")),
         "query": _clean_text(req.query),
         "types": sorted(selected_types),
@@ -894,12 +897,10 @@ def export_records(request: Request, req: RecordExportRequest):
             _write_atomic_bytes(output_path, _render_excel(payload))
         else:
             content = _render_html(payload)
-            integrity_manifest_path, integrity_signature_path = write_protected_html_file(output_path, content, export_id)
-        if req.format != "html":
-            integrity_manifest_path, integrity_signature_path = write_file_integrity_sidecars(output_path, export_id)
-        native_integrity_manifest_path, native_integrity_signature_path = (
-            native_file_integrity_sidecar_paths(output_path)
-        )
+            content = protect_html_document(content, stylesheet_tag="", runtime_tag="")
+            _write_atomic(output_path, content)
+        integrity_manifest_path = write_file_checksums(output_path, export_id)
+        integrity_signature_path = None
         if content_key is not None:
             encrypted_path = requested_output_path.with_name(requested_output_path.name + ".wec")
             if encrypted_path.exists():
@@ -914,12 +915,12 @@ def export_records(request: Request, req: RecordExportRequest):
                 content_key=content_key,
                 overwrite=False,
             )
-            remove_file_export_artifacts(plaintext_output_path, export_id)
+            remove_file_export_artifacts(plaintext_output_path)
             output_path = encrypted_path
     except Exception as exc:
         if encrypted_requested:
             try:
-                remove_file_export_artifacts(plaintext_output_path, export_id)
+                remove_file_export_artifacts(plaintext_output_path)
             finally:
                 if encrypted_output_path is not None:
                     encrypted_output_path.unlink(missing_ok=True)
@@ -936,21 +937,12 @@ def export_records(request: Request, req: RecordExportRequest):
         "dataSource": payload["dataSource"],
         "outputPath": str(output_path),
         "integrityManifestPath": "" if encrypted_requested else str(integrity_manifest_path),
-        "integritySignaturePath": "" if encrypted_requested else str(integrity_signature_path),
-        "nativeIntegrityManifestPath": (
-            str(native_integrity_manifest_path)
-            if (not encrypted_requested) and native_integrity_manifest_path.is_file()
-            else ""
-        ),
-        "nativeIntegritySignaturePath": (
-            str(native_integrity_signature_path)
-            if (not encrypted_requested) and native_integrity_signature_path.is_file()
-            else ""
-        ),
+        "integritySignaturePath": "",
+        "integrityFormat": "WEC1" if encrypted_requested else "xwechat-sha256",
         "authoritativeSealFormat": (
             "WEC1"
             if encrypted_requested
-            else ("WES1" if native_integrity_signature_path.is_file() else "legacy")
+            else ""
         ),
         "count": len(items),
         "types": sorted(selected_types),

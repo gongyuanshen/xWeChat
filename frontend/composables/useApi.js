@@ -7,10 +7,16 @@ import {
   nowPerfMs,
   resolveResourceTimingUrl
 } from '~/lib/chat/perf-logger'
-import { useChatAccountsStore } from '~/stores/chatAccounts'
 
 const chatContactsListCache = new Map()
 const CHAT_CONTACTS_LIST_CACHE_TTL_MS = 3000
+
+const validateSnapshotMessages = (response) => {
+  if (typeof response?.snapshotGeneration !== 'string' || !/^(legacy|generation-[a-f0-9]{32})$/.test(response.snapshotGeneration)) {
+    throw new Error('聊天消息响应缺少有效的 snapshotGeneration；已停止读取，请检查后端接口版本和快照状态')
+  }
+  return response
+}
 
 const isAbortRequestError = (error) => {
   return !!(
@@ -23,7 +29,6 @@ const isAbortRequestError = (error) => {
 // API请求组合式函数
 export const useApi = () => {
   const baseURL = useApiBase()
-  const chatAccounts = useChatAccountsStore()
 
   const responseDetailMessage = (response, fallback = '') => {
     const detail = response?._data?.detail
@@ -117,7 +122,6 @@ export const useApi = () => {
           }
         }
       })
-      chatAccounts.applySourceResponse(response)
       return response
     } catch (error) {
       if (aiScoped) {
@@ -193,6 +197,51 @@ export const useApi = () => {
     })
   }
   
+  const getHealth = async (options = {}) => {
+    return await request('/health', options)
+  }
+
+  const getSnapshotRefreshStatus = async ({ account, signal }) => {
+    return await request(`/decrypt/snapshot-refresh/status?${new URLSearchParams({ account })}`, { signal, retry: 0 })
+  }
+
+  const subscribeSnapshotRefresh = ({ account, onChange, onError }) => {
+    const stream = new EventSource(`${baseURL}/decrypt/snapshot-refresh/events?${new URLSearchParams({ account })}`)
+    const fail = (error) => {
+      stream.close()
+      onError(error)
+    }
+    stream.addEventListener('snapshot_changed', (event) => {
+      let payload
+      try {
+        payload = JSON.parse(event.data)
+        if (payload.account !== account || !Number.isSafeInteger(payload.sequence) || payload.sequence < 0) {
+          throw new Error('同步推送返回的账号或序号无效')
+        }
+      } catch (error) {
+        fail(error)
+        return
+      }
+      onChange(payload)
+    })
+    stream.onerror = () => fail(new Error('同步推送连接已断开，请点击“重试同步”'))
+    return stream
+  }
+
+  const startSnapshotRefresh = async ({ account, interval_seconds, signal }) => {
+    return await request('/decrypt/snapshot-refresh/start', {
+      method: 'POST', signal, retry: 0, body: { account, interval_seconds }
+    })
+  }
+
+  const stopSnapshotRefresh = async ({ account, signal }) => {
+    return await request('/decrypt/snapshot-refresh/stop', { method: 'POST', signal, retry: 0, body: { account } })
+  }
+
+  const refreshSnapshotOnce = async ({ account, signal }) => {
+    return await request('/decrypt/snapshot-refresh/once', { method: 'POST', signal, retry: 0, body: { account } })
+  }
+
   const getPlatformCapabilities = async () => {
     return await request('/system/platform')
   }
@@ -225,7 +274,7 @@ export const useApi = () => {
     if (params && params.include_official != null) query.set('include_official', String(!!params.include_official))
     if (params && params.source) query.set('source', params.source)
     const url = '/chat/sessions' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, params?.signal ? { signal: params.signal } : {})
+    return await request(url, { signal: params.signal, retry: 0 })
   }
 
   const listChatMessages = async (params = {}) => {
@@ -241,10 +290,11 @@ export const useApi = () => {
     if (params && params.scan_limit != null) query.set('scan_limit', String(params.scan_limit))
     if (params && params.source) query.set('source', params.source)
     const url = '/chat/messages' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, {
+    return validateSnapshotMessages(await request(url, {
+      retry: 0,
       ...(params?.signal ? { signal: params.signal } : {}),
       ...(params?.perfTraceId ? { perfTraceId: params.perfTraceId } : {})
-    })
+    }))
   }
 
   const getChatMessageRaw = async (params = {}) => {
@@ -309,37 +359,6 @@ export const useApi = () => {
 
   const getChatSendStatus = async () => {
     return await request('/chat/send/status')
-  }
-
-  const getChatRealtimeStatus = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    const url = '/chat/realtime/status' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url)
-  }
-
-  const syncChatRealtimeMessages = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    if (params && params.username) query.set('username', params.username)
-    if (params && params.max_scan != null) query.set('max_scan', String(params.max_scan))
-    if (params && params.backfill_limit != null) query.set('backfill_limit', String(params.backfill_limit))
-    const url = '/chat/realtime/sync' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { method: 'POST' })
-  }
-
-  const syncChatRealtimeAll = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    if (params && params.max_scan != null) query.set('max_scan', String(params.max_scan))
-    if (params && params.priority_username) query.set('priority_username', params.priority_username)
-    if (params && params.priority_max_scan != null) query.set('priority_max_scan', String(params.priority_max_scan))
-    if (params && params.include_hidden != null) query.set('include_hidden', String(!!params.include_hidden))
-    if (params && params.include_official != null) query.set('include_official', String(!!params.include_official))
-    if (params && params.only_official != null) query.set('only_official', String(!!params.only_official))
-    if (params && params.backfill_limit != null) query.set('backfill_limit', String(params.backfill_limit))
-    const url = '/chat/realtime/sync_all' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { method: 'POST' })
   }
 
   const searchChatMessages = async (params = {}) => {
@@ -411,7 +430,7 @@ export const useApi = () => {
     if (params && params.after != null) query.set('after', String(params.after))
     if (params && params.source) query.set('source', params.source)
     const url = '/chat/messages/around' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { aiDiagnostic: !!params.ai_diagnostic })
+    return validateSnapshotMessages(await request(url, { aiDiagnostic: !!params.ai_diagnostic, signal: params.signal, retry: 0 }))
   }
 
   // 聊天记录日历热力图：某月每日消息数
@@ -513,48 +532,11 @@ export const useApi = () => {
     return await request(url)
   }
 
-  const syncSnsRealtimeLatest = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    if (params && params.max_scan != null) query.set('max_scan', String(params.max_scan))
-    if (params && params.force != null) query.set('force', String(params.force))
-    if (params && params.scan_offset != null) query.set('scan_offset', String(params.scan_offset))
-    if (params && Array.isArray(params.usernames) && params.usernames.length > 0) {
-      query.set('usernames', params.usernames.join(','))
-    } else if (params && typeof params.usernames === 'string' && params.usernames) {
-      query.set('usernames', params.usernames)
-    }
-    const url = '/sns/realtime/sync_latest' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { method: 'POST' })
-  }
-
   const getSnsSnapshotStatus = async (params = {}) => {
     const query = new URLSearchParams()
     if (params && params.account) query.set('account', params.account)
     const url = '/sns/snapshot/status' + (query.toString() ? `?${query.toString()}` : '')
     return await request(url)
-  }
-
-  const startSnsFullSync = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    const url = '/sns/realtime/full_sync' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { method: 'POST' })
-  }
-
-  const getSnsFullSyncStatus = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    const url = '/sns/realtime/full_sync/status' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url)
-  }
-
-  const cancelSnsFullSync = async (params = {}) => {
-    const query = new URLSearchParams()
-    if (params && params.account) query.set('account', params.account)
-    if (params && params.sync_id) query.set('sync_id', String(params.sync_id))
-    const url = '/sns/realtime/full_sync' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url, { method: 'DELETE' })
   }
 
   const openChatMediaFolder = async (params = {}) => {
@@ -578,6 +560,12 @@ export const useApi = () => {
         emoji_url: data.emoji_url || '',
         force: !!data.force
       }
+    })
+  }
+
+  const generateChatVideoPreview = async (query, { signal } = {}) => {
+    return await request(`/chat/media/video/preview${query}`, {
+      method: 'POST', signal, retry: 0
     })
   }
 
@@ -668,57 +656,16 @@ export const useApi = () => {
     })
   }
 
-  const getNativeVoiceTranscript = async (data = {}) => {
-    const query = new URLSearchParams()
-    if (data.account) query.set('account', String(data.account).trim())
-    query.set('server_id', String(data.server_id ?? '').trim())
-    if (data.username) query.set('username', String(data.username).trim())
-    const localId = String(data.local_id ?? '').trim()
-    const requestId = String(data.request_id ?? '').trim()
-    if (localId && localId !== '0') query.set('local_id', localId)
-    if (requestId) query.set('request_id', requestId)
-    return await request(
-      `/chat/media/voice/transcription/native?${query.toString()}`,
-      data.signal ? { signal: data.signal } : {}
-    )
-  }
-
-  const triggerNativeVoiceTranscription = async (data = {}) => {
-    const body = {
-      account: String(data.account ?? '').trim(),
-      username: String(data.username ?? '').trim()
-    }
-    const serverId = String(data.server_id ?? '').trim()
-    const localId = String(data.local_id ?? '').trim()
-    if (serverId && serverId !== '0') body.server_id = serverId
-    if (localId && localId !== '0') body.local_id = localId
-    return await request('/chat/media/voice/transcription/native/trigger', {
-      method: 'POST',
-      body
-    })
-  }
-
-  const getNativeVoiceTranscriptionStatus = async (data = {}) => {
-    const query = new URLSearchParams()
-    if (data.account) query.set('account', String(data.account).trim())
-    return await request(
-      `/chat/media/voice/transcription/native/status${query.toString() ? `?${query.toString()}` : ''}`
-    )
-  }
-
-  const lookupNativeVoiceTranscriptionCache = async (data = {}) => {
-    const items = Array.isArray(data.items)
-      ? data.items.map((item) => ({
-          server_id: String(item?.server_id ?? '').trim(),
-          local_id: String(item?.local_id ?? '').trim()
-        })).filter((item) => item.server_id && item.local_id)
-      : []
-    return await request('/chat/media/voice/transcription/native/cache_lookup', {
+  const transcribeChatVoiceNative = async (data) => {
+    return await request('/chat/media/voice/transcription/native', {
       method: 'POST',
       body: {
-        account: String(data.account ?? '').trim(),
-        username: String(data.username ?? '').trim(),
-        items
+        account: data.account,
+        username: data.username,
+        display_name: data.display_name,
+        message_id: data.message_id,
+        server_id: data.server_id,
+        create_time: data.create_time
       }
     })
   }
@@ -750,16 +697,11 @@ export const useApi = () => {
     if (typeof concurrency !== 'number' || !Number.isInteger(concurrency) || concurrency < 0) {
       throw new RangeError('并发线程数必须是非负整数（0 表示自动）')
     }
-    const engine = String(data.engine || 'local').trim().toLowerCase()
-    if (!['local', 'wechat-native'].includes(engine)) {
-      throw new RangeError('不支持的批量转写方式')
-    }
     const body = {
       account: data.account || null,
       force: !!data.force,
       concurrency
     }
-    if (engine !== 'local') body.engine = engine
     return await request('/chat/media/voice/transcription/batch', {
       method: 'POST',
       body
@@ -1013,11 +955,6 @@ export const useApi = () => {
     return await request(url)
   }
 
-  // 获取微信进程状态
-  const getWxStatus = async (params = {}) => {
-    return await request('/wechat/status', params?.signal ? { signal: params.signal } : {})
-  }
-
   // 获取数据库密钥
   const getKeys = async (params = {}) => {
     const query = new URLSearchParams()
@@ -1089,7 +1026,7 @@ export const useApi = () => {
     if (params && params.q) query.set('q', params.q)
     if (params && params.kind) query.set('kind', params.kind)
     if (params && params.status) query.set('status', params.status)
-    query.set('source', params?.source || 'realtime')
+    query.set('source', 'decrypted')
     if (params && params.limit != null) query.set('limit', String(params.limit))
     if (params && params.offset != null) query.set('offset', String(params.offset))
     return `/general/${path}` + (query.toString() ? `?${query.toString()}` : '')
@@ -1132,7 +1069,7 @@ export const useApi = () => {
     if (params && params.q) query.set('q', params.q)
     if (params && params.kind) query.set('kind', params.kind)
     if (params && params.tagId) query.set('tag_id', String(params.tagId))
-    query.set('source', 'realtime')
+    query.set('source', 'decrypted')
     if (params && params.limit != null) query.set('limit', String(params.limit))
     if (params && params.offset != null) query.set('offset', String(params.offset))
     return await request('/favorites' + (query.toString() ? `?${query.toString()}` : ''))
@@ -1179,6 +1116,12 @@ export const useApi = () => {
     decryptDatabase,
     importDecryptedPreview,
     importDecrypted,
+    getHealth,
+    getSnapshotRefreshStatus,
+    subscribeSnapshotRefresh,
+    startSnapshotRefresh,
+    stopSnapshotRefresh,
+    refreshSnapshotOnce,
     getPlatformCapabilities,
     listChatAccounts,
     getChatAccountInfo,
@@ -1191,9 +1134,6 @@ export const useApi = () => {
     sendChatFile,
     getAiSuggestedReply,
     getChatSendStatus,
-    getChatRealtimeStatus,
-    syncChatRealtimeMessages,
-    syncChatRealtimeAll,
     searchChatMessages,
     getChatSearchIndexStatus,
     buildChatSearchIndex,
@@ -1205,13 +1145,10 @@ export const useApi = () => {
     resolveAppMsg,
     listSnsTimeline,
     listSnsUsers,
-    syncSnsRealtimeLatest,
     getSnsSnapshotStatus,
-    startSnsFullSync,
-    getSnsFullSyncStatus,
-    cancelSnsFullSync,
     openChatMediaFolder,
     downloadChatEmoji,
+    generateChatVideoPreview,
     saveMediaKeys,
     getSavedKeys,
     decryptAllMedia,
@@ -1223,10 +1160,7 @@ export const useApi = () => {
     getVoiceTranscriptionModelDownload,
     deleteVoiceTranscriptionModel,
     transcribeChatVoice,
-    getNativeVoiceTranscript,
-    triggerNativeVoiceTranscription,
-    getNativeVoiceTranscriptionStatus,
-    lookupNativeVoiceTranscriptionCache,
+    transcribeChatVoiceNative,
     lookupChatVoiceTranscriptionCache,
     deleteAllVoiceTranscriptionCache,
     startVoiceTranscriptionBatch,
@@ -1254,7 +1188,6 @@ export const useApi = () => {
     getKeys,
     getImageKey,
     getImageKeyMemory,
-    getWxStatus,
     listBizAccounts,
     listBizMessages,
     listBizPayRecords,

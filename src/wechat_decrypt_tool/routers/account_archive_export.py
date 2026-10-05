@@ -11,17 +11,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, SecretStr
 
+from ..snapshot_registry import start_snapshot_thread, resolve_account_database_dir
+from ..account_workers import export_file_response
+from ..archive_checksums import write_zip_checksums
 from ..chat_helpers import _resolve_account_dir
-from ..export_integrity import IntegrityZipWriter, write_zip_integrity_sidecars
-from ..native_core_export import (
+
+from ..export_crypto import (
     decode_export_content_key,
     encrypt_export_file_and_remove_source,
     erase_export_content_key,
 )
-from ..native_core_telemetry import record_product_event
+
 from ..path_fix import PathFixRoute
 
 router = APIRouter(route_class=PathFixRoute)
@@ -52,6 +54,9 @@ class AccountArchiveFile:
     size: int
     mtime: float
     mode: int
+    mtime_ns: int
+    device: int
+    inode: int
 
 
 @dataclass
@@ -100,7 +105,6 @@ class AccountArchiveExportJob:
 _SAFE_NAME_RE = re.compile(r"[^0-9A-Za-z._-]+")
 # 账号归档以账号目录为边界。数据库通常在账号目录顶层，资源文件通常在子目录中。
 _DB_SUFFIXES = {".db", ".sqlite", ".sqlite3", ".db3"}
-_META_FILE_NAMES = {"_source.json", "_media_keys.json", "_sns_realtime_sync_state.json"}
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _JOBS: dict[str, AccountArchiveExportJob] = {}
 _JOBS_LOCK = threading.RLock()
@@ -147,21 +151,6 @@ def _resolve_output_dir(account_dir: Path, output_dir_raw: object) -> Path:
     return (account_dir.parents[1] / "exports" / account_dir.name).resolve()
 
 
-def _iter_database_files(account_dir: Path) -> list[Path]:
-    return sorted(
-        (
-            item
-            for item in account_dir.iterdir()
-            if item.is_file()
-            and (
-                item.suffix.lower() in _DB_SUFFIXES
-                or item.name in _META_FILE_NAMES
-            )
-        ),
-        key=lambda p: p.name.lower(),
-    )
-
-
 def _get_job(export_id: str) -> Optional[AccountArchiveExportJob]:
     key = str(export_id or "").strip()
     if not key:
@@ -184,36 +173,48 @@ def _update_job(export_id: str, **changes: Any) -> Optional[AccountArchiveExport
 
 def _check_cancel(job: AccountArchiveExportJob, tmp_path: Optional[Path] = None) -> None:
     with _JOBS_LOCK:
-        cancelled = bool(job.cancel_requested)
-    if not cancelled:
-        return
-    if tmp_path is not None:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-    raise AccountArchiveCancelled()
+        if job.cancel_requested:
+            raise AccountArchiveCancelled()
 
 
-def _add_file(zip_file: zipfile.ZipFile, item: AccountArchiveFile) -> Optional[int]:
+def _remove_failed_archive(tmp_path: Optional[Path]) -> str:
+    if tmp_path is None:
+        return ""
     try:
-        modified = time.localtime(item.mtime)[:6]
-        if modified[0] < 1980:
-            modified = (1980, 1, 1, 0, 0, 0)
-        info = zipfile.ZipInfo(item.arcname, modified)
-        info.compress_type = zipfile.ZIP_STORED
-        info.file_size = item.size
-        info.external_attr = (item.mode & 0xFFFF) << 16
-        with item.path.open("rb") as source, zip_file.open(info, "w", force_zip64=True) as target:
-            shutil.copyfileobj(source, target, length=1024 * 1024)
-        return int(item.size)
-    except (FileNotFoundError, OSError):
-        return None
+        tmp_path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"Temporary archive cleanup failed: {tmp_path}: {exc}"
+    return ""
 
 
-def _is_database_or_meta_file(path: Path) -> bool:
-    return path.is_file() and (path.suffix.lower() in _DB_SUFFIXES or path.name in _META_FILE_NAMES)
+def _add_file(zip_file: zipfile.ZipFile, item: AccountArchiveFile, check_cancel=lambda: None) -> int:
+    expected = (item.device, item.inode, item.size, item.mtime_ns)
+    modified = time.localtime(item.mtime)[:6]
+    if modified[0] < 1980:
+        modified = (1980, 1, 1, 0, 0, 0)
+    info = zipfile.ZipInfo(item.arcname, modified)
+    info.compress_type = zipfile.ZIP_STORED
+    info.file_size = item.size
+    info.external_attr = (item.mode & 0xFFFF) << 16
+    count = 0
+    with item.path.open("rb") as source, zip_file.open(info, "w", force_zip64=True) as target:
+        before = os.fstat(source.fileno())
+        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != expected:
+            raise RuntimeError(f"Archive source changed before reading: {item.path}")
+        while True:
+            check_cancel()
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            target.write(chunk)
+            count += len(chunk)
+        after = os.fstat(source.fileno())
+    current = item.path.stat()
+    if (count != item.size or
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != expected or
+            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != expected):
+        raise RuntimeError(f"Archive source changed while reading: {item.path}")
+    return count
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:
@@ -225,107 +226,74 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def _iter_selected_account_files(
-    *,
-    job: AccountArchiveExportJob,
-    account_dir: Path,
-    include_databases: bool,
-    include_resources: bool,
-    tmp_path: Optional[Path],
-    zip_path: Optional[Path],
-    output_dir: Optional[Path],
+    *, job: AccountArchiveExportJob, account_dir: Path,
+    include_databases: bool, include_resources: bool,
+    tmp_path: Optional[Path], zip_path: Optional[Path], output_dir: Optional[Path],
 ):
-    """Fast metadata scan for selected account files.
-
-    Folder size is not stored as one reliable value by the filesystem. To show an
-    accurate total before packing, we still have to enumerate files, but os.scandir
-    reuses directory-entry metadata and avoids the heavier Path/os.walk/resolve path.
-    """
-
+    """Flatten the pinned database generation alongside portable account assets."""
     account_prefix = _safe_file_name(account_dir.name, "account")
-    pack_whole_account_folder = include_databases and include_resources
-    account_dir_str = os.path.abspath(os.fspath(account_dir))
-    excluded_files = set()
-    for candidate in (tmp_path, zip_path):
-        if candidate is None:
-            continue
-        try:
-            excluded_files.add(os.path.normcase(os.path.abspath(os.fspath(candidate))))
-        except OSError:
-            pass
+    database_dir = resolve_account_database_dir(account_dir)
+    excluded_names = {"_snapshot_current.json", "_snapshot_cache", "_account_delete_plan.json"}
+    excluded_names.update({"_source.json", "_media_keys.json", "_sns_realtime_sync_state.json",
+                           "media_path_index.db", "_cache", "cache", "_wrapped"})
+    excluded_paths = {Path(p).absolute() for p in (tmp_path, zip_path) if p is not None}
+    output_subdir = None
+    if output_dir is not None and output_dir != account_dir and _is_relative_to(output_dir, account_dir):
+        output_subdir = output_dir
 
-    skipped_output_dir: Optional[str] = None
-    if output_dir is not None:
-        try:
-            output_dir_str = os.path.abspath(os.fspath(output_dir))
-            # 如果用户把导出目录选在账号目录内部，避免把正在生成的导出文件再次打包进去。
-            if output_dir_str != account_dir_str and os.path.commonpath([account_dir_str, output_dir_str]) == account_dir_str:
-                skipped_output_dir = os.path.normcase(output_dir_str)
-        except (OSError, ValueError):
-            skipped_output_dir = None
+    def selected(path: Path, relative: str, kind: str):
+        status = path.lstat()
+        if stat.S_ISLNK(status.st_mode) or getattr(status, "st_file_attributes", 0) & 0x400:
+            raise RuntimeError(f"Archive source contains an unsupported link: {path}")
+        if not stat.S_ISREG(status.st_mode):
+            raise RuntimeError(f"Archive source is not a regular file: {path}")
+        if path.suffix.lower() in _DB_SUFFIXES:
+            for suffix in ("-wal", "-journal"):
+                sidecar = path.with_name(path.name + suffix)
+                if sidecar.exists() and sidecar.stat().st_size:
+                    raise RuntimeError(f"Archive database contains unmerged transaction data: {sidecar}")
+        return AccountArchiveFile(path, f"{account_prefix}/{relative}", kind,
+                                  status.st_size, status.st_mtime, status.st_mode,
+                                  status.st_mtime_ns, status.st_dev, status.st_ino)
 
-    stack: list[tuple[str, bool]] = [(account_dir_str, True)]
+    if include_databases:
+        for path in sorted(database_dir.iterdir()):
+            _check_cancel(job)
+            if path.suffix.lower() in _DB_SUFFIXES and path.name not in excluded_names:
+                yield selected(path, path.name, "database")
+    metadata_path = account_dir / "account.json"
+    if metadata_path.exists():
+        yield selected(metadata_path, metadata_path.name, "metadata")
+    if not include_resources:
+        return
+    stack = [account_dir]
     while stack:
-        root, is_account_root = stack.pop()
-        _check_cancel(job, tmp_path)
-        normalized_root = os.path.normcase(os.path.abspath(root))
-        if skipped_output_dir is not None and normalized_root == skipped_output_dir:
-            continue
-
-        try:
-            with os.scandir(root) as entries:
-                entry_list = list(entries)
-        except OSError:
-            continue
-
-        for entry in entry_list:
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if is_account_root and not pack_whole_account_folder and not include_resources:
+        root = stack.pop()
+        _check_cancel(job)
+        with os.scandir(root) as entries:
+            for entry in sorted(entries, key=lambda item: item.name):
+                path = Path(entry.path)
+                relative = path.relative_to(account_dir)
+                if (relative.parts[0] in excluded_names
+                        or (root == account_dir and path.name.startswith(".account-delete-") and path.suffix == ".json")
+                        or path.absolute() in excluded_paths
+                        or path == output_subdir or relative.as_posix() == "account.json"):
+                    continue
+                if root == account_dir and any(entry.name.lower().endswith(suffix + tail)
+                                              for suffix in _DB_SUFFIXES for tail in ("-wal", "-shm", "-journal")):
+                    continue
+                status = entry.stat(follow_symlinks=False)
+                if stat.S_ISLNK(status.st_mode) or getattr(status, "st_file_attributes", 0) & 0x400:
+                    raise RuntimeError(f"Archive source contains an unsupported link: {path}")
+                if stat.S_ISDIR(status.st_mode):
+                    stack.append(path)
+                    continue
+                if root == account_dir and path.suffix.lower() in _DB_SUFFIXES:
+                    # User-owned anti-revoke history is an asset, never a source shard.
+                    if database_dir == account_dir or path.name != "anti_revoke.db":
                         continue
-                    stack.append((entry.path, False))
-                    continue
+                yield selected(path, relative.as_posix(), "resource")
 
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-
-                file_path_str = entry.path
-                if os.path.normcase(os.path.abspath(file_path_str)) in excluded_files:
-                    continue
-
-                name = entry.name
-                suffix = os.path.splitext(name)[1].lower()
-                is_top_level_database = is_account_root and (suffix in _DB_SUFFIXES or name in _META_FILE_NAMES)
-                if pack_whole_account_folder:
-                    kind = "database" if is_top_level_database else "resource"
-                elif include_databases and is_top_level_database:
-                    kind = "database"
-                elif include_resources and not is_account_root:
-                    kind = "resource"
-                else:
-                    continue
-
-                try:
-                    st = entry.stat(follow_symlinks=False)
-                except OSError:
-                    continue
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-
-                try:
-                    rel = os.path.relpath(file_path_str, account_dir_str).replace(os.sep, "/")
-                except ValueError:
-                    continue
-
-                yield AccountArchiveFile(
-                    path=Path(file_path_str),
-                    arcname=f"{account_prefix}/{rel}",
-                    kind=kind,
-                    size=int(st.st_size),
-                    mtime=float(st.st_mtime),
-                    mode=int(st.st_mode),
-                )
-            except OSError:
-                continue
 
 def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None:
     job = _update_job(export_id, status="running", progress=1, message="Preparing export...", detail="")
@@ -334,6 +302,7 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
 
     zip_path: Optional[Path] = None
     tmp_path: Optional[Path] = None
+    temporary_created = False
 
     try:
         include_databases = bool(payload.get("include_databases"))
@@ -346,8 +315,11 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
         account_name = account_dir.name
         _update_job(export_id, account=account_name)
         if include_databases:
-            _require_portable_database_pair(account_dir)
+            _require_portable_database_pair(resolve_account_database_dir(account_dir))
         output_dir = _resolve_output_dir(account_dir, payload.get("output_dir"))
+        database_dir = resolve_account_database_dir(account_dir)
+        if database_dir != account_dir and _is_relative_to(output_dir, database_dir):
+            raise ValueError("Archive output cannot be written inside an immutable database generation")
         output_dir.mkdir(parents=True, exist_ok=True)
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -355,7 +327,7 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
         zip_name = _normalize_zip_name(payload.get("file_name"), fallback_name)
         zip_path = (output_dir / zip_name).resolve()
         final_path = zip_path.with_name(zip_path.name + ".wec") if job.content_key is not None else zip_path
-        tmp_path = zip_path.with_suffix(zip_path.suffix + ".tmp")
+        tmp_path = zip_path.with_name(f".{zip_path.name}.{export_id}.tmp")
 
         _update_job(
             export_id,
@@ -368,9 +340,6 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
             total_bytes=0,
             processed_bytes=0,
         )
-
-        if tmp_path.exists():
-            tmp_path.unlink()
 
         selected_files = list(_iter_selected_account_files(
             job=job,
@@ -414,19 +383,18 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
         # images, videos and cache files. Re-compressing them is CPU-heavy and
         # often saves little space. This makes archive export behave like a fast
         # folder pack/copy operation.
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as raw_zf:
-            zf = IntegrityZipWriter(raw_zf)
+        with zipfile.ZipFile(tmp_path, "x", compression=zipfile.ZIP_STORED, allowZip64=True) as raw_zf:
+            temporary_created = True
+            zf = (raw_zf)
             for item in selected_files:
                 _check_cancel(job, tmp_path)
-                added_size = _add_file(zf, item)
-                if added_size is not None:
-                    zf.add_file_entry(item.path, item.arcname)
-                    processed += 1
-                    if item.kind == "database":
-                        db_count += 1
-                    else:
-                        resource_file_count += 1
-                    processed_bytes += added_size
+                added_size = _add_file(zf, item, lambda: _check_cancel(job))
+                processed += 1
+                if item.kind == "database":
+                    db_count += 1
+                else:
+                    resource_file_count += 1
+                processed_bytes += added_size
 
                 now = time.monotonic()
                 if processed <= 5 or processed % 20 == 0 or (now - last_progress_at) >= 0.5:
@@ -448,12 +416,10 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
                             f"({processed_bytes / 1024 / 1024:.1f}/{total_bytes / 1024 / 1024:.1f} MB)."
                         ),
                     )
-            write_zip_integrity_sidecars(zf, export_id)
+            write_zip_checksums(raw_zf, export_id, check_cancel=lambda: _check_cancel(job))
 
         _check_cancel(job, tmp_path)
         _update_job(export_id, progress=97, message="Finalizing ZIP archive...", detail="Moving archive to target folder.")
-        if final_path.exists():
-            final_path.unlink()
         if job.content_key is not None:
             encrypt_export_file_and_remove_source(
                 tmp_path,
@@ -462,7 +428,10 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
                 content_key=job.content_key,
             )
         else:
-            shutil.move(str(tmp_path), str(final_path))
+            with _JOBS_LOCK:
+                _check_cancel(job)
+                os.replace(tmp_path, final_path)
+                job.status = "done"
 
         _update_job(
             export_id,
@@ -477,22 +446,14 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
             zip_path=str(final_path),
             file_name=final_path.name,
         )
-        record_product_event("export_completed")
     except AccountArchiveCancelled:
-        try:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-        _update_job(export_id, status="cancelled", message="Export cancelled.", detail="Temporary archive has been removed.")
+        cleanup_error = _remove_failed_archive(tmp_path if temporary_created else None)
+        _update_job(export_id, status="error" if cleanup_error else "cancelled",
+                    error=cleanup_error, message="Export cancelled.",
+                    detail=cleanup_error or "Temporary archive has been removed.")
     except Exception as exc:
-        try:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
-        _update_job(export_id, status="error", error=str(exc), message="Export failed.", detail="")
-        record_product_event("export_failed")
+        cleanup_error = _remove_failed_archive(tmp_path if temporary_created else None)
+        _update_job(export_id, status="error", error=str(exc), message="Export failed.", detail=cleanup_error)
     finally:
         erase_export_content_key(job.content_key)
         job.content_key = None
@@ -500,6 +461,7 @@ def _run_account_archive_export(export_id: str, payload: dict[str, Any]) -> None
 
 @router.post("/api/account/archive_export", summary="Create account archive export job")
 async def export_account_archive(req: AccountArchiveExportRequest):
+    account_dir = _resolve_account_dir(req.account)
     if not req.include_databases and not req.include_resources:
         raise HTTPException(status_code=400, detail="Please select at least one export option.")
 
@@ -512,7 +474,7 @@ async def export_account_archive(req: AccountArchiveExportRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     payload = {
-        "account": req.account,
+        "account": account_dir.name,
         "output_dir": req.output_dir,
         "include_databases": bool(req.include_databases),
         "include_resources": bool(req.include_resources),
@@ -527,9 +489,9 @@ async def export_account_archive(req: AccountArchiveExportRequest):
     with _JOBS_LOCK:
         _JOBS[export_id] = job
 
-    thread = threading.Thread(target=_run_account_archive_export, args=(export_id, payload), daemon=True)
     try:
-        thread.start()
+        start_snapshot_thread(account_dir, _run_account_archive_export, args=(export_id, payload),
+                              name=f"account-archive-{export_id}")
     except Exception:
         with _JOBS_LOCK:
             _JOBS.pop(export_id, None)
@@ -545,7 +507,7 @@ async def download_account_archive(path: str):
         raise HTTPException(status_code=404, detail="Export file not found.")
     if zip_path.suffix.lower() not in {".zip", ".wec"}:
         raise HTTPException(status_code=400, detail="Invalid export file.")
-    return FileResponse(
+    return export_file_response(
         str(zip_path),
         media_type="application/octet-stream" if zip_path.suffix.lower() == ".wec" else "application/zip",
         filename=zip_path.name,

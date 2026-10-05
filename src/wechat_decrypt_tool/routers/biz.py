@@ -8,18 +8,11 @@ import urllib
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel
 
-from ..account_source_policy import account_prefers_decrypted_snapshot
 from ..chat_helpers import _quote_ident, _resolve_account_dir
 from ..media_helpers import _resolve_account_db_storage_dir
 from ..path_fix import PathFixRoute
 from ..logging_config import get_logger
-from ..source_fallback import build_source_fallback_meta
-from ..wcdb_realtime import (
-    WCDB_REALTIME,
-    exec_query as _wcdb_exec_query,
-    get_avatar_urls as _wcdb_get_avatar_urls,
-    get_display_names as _wcdb_get_display_names,
-)
+from ..snapshot_registry import resolve_account_database_dir
 
 try:
     import zstandard as zstd
@@ -48,14 +41,10 @@ def _pick_case_insensitive_value(item: Any, *keys: str) -> Any:
 
 
 def _normalize_biz_source(value: Optional[str]) -> str:
-    v = str(value or "").strip().lower()
-    if not v or v in {"auto", "default", "wechat"}:
-        return "auto"
-    if v in {"decrypted", "local", "snapshot", "output"}:
+    value = str(value or "").strip().lower()
+    if value in {"", "auto", "default", "wechat", "decrypted", "local", "snapshot", "output"}:
         return "decrypted"
-    if v in {"realtime", "real-time", "wcdb"}:
-        return "realtime"
-    raise HTTPException(status_code=400, detail="Invalid source, use 'auto', 'decrypted' or 'realtime'.")
+    raise HTTPException(status_code=400, detail="Invalid source; only decrypted snapshots are supported.")
 
 
 def _normalize_pagination(limit: Any, offset: Any) -> tuple[int, int]:
@@ -70,75 +59,25 @@ def _normalize_pagination(limit: Any, offset: Any) -> tuple[int, int]:
     return max(1, min(normalized_limit, 500)), max(0, normalized_offset)
 
 
-def _is_biz_realtime_available(account_dir: Path) -> bool:
-    try:
-        info = WCDB_REALTIME.get_status(account_dir)
-    except Exception:
-        return False
-    return bool(info.get("dll_present") and info.get("key_present") and info.get("db_storage_dir"))
 
 
-def _resolve_biz_source_for_account(source_norm: str, account_dir: Path) -> str:
-    if source_norm == "auto" and account_prefers_decrypted_snapshot(account_dir):
-        return "decrypted"
-    if source_norm == "auto":
-        return "realtime" if _is_biz_realtime_available(account_dir) else "decrypted"
-    return source_norm
 
 
 def _iter_biz_message_db_paths(account_dir: Path, *, source: str) -> list[Path]:
     source_norm = str(source or "decrypted").strip().lower()
-    if source_norm == "realtime":
-        db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-        if db_storage_dir is None:
-            return []
-        live_message_dir = db_storage_dir / "message"
-        try:
-            return sorted([p for p in live_message_dir.glob("biz_message*.db") if p.is_file()])
-        except Exception:
-            return []
+    database_dir = resolve_account_database_dir(account_dir)
     try:
-        return sorted([p for p in account_dir.glob("biz_message*.db") if p.is_file()])
+        return sorted([p for p in database_dir.glob("biz_message*.db") if p.is_file()])
     except Exception:
         return []
 
 
-def _connect_biz_source(account_dir: Path, source_requested: str) -> tuple[str, Any, str]:
-    source_norm = _resolve_biz_source_for_account(source_requested, account_dir)
-    if source_norm != "realtime":
-        return source_norm, None, ""
-    try:
-        return "realtime", WCDB_REALTIME.ensure_connected(account_dir), ""
-    except Exception as exc:
-        if _iter_biz_message_db_paths(account_dir, source="decrypted"):
-            return "decrypted", None, str(exc)
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _biz_source_meta(
-    account_dir: Path,
-    *,
-    requested_source: str,
-    active_source: str,
-    reason: str = "",
-) -> dict[str, Any]:
-    retry_after_seconds = 0
-    if reason:
-        try:
-            failure = WCDB_REALTIME.get_recent_failure(account_dir.name)
-            retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-        except Exception:
-            retry_after_seconds = 0
-    return build_source_fallback_meta(
-        requested_source=requested_source,
-        active_source=active_source,
-        reason=reason,
-        retry_after_seconds=retry_after_seconds,
-    )
 
 
-def _coerce_realtime_blobish_content(value: Any) -> Any:
-    """WCDB exec_query may return BLOBs as bytes, 0xHEX, or bare HEX strings."""
+def _coerce_message_blob_content(value: Any) -> Any:
+    """Decode persisted BLOB values represented as bytes or hexadecimal strings."""
     if value is None:
         return value
     if isinstance(value, memoryview):
@@ -161,69 +100,28 @@ def _coerce_realtime_blobish_content(value: Any) -> Any:
     return value
 
 
-def _exec_realtime_query(rt_conn: Any, db_path: Path, sql: str) -> list[dict[str, Any]]:
-    with rt_conn.lock:
-        rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=sql)
-    return [r for r in (rows or []) if isinstance(r, dict)]
 
 
-def _resolve_realtime_name2id_user_column(rt_conn: Any, db_path: Path) -> Optional[str]:
-    try:
-        rows = _exec_realtime_query(rt_conn, db_path, "PRAGMA table_info(Name2Id)")
-    except Exception:
-        return None
-
-    cols: list[str] = []
-    for row in rows:
-        name = str(_pick_case_insensitive_value(row, "name") or "").strip()
-        if name:
-            cols.append(name)
-
-    lower_to_actual = {c.lower(): c for c in cols}
-    for candidate in ("user_name", "username"):
-        actual = lower_to_actual.get(candidate)
-        if actual:
-            return actual
-    return None
 
 
-def _find_biz_message_db_for_table(
-    account_dir: Path,
-    table_name: str,
-    *,
-    source: str,
-    rt_conn: Any = None,
-) -> Optional[Path]:
+def _find_biz_message_db_for_table(account_dir: Path, table_name: str, *, source: str) -> Optional[Path]:
     table_lower = str(table_name or "").strip().lower()
     if not table_lower:
         return None
 
     for db_file in _iter_biz_message_db_paths(account_dir, source=source):
-        if source == "realtime" and rt_conn is not None:
-            try:
-                rows = _exec_realtime_query(
-                    rt_conn,
-                    db_file,
-                    "SELECT name FROM sqlite_master WHERE type='table' "
-                    f"AND lower(name)={_sql_literal(table_lower)} LIMIT 1",
-                )
-                if rows:
-                    return db_file
-            except Exception:
-                continue
-        else:
-            conn = sqlite3.connect(str(db_file))
-            try:
-                res = conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=?",
-                    (table_lower,),
-                ).fetchone()
-                if res:
-                    return db_file
-            except Exception:
-                pass
-            finally:
-                conn.close()
+        conn = sqlite3.connect(str(db_file))
+        try:
+            res = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=?",
+                (table_lower,),
+            ).fetchone()
+            if res:
+                return db_file
+        except Exception:
+            pass
+        finally:
+            conn.close()
     return None
 
 
@@ -247,7 +145,7 @@ def extract_xml_from_db_content(content: Any, source_id: str, local_id: int) -> 
     if not content:
         return ""
 
-    content = _coerce_realtime_blobish_content(content)
+    content = _coerce_message_blob_content(content)
 
     if isinstance(content, memoryview):
         content = content.tobytes()
@@ -356,7 +254,7 @@ def proxy_biz_image(url: str):
 def get_biz_account_list(account: Optional[str] = None, source: Optional[str] = None):
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_biz_source(source)
-    source_norm, rt_conn, fallback_reason = _connect_biz_source(account_dir, source_requested)
+    source_norm = _normalize_biz_source(source_requested)
 
     biz_ids = set()
     biz_latest_time = {}
@@ -365,73 +263,35 @@ def get_biz_account_list(account: Optional[str] = None, source: Optional[str] = 
     for db_file in _iter_biz_message_db_paths(account_dir, source=source_norm):
         try:
             rows = []
-            if source_norm == "realtime" and rt_conn is not None:
-                resolved_user_col = _resolve_realtime_name2id_user_column(rt_conn, db_file)
-                if resolved_user_col:
-                    user_queries = [f"SELECT {_quote_ident(resolved_user_col)} AS username FROM Name2Id"]
-                else:
-                    # Fallback for old WCDB wrappers that may not support PRAGMA. Do not quote here:
-                    # SQLite can treat a double-quoted missing identifier as a string literal, which produced
-                    # a fake row named "username" in the UI.
-                    user_queries = [
-                        "SELECT user_name AS username FROM Name2Id",
-                        "SELECT username AS username FROM Name2Id",
-                    ]
-                for user_query in user_queries:
-                    try:
-                        rows = _exec_realtime_query(rt_conn, db_file, user_query)
-                        if rows:
-                            break
-                    except Exception:
-                        rows = []
+            conn = sqlite3.connect(str(db_file))
+            cursor = conn.cursor()
+
+            cursor.execute("PRAGMA table_info(Name2Id)")
+            cols = [row[1].lower() for row in cursor.fetchall()]
+            user_col = "username" if "username" in cols else "user_name" if "user_name" in cols else ""
+
+            if user_col:
+                rows = cursor.execute(f"SELECT {user_col} FROM Name2Id").fetchall()
                 for r in rows:
-                    uname = str((r or {}).get("username") or "").strip()
-                    if uname.lower() in {"username", "user_name"}:
-                        continue
-                    if not uname:
-                        continue
-                    biz_ids.add(uname)
+                    if r[0]:
+                        uname = r[0]
+                        biz_ids.add(uname)
 
-                    md5_id = hashlib.md5(uname.encode('utf-8')).hexdigest().lower()
-                    table_name = f"Msg_{md5_id}"
-                    try:
-                        sql = f"SELECT MAX(create_time) AS max_time FROM {_quote_ident(table_name)}"
-                        time_rows = _exec_realtime_query(rt_conn, db_file, sql)
-                        if time_rows and time_rows[0].get("max_time"):
-                            current_max = biz_latest_time.get(uname, 0)
-                            biz_latest_time[uname] = max(current_max, int(time_rows[0].get("max_time") or 0))
-                    except Exception:
-                        pass
-            else:
-                conn = sqlite3.connect(str(db_file))
-                cursor = conn.cursor()
-
-                cursor.execute("PRAGMA table_info(Name2Id)")
-                cols = [row[1].lower() for row in cursor.fetchall()]
-                user_col = "username" if "username" in cols else "user_name" if "user_name" in cols else ""
-
-                if user_col:
-                    rows = cursor.execute(f"SELECT {user_col} FROM Name2Id").fetchall()
-                    for r in rows:
-                        if r[0]:
-                            uname = r[0]
-                            biz_ids.add(uname)
-
-                            # 顺便查询该号的最后一条消息时间
-                            md5_id = hashlib.md5(uname.encode('utf-8')).hexdigest().lower()
-                            table_name = f"Msg_{md5_id}"
-                            try:
-                                time_res = conn.execute(f"SELECT MAX(create_time) FROM {table_name}").fetchone()
-                                if time_res and time_res[0]:
-                                    current_max = biz_latest_time.get(uname, 0)
-                                    biz_latest_time[uname] = max(current_max, time_res[0])
-                            except Exception:
-                                pass
-                conn.close()
+                        # 顺便查询该号的最后一条消息时间
+                        md5_id = hashlib.md5(uname.encode('utf-8')).hexdigest().lower()
+                        table_name = f"Msg_{md5_id}"
+                        try:
+                            time_res = conn.execute(f"SELECT MAX(create_time) FROM {table_name}").fetchone()
+                            if time_res and time_res[0]:
+                                current_max = biz_latest_time.get(uname, 0)
+                                biz_latest_time[uname] = max(current_max, time_res[0])
+                        except Exception:
+                            pass
+            conn.close()
         except Exception as e:
             logger.warning(f"读取 Name2Id 失败 {db_file}: {e}")
 
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     contact_info = {}
     if contact_db_path.exists() and biz_ids:
         try:
@@ -473,28 +333,6 @@ def get_biz_account_list(account: Optional[str] = None, source: Optional[str] = 
         except Exception as e:
             logger.warning(f"读取 contact.db 失败: {e}")
 
-    wcdb_display_names = {}
-    wcdb_avatar_urls = {}
-    if source_norm == "realtime" and rt_conn is not None and biz_ids:
-        missing_or_stale = []
-        for uid in biz_ids:
-            info = contact_info.get(uid) or {}
-            name = str(info.get("name") or "").strip()
-            avatar = str(info.get("avatar") or "").strip()
-            if (not name) or name == uid or (not avatar):
-                missing_or_stale.append(uid)
-        missing_or_stale = list(dict.fromkeys(missing_or_stale))
-        if missing_or_stale:
-            try:
-                with rt_conn.lock:
-                    wcdb_display_names = _wcdb_get_display_names(rt_conn.handle, missing_or_stale)
-            except Exception:
-                wcdb_display_names = {}
-            try:
-                with rt_conn.lock:
-                    wcdb_avatar_urls = _wcdb_get_avatar_urls(rt_conn.handle, missing_or_stale)
-            except Exception:
-                wcdb_avatar_urls = {}
 
     # 3. 组装结果。实时库里可能已经有新服务号，但 contact.db 尚未同步；这种情况保留兜底项。
     result = []
@@ -505,12 +343,6 @@ def get_biz_account_list(account: Optional[str] = None, source: Optional[str] = 
             "avatar": "",
             "type": 1 if str(uid or "").startswith("gh_") else 3,
         })
-        wcdb_name = str(wcdb_display_names.get(uid) or "").strip()
-        if wcdb_name and (not str(info.get("name") or "").strip() or str(info.get("name") or "").strip() == uid):
-            info["name"] = wcdb_name
-        wcdb_avatar = str(wcdb_avatar_urls.get(uid) or "").strip()
-        if wcdb_avatar and not str(info.get("avatar") or "").strip():
-            info["avatar"] = wcdb_avatar
         if int(info.get("type") if info.get("type") is not None else 3) == 3 and str(uid or "").startswith("gh_"):
             info["type"] = 1
         info["last_time"] = biz_latest_time.get(uid, 0)
@@ -527,12 +359,7 @@ def get_biz_account_list(account: Optional[str] = None, source: Optional[str] = 
     return {
         "status": "success",
         "source": source_norm,
-        **_biz_source_meta(
-            account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=fallback_reason,
-        ),
+
         "total": len(result),
         "data": result,
     }
@@ -553,7 +380,7 @@ def get_biz_messages(
 
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_biz_source(source)
-    source_norm, rt_conn, fallback_reason = _connect_biz_source(account_dir, source_requested)
+    source_norm = _normalize_biz_source(source_requested)
 
     md5_id = hashlib.md5(username.encode('utf-8')).hexdigest().lower()
     table_name = f"Msg_{md5_id}"
@@ -562,26 +389,16 @@ def get_biz_messages(
         account_dir,
         table_name,
         source=source_norm,
-        rt_conn=rt_conn,
+
     )
 
     if not target_db:
-        if source_norm == "realtime" and _iter_biz_message_db_paths(account_dir, source="decrypted"):
-            source_norm = "decrypted"
-            rt_conn = None
-            fallback_reason = fallback_reason or "实时服务号数据库中未找到该会话"
-            target_db = _find_biz_message_db_for_table(account_dir, table_name, source=source_norm)
         if not target_db:
             return {
                 "status": "success",
                 "account": account_dir.name,
                 "source": source_norm,
-                **_biz_source_meta(
-                    account_dir,
-                    requested_source=source_requested,
-                    active_source=source_norm,
-                    reason=fallback_reason,
-                ),
+
                 "data": [],
                 "scanned": 0,
                 "hasMore": False,
@@ -592,35 +409,18 @@ def get_biz_messages(
     messages = []
     scanned = 0
     try:
-        if source_norm == "realtime" and rt_conn is not None:
-            query = (
-                "SELECT local_id, create_time, message_content "
-                f"FROM {_quote_ident(table_name)} "
-                "WHERE local_type != 1 "
-                f"ORDER BY create_time DESC LIMIT {int(limit)} OFFSET {int(offset)}"
-            )
-            rows = _exec_realtime_query(rt_conn, target_db, query)
-            iter_rows = [
-                (
-                    int((r or {}).get("local_id") or 0),
-                    int((r or {}).get("create_time") or 0),
-                    (r or {}).get("message_content"),
-                )
-                for r in rows
-            ]
-        else:
-            conn = sqlite3.connect(str(target_db))
-            cursor = conn.cursor()
+        conn = sqlite3.connect(str(target_db))
+        cursor = conn.cursor()
 
-            query = f"""
-                SELECT local_id, create_time, message_content
-                FROM [{table_name}]
-                WHERE local_type != 1
-                ORDER BY create_time DESC
-                LIMIT ? OFFSET ?
-            """
-            iter_rows = cursor.execute(query, (limit, offset)).fetchall()
-            conn.close()
+        query = f"""
+            SELECT local_id, create_time, message_content
+            FROM [{table_name}]
+            WHERE local_type != 1
+            ORDER BY create_time DESC
+            LIMIT ? OFFSET ?
+        """
+        iter_rows = cursor.execute(query, (limit, offset)).fetchall()
+        conn.close()
 
         scanned = len(iter_rows)
         for local_id, c_time, content in iter_rows:
@@ -641,12 +441,7 @@ def get_biz_messages(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **_biz_source_meta(
-            account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=fallback_reason,
-        ),
+
         "data": messages,
         "scanned": scanned,
         "hasMore": scanned >= limit,
@@ -665,7 +460,7 @@ def get_wechat_pay_records(
     limit, offset = _normalize_pagination(limit, offset)
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_biz_source(source)
-    source_norm, rt_conn, fallback_reason = _connect_biz_source(account_dir, source_requested)
+    source_norm = _normalize_biz_source(source_requested)
 
     md5_id = hashlib.md5(username.encode('utf-8')).hexdigest().lower()
     table_name = f"Msg_{md5_id}"
@@ -674,26 +469,16 @@ def get_wechat_pay_records(
         account_dir,
         table_name,
         source=source_norm,
-        rt_conn=rt_conn,
+
     )
 
     if not target_db:
-        if source_norm == "realtime" and _iter_biz_message_db_paths(account_dir, source="decrypted"):
-            source_norm = "decrypted"
-            rt_conn = None
-            fallback_reason = fallback_reason or "实时服务号数据库中未找到微信支付会话"
-            target_db = _find_biz_message_db_for_table(account_dir, table_name, source=source_norm)
         if not target_db:
             return {
                 "status": "success",
                 "account": account_dir.name,
                 "source": source_norm,
-                **_biz_source_meta(
-                    account_dir,
-                    requested_source=source_requested,
-                    active_source=source_norm,
-                    reason=fallback_reason,
-                ),
+
                 "data": [],
                 "scanned": 0,
                 "hasMore": False,
@@ -703,35 +488,18 @@ def get_wechat_pay_records(
     messages = []
     scanned = 0
     try:
-        if source_norm == "realtime" and rt_conn is not None:
-            query = (
-                "SELECT local_id, create_time, message_content "
-                f"FROM {_quote_ident(table_name)} "
-                "WHERE local_type = 21474836529 OR local_type != 1 "
-                f"ORDER BY create_time DESC LIMIT {int(limit)} OFFSET {int(offset)}"
-            )
-            rows = _exec_realtime_query(rt_conn, target_db, query)
-            iter_rows = [
-                (
-                    int((r or {}).get("local_id") or 0),
-                    int((r or {}).get("create_time") or 0),
-                    (r or {}).get("message_content"),
-                )
-                for r in rows
-            ]
-        else:
-            conn = sqlite3.connect(str(target_db))
-            cursor = conn.cursor()
+        conn = sqlite3.connect(str(target_db))
+        cursor = conn.cursor()
 
-            query = f"""
-                SELECT local_id, create_time, message_content
-                FROM [{table_name}]
-                WHERE local_type = 21474836529 OR local_type != 1
-                ORDER BY create_time DESC
-                LIMIT ? OFFSET ?
-            """
-            iter_rows = cursor.execute(query, (limit, offset)).fetchall()
-            conn.close()
+        query = f"""
+            SELECT local_id, create_time, message_content
+            FROM [{table_name}]
+            WHERE local_type = 21474836529 OR local_type != 1
+            ORDER BY create_time DESC
+            LIMIT ? OFFSET ?
+        """
+        iter_rows = cursor.execute(query, (limit, offset)).fetchall()
+        conn.close()
 
         scanned = len(iter_rows)
         for local_id, c_time, content in iter_rows:
@@ -758,12 +526,7 @@ def get_wechat_pay_records(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **_biz_source_meta(
-            account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=fallback_reason,
-        ),
+
         "data": messages,
         "scanned": scanned,
         "hasMore": scanned >= limit,

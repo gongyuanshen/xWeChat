@@ -1,0 +1,14 @@
+{
+  "source": "Bundled WeChatDataAnalysis presentation assets",
+  "binary": "src/wechat_decrypt_tool/native/wce_integrity.pyd",
+  "sha256": "3e7a56653f052e561276d96b419336153353f7833991aa1a1dc85ae7e9c93ee4",
+  "recoveredAt": "2026-10-04",
+  "changes": [
+    "Removed legacy signature and brand gates; independent checksums do not authenticate origin.",
+    "Retained existing presentation, paging, search and message interactions.",
+    "Removed automatic remote media URL substitution.",
+    "Integrated existing incremental session catalog source.",
+    "Linked local merged-record attachments and playable videos without thumbnails."
+  ],
+  "runtimeRequiresOriginalBinary": false
+}

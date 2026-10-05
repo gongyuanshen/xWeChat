@@ -40,6 +40,43 @@ def canonical_account_name(value: Any) -> str:
     return name
 
 
+def normalize_account_directory_name(dir_name: str) -> str:
+    """Remove the four-hex collision suffix from an account source directory."""
+    trimmed = str(dir_name or "").strip()
+    if not trimmed:
+        return trimmed
+    if trimmed.lower().startswith("wxid_"):
+        match = re.match(r"^(wxid_.+)_([0-9a-fA-F]{4})$", trimmed, flags=re.IGNORECASE)
+        return match.group(1) if match else trimmed
+    match = re.match(r"^(.+)_([0-9a-fA-F]{4})$", trimmed)
+    return match.group(1) if match else trimmed
+
+
+def resolve_account_username(account_dir: Path) -> str:
+    """Resolve the account identity from its saved source path and directory."""
+    from .media_helpers import _resolve_account_db_storage_dir
+
+    account_path = Path(account_dir)
+    try:
+        db_storage_dir = _resolve_account_db_storage_dir(account_path)
+    except Exception:
+        db_storage_dir = None
+    candidates: list[str] = []
+    if db_storage_dir is not None:
+        try:
+            parent_name = Path(db_storage_dir).parent.name
+            if parent_name:
+                candidates.append(parent_name)
+        except Exception:
+            pass
+    candidates.append(account_path.name)
+    for candidate in candidates:
+        normalized = normalize_account_directory_name(candidate)
+        if normalized:
+            return normalized
+    return account_path.name.strip()
+
+
 def is_internal_account_directory_name(value: Any) -> bool:
     name = str(value or "").strip()
     if not name or name.startswith("."):
@@ -170,6 +207,8 @@ __all__ = [
     "account_identity_candidates",
     "canonical_account_name",
     "is_internal_account_directory_name",
+    "normalize_account_directory_name",
+    "resolve_account_username",
     "resolve_account_self_rowid",
     "resolve_account_self_username",
 ]

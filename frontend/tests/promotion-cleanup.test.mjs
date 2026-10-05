@@ -36,7 +36,7 @@ test('桌面入口没有原项目更新请求或安装通道', () => {
   }
   const pkg = JSON.parse(readFileSync(new URL('../desktop/package.json', root), 'utf8'))
   assert.equal(pkg.dependencies['electron-updater'], undefined)
-  assert.equal(pkg.build.publish, undefined)
+  assert.equal(pkg.build, undefined)
 })
 
 test('清理演示样式后保留公共导航图标及选中态', () => {

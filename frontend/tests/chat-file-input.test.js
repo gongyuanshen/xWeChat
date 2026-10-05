@@ -22,7 +22,8 @@ describe('单个文件附件发送', () => {
     state = reactive({ selectedAccount: 'wx_account', selectedContact: { username: 'wx_peer', name: '甲' }, refreshSelectedMessages: vi.fn() })
     api = {
       sendChatFile: vi.fn().mockResolvedValue({ success: true }),
-      sendChatImage: vi.fn().mockResolvedValue({ success: true }),
+      sendChatImage: vi.fn().mockResolvedValue({ success: true, session: '甲', image_name: image.name,
+        image_format: 'JPEG', image_size_bytes: 4096, duration_ms: 10, timestamp: 1 }),
       sendChatMessage: vi.fn().mockResolvedValue({ success: true })
     }
     window.wechatDesktop = { platform: 'win32', chooseFile: vi.fn().mockResolvedValue(picked(file)), chooseImage: vi.fn().mockResolvedValue(picked(image)) }
@@ -84,13 +85,16 @@ describe('单个文件附件发送', () => {
     expect(api.sendChatFile).not.toHaveBeenCalled()
   })
 
-  it('文件入口选图复用图片预览与图片接口', async () => {
+  it('文件入口选图通过图片接口发送，不伪装为文件', async () => {
     window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(image))
     await pick()
     expect(wrapper.get('.chat-input-image-preview').attributes('src')).toBe(image.previewDataUrl)
     await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
     await flushPromises()
-    expect(api.sendChatImage).toHaveBeenCalledExactlyOnceWith({ account: 'wx_account', username: 'wx_peer', display_name: '甲', image_path: image.path })
+    expect(wrapper.find('.chat-input-image-preview').exists()).toBe(false)
+    expect(api.sendChatImage).toHaveBeenCalledExactlyOnceWith({
+      account: 'wx_account', username: 'wx_peer', display_name: '甲', image_path: image.path
+    })
     expect(api.sendChatFile).not.toHaveBeenCalled()
   })
 

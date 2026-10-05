@@ -19,4 +19,8 @@ async def api_root():
 async def health_check():
     """健康检查端点"""
     logger.debug("健康检查请求")
-    return {"status": "healthy", "service": "微信解密工具"}
+    return {
+        "status": "healthy", "service": "微信解密工具",
+        "data_mode": "offline",
+        "default_source": "decrypted",
+    }

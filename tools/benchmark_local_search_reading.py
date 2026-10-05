@@ -39,7 +39,6 @@ def main():
                 ((i, i, i, 100 + i // 5, f'这是第{i}条合成聊天消息，项目进度正常。') for i in range(1, args.messages + 1)))
         stack.enter_context(patch.object(chat_helpers, '_resolve_account_dir', return_value=root))
         stack.enter_context(patch.object(chat_helpers, '_load_contact_rows', return_value={}))
-        stack.enter_context(patch.object(account_source_policy, 'account_prefers_decrypted_snapshot', return_value=True))
         stack.enter_context(patch.object(export, '_iter_message_db_paths', return_value=[path]))
         stack.enter_context(patch.object(export, '_resolve_msg_table_name', return_value='Msg_test'))
         stack.enter_context(patch.object(export, 'resolve_account_self_username', return_value='self'))

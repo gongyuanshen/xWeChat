@@ -40,6 +40,7 @@ import { useApi } from '~/composables/useApi'
 import { createEmptySearchContext, useChatSearch } from '~/composables/chat/useChatSearch'
 import { useChatSessions } from '~/composables/chat/useChatSessions'
 import { useChatMessages } from '~/composables/chat/useChatMessages'
+import { useSnapshotRefresh } from '~/composables/chat/useSnapshotRefresh'
 import { useChatExport } from '~/composables/chat/useChatExport'
 import { useChatEditing } from '~/composables/chat/useChatEditing'
 import { useChatHistoryWindows } from '~/composables/chat/useChatHistoryWindows'
@@ -58,7 +59,6 @@ import { heatColor } from '~/lib/wrapped/heatmap'
 import { parseTextWithEmoji } from '~/lib/wechat-emojis'
 import { PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT } from '~/lib/voice-transcript-invalidation'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
-import { useChatRealtimeStore } from '~/stores/chatRealtime'
 import { usePrivacyStore } from '~/stores/privacy'
 
 defineOptions({ name: 'ChatPage' })
@@ -73,6 +73,7 @@ useHead({
 const route = useRoute()
 const chatPageRef = ref(null)
 const chatPageActive = ref(true)
+const snapshotRefreshReady = ref(false)
 let chatInitialized = false
 let savedScrollPositions = []
 const api = useApi()
@@ -173,22 +174,11 @@ const { privacyMode } = storeToRefs(privacyStore)
 const chatAccounts = useChatAccountsStore()
 const { selectedAccount } = storeToRefs(chatAccounts)
 
-const realtimeStore = useChatRealtimeStore()
-const {
-  enabled: realtimeEnabled,
-  toggleSeq: realtimeToggleSeq,
-  lastToggleAction: realtimeLastToggleAction,
-  changeSeq: realtimeChangeSeq,
-  messageEvent: realtimeMessageEvent,
-  messageEventSeq: realtimeMessageEventSeq
-} = storeToRefs(realtimeStore)
-
 const searchContext = ref(createEmptySearchContext())
 
 const sessionState = useChatSessions({
   chatAccounts,
   selectedAccount,
-  realtimeEnabled,
   api
 })
 
@@ -216,9 +206,9 @@ const messageState = useChatMessages({
   apiBase,
   selectedAccount,
   selectedContact,
-  realtimeEnabled,
   privacyMode,
-  searchContext
+  searchContext,
+  onSnapshotChanged: () => snapshotRefresh.refreshView()
 })
 
 const {
@@ -255,8 +245,6 @@ const {
   loadMoreMessages,
   refreshSelectedMessages,
   refreshCurrentMessageMedia,
-  applyRealtimeMessage,
-  queueRealtimeRefresh,
   resetMessageState,
   onAvatarError,
   contactProfileCardOpen,
@@ -490,10 +478,30 @@ const searchState = useChatSearch({
   highlightMessageId,
   searchContext,
   selectContact,
-  loadMoreMessages
+  loadMoreMessages,
+  refreshSelectedMessages,
+  invalidateSnapshotMessages: messageState.invalidateSnapshotMessages,
+  onSnapshotChanged: () => snapshotRefresh.refreshView()
 })
 
 exitSearchContext = searchState.exitSearchContext
+
+const snapshotRefresh = useSnapshotRefresh({
+  api,
+  selectedAccount,
+  active: computed(() => chatPageActive.value && snapshotRefreshReady.value),
+  getDisplayedGeneration: () => {
+    const meta = messagesMeta.value[selectedContact.value?.username]
+    return meta ? meta.snapshotGeneration : null
+  },
+  onPublished: async ({ account, signal }) => {
+    await searchState.refreshSnapshotWindow({ signal })
+    if (signal.aborted || account !== selectedAccount.value) return
+    await refreshSessionsForSelectedAccount({ sourceOverride: 'decrypted', force: true, throwOnError: true, signal })
+  }
+})
+
+const refreshChatFromWechat = () => snapshotRefresh.refreshOnce()
 
 let locateServerIdTimer = null
 const locateMessageByServerId = async (serverIdStr) => {
@@ -686,10 +694,7 @@ const refreshVoicePanel = async () => {
   if (voicePanelBusy.value) return
   const context = beginVoicePanelRequest()
   try {
-    await Promise.all([
-      messageState.refreshVoiceTranscriptionStatus({ force: true }),
-      messageState.refreshNativeVoiceTranscriptionStatus({ force: true })
-    ])
+    await messageState.refreshVoiceTranscriptionStatus({ force: true })
     if (!voicePanelContextStillCurrent(context)) return
     if (context.account) {
       const job = await api.getLatestVoiceTranscriptionBatch(context.account)
@@ -735,15 +740,14 @@ const setVoicePanelModel = async (model) => {
   }
 }
 
-const startVoiceBatch = async (engine = 'local') => {
+const startVoiceBatch = async () => {
   if (voicePanelBusy.value || isVoiceBatchActive() || !selectedAccount.value) return
   const context = beginVoicePanelRequest()
   try {
     const job = await api.startVoiceTranscriptionBatch({
       account: context.account,
       force: false,
-      concurrency: normalizeVoiceBatchConcurrency(voiceBatchConcurrency.value),
-      engine
+      concurrency: normalizeVoiceBatchConcurrency(voiceBatchConcurrency.value)
     })
     if (!voicePanelContextStillCurrent(context)) return
     applyVoiceBatchJob(job)
@@ -859,44 +863,6 @@ const resetAccountScopedState = () => {
   resetVoiceBatchState()
 }
 
-const REALTIME_SESSIONS_REFRESH_MIN_INTERVAL_MS = 3000
-
-let realtimeSessionsRefreshFuture = null
-let realtimeSessionsRefreshTimer = null
-let realtimeSessionsRefreshQueued = false
-let lastRealtimeSessionsRefreshAt = 0
-
-const runRealtimeSessionsRefresh = () => {
-  realtimeSessionsRefreshTimer = null
-  if (!realtimeSessionsRefreshQueued) return
-  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
-  if (accountBootstrapInProgress || accountChangeInProgress) return
-  if (realtimeSessionsRefreshFuture) return
-
-  realtimeSessionsRefreshQueued = false
-  lastRealtimeSessionsRefreshAt = Date.now()
-  realtimeSessionsRefreshFuture = refreshSessionsForSelectedAccount({ sourceOverride: 'auto' }).finally(() => {
-    realtimeSessionsRefreshFuture = null
-    if (realtimeSessionsRefreshQueued) queueRealtimeSessionsRefresh()
-  })
-}
-
-const queueRealtimeSessionsRefresh = () => {
-  realtimeSessionsRefreshQueued = true
-  if (realtimeSessionsRefreshFuture || realtimeSessionsRefreshTimer) return
-
-  const elapsed = Date.now() - lastRealtimeSessionsRefreshAt
-  const delay = Math.max(0, REALTIME_SESSIONS_REFRESH_MIN_INTERVAL_MS - elapsed)
-  realtimeSessionsRefreshTimer = window.setTimeout(runRealtimeSessionsRefresh, delay)
-}
-
-const cancelQueuedRealtimeSessionsRefresh = () => {
-  realtimeSessionsRefreshQueued = false
-  if (!realtimeSessionsRefreshTimer) return
-  window.clearTimeout(realtimeSessionsRefreshTimer)
-  realtimeSessionsRefreshTimer = null
-}
-
 const onAccountChange = async () => {
   if (!chatPageActive.value) {
     accountChangeQueued = true
@@ -910,7 +876,7 @@ const onAccountChange = async () => {
     return
   }
   accountChangeInProgress = true
-  cancelQueuedRealtimeSessionsRefresh()
+  snapshotRefreshReady.value = false
   try {
     const accountAtStart = String(selectedAccount.value || '').trim()
     logChatBootstrap('accountChange:start', {
@@ -918,7 +884,6 @@ const onAccountChange = async () => {
     })
     resetAccountScopedState()
     try {
-      await realtimeStore.enable({ silent: true, scope: 'chat' })
       isLoadingContacts.value = true
       contactsError.value = ''
       await loadSessionsForSelectedAccount()
@@ -955,6 +920,8 @@ const onAccountChange = async () => {
       })
     } else if (accountChangeDisposed) {
       accountChangeQueued = false
+    } else {
+      snapshotRefreshReady.value = true
     }
   }
 }
@@ -1044,12 +1011,7 @@ const onVisibilityChange = () => {
     return
   }
   if (document.visibilityState !== 'visible') return
-  const resumedFromHidden = lastPageHiddenAt > 0
   maybeRefreshMediaOnResume()
-  if (resumedFromHidden && realtimeEnabled.value) {
-    queueRealtimeRefresh()
-    queueRealtimeSessionsRefresh()
-  }
 }
 
 const attachChatViewListeners = () => {
@@ -1077,6 +1039,7 @@ const detachChatViewListeners = () => {
 }
 
 onBeforeRouteLeave(() => {
+  closeVideoPreview()
   savedScrollPositions = [...chatPageRef.value.querySelectorAll('.overflow-y-auto')]
     .map(element => [element, element.scrollTop])
   for (const media of chatPageRef.value.querySelectorAll('audio, video')) media.pause()
@@ -1097,10 +1060,6 @@ onActivated(async () => {
   for (const [element, scrollTop] of savedScrollPositions) element.scrollTop = scrollTop
   savedScrollPositions = []
   updateJumpToBottomState()
-  if (realtimeEnabled.value) {
-    queueRealtimeRefresh()
-    queueRealtimeSessionsRefresh()
-  }
   if (voiceSidebarOpen.value) void pollVoiceBatch()
   void consumeAiNavigation()
 })
@@ -1108,7 +1067,6 @@ onActivated(async () => {
 onDeactivated(() => {
   chatPageActive.value = false
   detachChatViewListeners()
-  cancelQueuedRealtimeSessionsRefresh()
   stopVoiceBatchPolling()
   stopSessionListResize()
   onFloatingWindowMouseUp()
@@ -1137,7 +1095,6 @@ onMounted(async () => {
   accountBootstrapInProgress = true
   try {
     await chatAccounts.ensureLoaded()
-    await realtimeStore.enable({ silent: true, scope: 'chat' })
     await loadContacts()
   } finally {
     accountBootstrapInProgress = false
@@ -1167,6 +1124,7 @@ onMounted(async () => {
     selectedUsername: selectedContact.value?.username || '',
     requestedUsername: routeUsername.value
   })
+  snapshotRefreshReady.value = true
 
 })
 
@@ -1181,60 +1139,14 @@ onUnmounted(() => {
 
   if (locateServerIdTimer) clearTimeout(locateServerIdTimer)
   locateServerIdTimer = null
-  cancelQueuedRealtimeSessionsRefresh()
   stopVoiceBatchPolling()
-  void realtimeStore.disable({ silent: true })
   stopSessionListResize()
   stopExportPolling()
-})
-
-watch(realtimeMessageEventSeq, (next, previous) => {
-  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
-  if (next === previous) return
-  if (accountBootstrapInProgress || accountChangeInProgress) return
-  const event = realtimeMessageEvent.value
-  const username = String(
-    event?.username
-    || event?.message?.username
-    || event?.message?.chatUsername
-    || event?.message?.sessionId
-    || ''
-  ).trim()
-  const selectedUsername = String(selectedContact.value?.username || '').trim()
-  if (username && username === selectedUsername) void applyRealtimeMessage(event)
-  queueRealtimeSessionsRefresh()
-})
-
-watch(realtimeChangeSeq, (next, previous) => {
-  if (!process.client || !chatPageActive.value || document.visibilityState === 'hidden') return
-  if (next === previous || realtimeMessageEvent.value?.type !== 'conversation_updated') return
-  if (accountBootstrapInProgress || accountChangeInProgress) return
-  queueRealtimeSessionsRefresh()
-})
-
-watch(realtimeToggleSeq, async () => {
-  if (!chatPageActive.value) return
-  const action = String(realtimeLastToggleAction.value || '')
-  if (action === 'enabled') {
-    await refreshSessionsForSelectedAccount({ sourceOverride: 'auto' })
-    if (selectedContact.value?.username) {
-      await refreshSelectedMessages()
-    }
-    return
-  }
-
-  if (action === 'disabled') {
-    await refreshSessionsForSelectedAccount({ sourceOverride: 'auto' })
-    if (selectedContact.value?.username) {
-      await refreshSelectedMessages()
-    }
-  }
 })
 
 watch(
   () => selectedContact.value?.username,
   (username) => {
-    realtimeStore.setPriorityUsername(username || '')
     void loadGroupAnnouncement(username)
   }
 )
@@ -1402,6 +1314,9 @@ const chatState = {
   aiSidebarOpen,
   toggleAiSidebar,
   chatAccounts,
+  snapshotRefresh,
+  refreshChatFromWechat,
+  isRefreshingMessages: snapshotRefresh.manualRefreshing,
   selectedAccount,
   availableAccounts,
   contacts,

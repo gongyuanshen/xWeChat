@@ -8,8 +8,6 @@ import time
 
 
 async def verify(args):
-    from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-    configure_native_core_entrypoint()
     from wechat_decrypt_tool.ai.agent_tools import ChatTools
     tools = ChatTools()
     def checkpoint():
@@ -65,7 +63,6 @@ async def verify(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--count', type=int, default=5)
     parser.add_argument('--output', type=Path, required=True)
@@ -75,5 +72,4 @@ if __name__ == '__main__':
     args.output.mkdir(parents=True, exist_ok=False)
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(args.data_dir.resolve())
     os.environ['WECHAT_TOOL_OUTPUT_DIR'] = str(args.data_dir.resolve() / 'output')
-    os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
     asyncio.run(verify(args))

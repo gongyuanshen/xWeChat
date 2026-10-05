@@ -168,8 +168,8 @@
                     ></audio>
                     <div
                       v-if="!privacyMode && (
-                        typeof transcribeVoice === 'function'
-                        || typeof transcribeVoiceLocally === 'function'
+                        typeof transcribeVoiceLocally === 'function'
+                        || typeof transcribeVoiceNatively === 'function'
                         || message.voiceTranscriptStatus === 'success'
                         || !!message.voiceTranscript
                       )"
@@ -183,17 +183,6 @@
                       <template v-if="isVoiceTranscriptIdle(message)">
                         <div class="wechat-voice-transcript__actions" role="group" aria-label="语音转文字">
                           <button
-                            v-if="typeof transcribeVoice === 'function' && nativeVoiceTranscriptionAvailable"
-                            type="button"
-                            class="wechat-voice-transcript__action wechat-voice-transcript__action--wechat"
-                            title="使用微信转文字"
-                            aria-label="微信转文字"
-                            @click.stop="transcribeVoice(message)"
-                          >
-                            <img :src="wechatPcLogoUrl" alt="" aria-hidden="true" class="wechat-voice-transcript__icon wechat-voice-transcript__icon--wechat">
-                            <span>微信转文字</span>
-                          </button>
-                          <button
                             v-if="canShowLocalVoiceAction(message)"
                             type="button"
                             class="wechat-voice-transcript__action wechat-voice-transcript__action--local wechat-voice-transcript__local-action"
@@ -204,16 +193,27 @@
                             <i class="fa-solid fa-language wechat-voice-transcript__icon" aria-hidden="true"></i>
                             <span>本地转文字</span>
                           </button>
+                          <button
+                            v-if="typeof transcribeVoiceNatively === 'function'"
+                            type="button"
+                            class="wechat-voice-transcript__action wechat-voice-transcript__native-action"
+                            title="会短暂切换微信；同一分钟多条语音无法唯一定位时会报错。"
+                            aria-label="微信转文字"
+                            @click.stop="transcribeVoiceNatively(message)"
+                          >
+                            <i class="fa-brands fa-weixin wechat-voice-transcript__icon" aria-hidden="true"></i>
+                            <span>微信转文字</span>
+                          </button>
                         </div>
                         <span
-                          v-if="!nativeVoiceTranscriptionStatusKnown || nativeVoiceTranscriptionStatusLoading || !voiceTranscriptionStatusKnown || voiceTranscriptionStatusLoading"
+                          v-if="!voiceTranscriptionStatusKnown || voiceTranscriptionStatusLoading"
                           class="wechat-voice-transcript__status"
                           role="status"
-                        >正在检查转写能力…</span>
+                        >正在检查本地模型…</span>
                       </template>
                       <span v-else-if="message.voiceTranscriptStatus === 'loading'" class="wechat-voice-transcript__status" role="status">
                         <i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i>
-                        正在转文字…
+                        {{ message._voiceTranscriptionSource === 'wechat' ? '正在微信转文字…' : '正在转文字…' }}
                       </span>
                       <template v-else-if="message.voiceTranscriptStatus === 'success' || !!message.voiceTranscript">
                         <span
@@ -223,21 +223,15 @@
                           :title="voiceTranscriptSourceTitle(message)"
                         >{{ voiceTranscriptSourceLabel(message) }}</span>
                         <p class="wechat-voice-transcript__text">{{ message.voiceTranscript || '未识别到文字' }}</p>
+                        <p
+                          v-if="message.voiceTranscriptStatus === 'error' && message._voiceTranscriptionSource === 'wechat'"
+                          class="wechat-voice-transcript__error"
+                          role="alert"
+                        >{{ message.voiceTranscriptError || '微信语音转文字失败' }}</p>
                       </template>
                       <template v-else>
                         <span class="wechat-voice-transcript__error">{{ message.voiceTranscriptError || '语音识别失败' }}</span>
                         <div class="wechat-voice-transcript__actions" role="group" aria-label="重新转文字">
-                          <button
-                            v-if="typeof transcribeVoice === 'function' && nativeVoiceTranscriptionAvailable && !nativeVoiceTranscriptionStatusLoading"
-                            type="button"
-                            class="wechat-voice-transcript__action wechat-voice-transcript__action--wechat wechat-voice-transcript__retry"
-                            title="重试微信转文字"
-                            aria-label="微信转文字"
-                            @click.stop="transcribeVoice(message)"
-                          >
-                            <img :src="wechatPcLogoUrl" alt="" aria-hidden="true" class="wechat-voice-transcript__icon wechat-voice-transcript__icon--wechat">
-                            <span>微信转文字</span>
-                          </button>
                           <button
                             v-if="canShowLocalVoiceAction(message, true)"
                             type="button"
@@ -249,14 +243,25 @@
                             <i class="fa-solid fa-language wechat-voice-transcript__icon" aria-hidden="true"></i>
                             <span>本地转文字</span>
                           </button>
+                          <button
+                            v-if="typeof transcribeVoiceNatively === 'function'"
+                            type="button"
+                            class="wechat-voice-transcript__action wechat-voice-transcript__native-action"
+                            title="会短暂切换微信；同一分钟多条语音无法唯一定位时会报错。"
+                            aria-label="微信转文字"
+                            @click.stop="transcribeVoiceNatively(message)"
+                          >
+                            <i class="fa-brands fa-weixin wechat-voice-transcript__icon" aria-hidden="true"></i>
+                            <span>微信转文字</span>
+                          </button>
                         </div>
                         <span
-                          v-if="!voiceTranscriptionAvailable && (!voiceTranscriptionStatusKnown || voiceTranscriptionStatusLoading)"
+                          v-if="message._voiceTranscriptionSource !== 'wechat' && !voiceTranscriptionAvailable && (!voiceTranscriptionStatusKnown || voiceTranscriptionStatusLoading)"
                           class="wechat-voice-transcript__status"
                           role="status"
                         >正在检查本地模型…</span>
                         <span
-                          v-else-if="!voiceTranscriptionAvailable"
+                          v-else-if="message._voiceTranscriptionSource !== 'wechat' && !voiceTranscriptionAvailable"
                           class="wechat-voice-transcript__error"
                         >本地模型未就绪</span>
                       </template>
@@ -291,24 +296,24 @@
                         @contextmenu="openMediaContextMenu($event, message, 'emoji')"
                         @error="onMessageEmojiRenderError(message)"
                       >
-                      <button
-                        v-if="shouldShowEmojiDownload(message)"
-                        class="text-xs px-2 py-1 rounded bg-white border border-gray-200 text-gray-700 opacity-0 group-hover:opacity-100 transition-opacity"
-                        :class="message.isSent ? 'mr-2' : 'ml-2'"
-                        :disabled="!!message._emojiDownloading"
-                        @click.stop="onEmojiDownloadClick(message)"
-                      >
-                        {{ message._emojiDownloading ? '下载中...' : (message._emojiDownloaded ? '已下载' : '下载') }}
-                      </button>
                     </template>
                     <div v-else-if="message.emojiUrl" class="wechat-media-placeholder wechat-media-placeholder--emoji">
                       <i class="fa-regular fa-face-smile" aria-hidden="true"></i>
-                      <span>表情未缓存</span>
+                      <span role="status">表情加载失败</span>
                     </div>
                     <div v-else class="px-3 py-1.5 text-[13px] max-w-sm relative msg-bubble whitespace-pre-wrap break-words leading-relaxed"
                       :class="message.isSent ? 'bg-[#95EC69] text-black bubble-tail-r' : 'bg-white text-gray-800 bubble-tail-l'">
                       {{ message.content }}
                     </div>
+                    <button
+                      v-if="shouldShowEmojiDownload(message)"
+                      class="text-xs px-2 py-1 rounded bg-white border border-gray-200 text-gray-700 transition-opacity"
+                      :class="[message.isSent ? 'mr-2' : 'ml-2', { 'opacity-0 group-hover:opacity-100 focus-visible:opacity-100': !message._emojiRenderError }]"
+                      :disabled="!!message._emojiDownloading"
+                      @click.stop="onEmojiDownloadClick(message)"
+                    >
+                      {{ message._emojiDownloading ? '下载中...' : (message._emojiRenderError ? '下载并重试' : (message._emojiDownloaded ? '已下载' : '下载')) }}
+                    </button>
                   </div>
                   <template v-else-if="message.renderType === 'quote'">
                     <div
@@ -657,8 +662,7 @@ export default defineComponent({
     const voiceLocalActionTitle = () => {
       const localAvailable = readMaybeRef(props.state?.voiceTranscriptionAvailable) === true
       const localReason = String(readMaybeRef(props.state?.voiceTranscriptionUnavailableReason) || '').trim()
-      const nativeReason = String(readMaybeRef(props.state?.nativeVoiceTranscriptionUnavailableReason) || '').trim()
-      return (!localAvailable && localReason) || nativeReason || '使用本地转文字'
+      return (!localAvailable && localReason) || '使用本地转文字'
     }
     const isActiveImageGroupTransition = (message) => (
       !!message?.imageGroupExpanded

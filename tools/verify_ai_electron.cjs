@@ -49,7 +49,6 @@ async function main() {
       await page.screenshot({ path: path.join(output, name + '.png') })
       result.checks.push(name)
     }
-    await page.getByRole('button', { name: '我已阅读全部内容并同意', exact: true }).click({ timeout: 120000 })
     if (values['static-ui']) await page.goto(`http://127.0.0.1:${port}/chat`)
     await page.getByRole('heading', { name: '验收 · 海桥项目', exact: true, level: 2 }).waitFor()
     await capture('electron-chat-loaded')

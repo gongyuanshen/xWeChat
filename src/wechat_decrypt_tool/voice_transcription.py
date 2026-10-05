@@ -19,6 +19,7 @@ import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager
+from contextvars import copy_context
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -69,6 +70,7 @@ from .runtime_settings import (
     write_voice_transcription_model_setting,
 )
 from .app_paths import get_data_dir, get_output_databases_dir, get_output_dir
+from .snapshot_registry import start_snapshot_thread, resolve_account_database_dir
 from .asr_models import (
     SPECS as ASR_MODEL_SPECS, NEW_MODEL_CATALOG, DEFAULT_VOICE_MODEL, RETIRED_VOICE_MODELS, cache_identity,
     dependency_status, model_files_ready, verify_model_files,
@@ -1109,7 +1111,7 @@ def load_voice_data(account_dir: Path, server_id: int) -> bytes:
         return b""
 
     best_local: tuple[int, bytes] = (-1, b"")
-    for media_db_path in _numbered_db_shards(account_path, "media"):
+    for media_db_path in _numbered_db_shards(resolve_account_database_dir(account_path), "media"):
         conn: Optional[sqlite3.Connection] = None
         try:
             conn = sqlite3.connect(str(media_db_path))
@@ -1130,77 +1132,8 @@ def load_voice_data(account_dir: Path, server_id: int) -> bytes:
     if best_local[1]:
         return best_local[1]
 
-    from .account_source_policy import account_prefers_decrypted_snapshot
-
-    if account_prefers_decrypted_snapshot(account_path):
-        return b""
-
-    try:
-        from .wcdb_realtime import WCDB_REALTIME, exec_query as _wcdb_exec_query
-
-        realtime = WCDB_REALTIME.ensure_connected(account_path)
-        media_dir = Path(realtime.db_storage_dir) / "message"
-        sql = f"SELECT voice_data FROM VoiceInfo WHERE svr_id = {sid} ORDER BY create_time DESC LIMIT 1"
-        for realtime_db_path in sorted(media_dir.glob("media_*.db")):
-            if not realtime_db_path.is_file():
-                continue
-            try:
-                with realtime.lock:
-                    rows = _wcdb_exec_query(
-                        realtime.handle,
-                        kind="message",
-                        path=str(realtime_db_path),
-                        sql=sql,
-                    )
-            except Exception:
-                rows = []
-            if rows:
-                data = _coerce_blob(rows[0].get("voice_data"))
-                if data:
-                    return data
-    except Exception:
-        pass
+    
     return b""
-
-
-def _list_realtime_voice_server_ids(
-    account_dir: Path,
-    *,
-    cancel_event: Optional[threading.Event] = None,
-    errors: Optional[list[str]] = None,
-) -> list[int]:
-    ids: set[int] = set()
-    try:
-        from .wcdb_realtime import WCDB_REALTIME, exec_query as _wcdb_exec_query
-
-        realtime = WCDB_REALTIME.ensure_connected(Path(account_dir))
-        media_dir = Path(realtime.db_storage_dir) / "message"
-        for realtime_db_path in _numbered_db_shards(media_dir, "media"):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            try:
-                with realtime.lock:
-                    rows = _wcdb_exec_query(
-                        realtime.handle,
-                        kind="message",
-                        path=str(realtime_db_path),
-                        sql="SELECT svr_id FROM VoiceInfo WHERE svr_id > 0",
-                    )
-            except Exception as exc:
-                rows = []
-                if errors is not None:
-                    errors.append(f"{realtime_db_path.name}: {type(exc).__name__}")
-            for row in rows or []:
-                try:
-                    sid = int(row.get("svr_id") or 0)
-                except Exception:
-                    continue
-                if sid > 0:
-                    ids.add(sid)
-    except Exception as exc:
-        if errors is not None:
-            errors.append(f"realtime media: {type(exc).__name__}")
-    return sorted(ids)
 
 
 def list_voice_server_ids(
@@ -1209,13 +1142,13 @@ def list_voice_server_ids(
     cancel_event: Optional[threading.Event] = None,
     errors: Optional[list[str]] = None,
 ) -> list[int]:
-    """List unique voice message IDs from every local and realtime media shard."""
+    """List unique voice message IDs from every local media shard."""
 
     account_path = Path(account_dir)
     ids: set[int] = set()
     local_errors: list[str] = []
     local_successes = 0
-    local_paths = _numbered_db_shards(account_path, "media")
+    local_paths = _numbered_db_shards(resolve_account_database_dir(account_path), "media")
     for media_db_path in local_paths:
         if cancel_event is not None and cancel_event.is_set():
             break
@@ -1232,21 +1165,9 @@ def list_voice_server_ids(
         finally:
             if conn is not None:
                 conn.close()
-    realtime_errors: list[str] = []
-    from .account_source_policy import account_prefers_decrypted_snapshot
-
-    if not account_prefers_decrypted_snapshot(account_path):
-        ids.update(
-            _list_realtime_voice_server_ids(
-                account_path,
-                cancel_event=cancel_event,
-                errors=realtime_errors,
-            )
-        )
+    
     if errors is not None:
         errors.extend(local_errors)
-        if local_successes == 0:
-            errors.extend(realtime_errors)
     return sorted(ids)
 
 def list_native_voice_transcripts(
@@ -1266,7 +1187,7 @@ def list_native_voice_transcripts(
     target_id = int(target_server_id or 0)
     local_errors: list[str] = []
     local_successes = 0
-    for db_path in _numbered_db_shards(account_path, "message"):
+    for db_path in _numbered_db_shards(resolve_account_database_dir(account_path), "message"):
         if cancel_event is not None and cancel_event.is_set():
             break
         conn: Optional[sqlite3.Connection] = None
@@ -1321,123 +1242,9 @@ def list_native_voice_transcripts(
                 conn.close()
     if target_id > 0 and target_id in result:
         return result
-    realtime_errors: list[str] = []
-    from .account_source_policy import account_prefers_decrypted_snapshot
-
-    if not account_prefers_decrypted_snapshot(account_path):
-        for server_id, text in _list_realtime_native_voice_transcripts(
-            account_path,
-            cancel_event=cancel_event,
-            errors=realtime_errors,
-            voice_server_ids=voice_server_ids,
-            target_server_id=target_id if target_id > 0 else None,
-        ).items():
-            result.setdefault(server_id, text)
+    
     if errors is not None:
         errors.extend(local_errors)
-        if local_successes == 0:
-            errors.extend(realtime_errors)
-    return result
-
-
-def _list_realtime_native_voice_transcripts(
-    account_dir: Path,
-    *,
-    cancel_event: Optional[threading.Event] = None,
-    errors: Optional[list[str]] = None,
-    voice_server_ids: Optional[set[int]] = None,
-    target_server_id: Optional[int] = None,
-) -> dict[int, str]:
-    """Best-effort native transcript lookup for direct/realtime WCDB mode."""
-
-    from .chat_helpers import _extract_voice_transcript_from_packed_info
-
-    result: dict[int, str] = {}
-    target_id = int(target_server_id or 0)
-    try:
-        from .wcdb_realtime import WCDB_REALTIME, exec_query as _wcdb_exec_query
-
-        realtime = WCDB_REALTIME.ensure_connected(Path(account_dir))
-        message_dir = Path(realtime.db_storage_dir) / "message"
-        for db_path in _numbered_db_shards(message_dir, "message"):
-            if cancel_event is not None and cancel_event.is_set():
-                break
-            try:
-                with realtime.lock:
-                    table_rows = _wcdb_exec_query(
-                        realtime.handle,
-                        kind="message",
-                        path=str(db_path),
-                        sql="SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'",
-                    )
-            except Exception as exc:
-                if errors is not None:
-                    errors.append(f"{db_path.name}: {type(exc).__name__}")
-                continue
-            for table_row in table_rows or []:
-                if cancel_event is not None and cancel_event.is_set():
-                    break
-                if not isinstance(table_row, dict):
-                    continue
-                table = str(
-                    next(
-                        (value for key, value in table_row.items() if str(key).lower() == "name"),
-                        "",
-                    )
-                    or ""
-                ).strip()
-                if not table.lower().startswith("msg_"):
-                    continue
-                quoted = '"' + table.replace('"', '""') + '"'
-                try:
-                    with realtime.lock:
-                        try:
-                            target_where = f" AND server_id = {target_id}" if target_id > 0 else ""
-                            rows = _wcdb_exec_query(
-                                realtime.handle,
-                                kind="message",
-                                path=str(db_path),
-                                sql=(
-                                    f"SELECT server_id, packed_info_data FROM {quoted} "
-                                    "WHERE local_type = 34 AND server_id > 0"
-                                    + target_where
-                                ),
-                            )
-                        except Exception:
-                            rows = _wcdb_exec_query(
-                                realtime.handle,
-                                kind="message",
-                                path=str(db_path),
-                                sql=(
-                                    f"SELECT server_id, NULL AS packed_info_data FROM {quoted} "
-                                    "WHERE local_type = 34 AND server_id > 0"
-                                    + target_where
-                                ),
-                            )
-                except Exception as exc:
-                    if errors is not None:
-                        errors.append(f"{db_path.name}/{table}: {type(exc).__name__}")
-                    continue
-                for row in rows or []:
-                    if not isinstance(row, dict):
-                        continue
-                    values = {str(key).lower(): value for key, value in row.items()}
-                    try:
-                        server_id = int(values.get("server_id") or 0)
-                    except Exception:
-                        continue
-                    if server_id <= 0 or server_id in result:
-                        continue
-                    if voice_server_ids is not None:
-                        voice_server_ids.add(server_id)
-                    if values.get("packed_info_data") is None:
-                        continue
-                    text = _extract_voice_transcript_from_packed_info(values.get("packed_info_data"))
-                    if text:
-                        result[server_id] = text
-    except Exception as exc:
-        if errors is not None:
-            errors.append(f"realtime message: {type(exc).__name__}")
     return result
 
 
@@ -1706,6 +1513,7 @@ class VoiceTranscriptionService:
                     "computeType": result_compute_type,
                     "cached": False,
                 }
+                self._raise_if_cancelled(cancel_event)
                 try:
                     self._write_cache(
                         account_path,
@@ -1984,6 +1792,7 @@ class VoiceTranscriptionService:
                         close()
                     except Exception:
                         pass
+        self._raise_if_cancelled(cancel_event)
         text = _join_transcript_segments(values)
         return normalize_transcript_text(text), info
 
@@ -2942,7 +2751,7 @@ class VoiceTranscriptionBatchManager:
     ) -> dict[str, Any]:
         account_name = str(account or Path(account_dir).name or "").strip()
         engine_name = str(engine or "local").strip().lower()
-        if engine_name not in {"local", "wechat-native"}:
+        if engine_name != "local":
             raise VoiceTranscriptionError("invalid_engine", "不支持的批量转写方式。")
         service_lease: Optional[_VoiceTranscriptionServiceLease] = None
         activity_key = ""
@@ -2960,44 +2769,33 @@ class VoiceTranscriptionBatchManager:
                     "batch_busy",
                     "已有其他账号正在批量转写，请等待其完成或先取消。",
                 )
-            if engine_name == "local":
-                if self._uses_global_service:
-                    service_lease = acquire_voice_transcription_service_lease()
-                    service = service_lease.service
-                else:
-                    service = self._service_getter()
-                    activity_key = acquire_voice_model_activity(service.config.model)
-                try:
-                    service.ensure_available()
-                    cache_generation = capture_voice_transcript_cache_generation()
-                    requested_concurrency, effective_concurrency = resolve_voice_transcription_batch_concurrency(
-                        concurrency,
-                        service.config,
-                    )
-                except Exception:
-                    if service_lease is not None:
-                        service_lease.release()
-                    else:
-                        release_voice_model_activity(activity_key)
-                    raise
+            if self._uses_global_service:
+                service_lease = acquire_voice_transcription_service_lease()
+                service = service_lease.service
             else:
-                from .native_core_voice_asr import native_core_voice_asr_status
-
-                native_status = native_core_voice_asr_status(Path(account_dir))
-                if not native_status.get("available"):
-                    reason = str(native_status.get("reason") or "bridge_unavailable")
-                    raise VoiceTranscriptionError(
-                        "native_not_ready",
-                        f"微信原生语音转文字当前不可用（{reason}）。",
-                    )
+                service = self._service_getter()
+                activity_key = acquire_voice_model_activity(service.config.model)
+            try:
+                service.ensure_available()
+                cache_generation = capture_voice_transcript_cache_generation()
+                requested_concurrency, effective_concurrency = resolve_voice_transcription_batch_concurrency(
+                    concurrency,
+                    service.config,
+                )
+            except Exception:
+                if service_lease is not None:
+                    service_lease.release()
+                else:
+                    release_voice_model_activity(activity_key)
+                raise
             job_id = f"voice-batch-{uuid.uuid4().hex}"
             job = {
                 "jobId": job_id,
                 "account": account_name,
                 "engine": engine_name,
-                "model": _public_model_name(service.config.model) if service is not None else "wechat-native",
+                "model": _public_model_name(service.config.model),
                 "requestedConcurrency": requested_concurrency,
-                "concurrency": effective_concurrency if engine_name == "local" else 1,
+                "concurrency": (effective_concurrency),
                 "status": "queued",
                 "total": 0,
                 "completed": 0,
@@ -3017,9 +2815,8 @@ class VoiceTranscriptionBatchManager:
             self._jobs[job_id] = job
             self._latest_by_account[account_name] = job_id
             self._cancel_events[job_id] = threading.Event()
-        thread = threading.Thread(
-            target=self._run,
-            args=(
+        worker = self._run
+        worker_args = (
                 job_id,
                 Path(account_dir),
                 bool(force),
@@ -3028,19 +2825,9 @@ class VoiceTranscriptionBatchManager:
                 activity_key,
                 effective_concurrency,
                 cache_generation,
-            ),
-            name=f"voice-batch-{account_name}",
-            daemon=True,
         )
-        if engine_name == "wechat-native":
-            thread = threading.Thread(
-                target=self._run_native,
-                args=(job_id, Path(account_dir)),
-                name=f"voice-native-batch-{account_name}",
-                daemon=True,
-            )
         try:
-            thread.start()
+            start_snapshot_thread(account_dir, worker, args=worker_args, name=f"voice-batch-{account_name}")
         except Exception:
             if service_lease is not None:
                 service_lease.release()
@@ -3135,143 +2922,6 @@ class VoiceTranscriptionBatchManager:
             if outcome.get("error"):
                 job["error"] = str(outcome["error"])
 
-    @staticmethod
-    def _transcribe_native_batch_item(
-        *,
-        account_dir: Path,
-        target: Any,
-        cancel_event: threading.Event,
-    ) -> dict[str, Any]:
-        from .native_voice_transcription import (
-            NativeVoiceTriggerError,
-            _dispatch_resolved_native_voice_transcription,
-            lookup_native_voice_transcript_cache,
-        )
-
-        if cancel_event.is_set():
-            raise _VoiceTranscriptionCancelled()
-        if has_voice_transcript_cache(account_dir, int(target.server_id)):
-            return {"success": 1, "native": 0, "cached": 1, "failed": 0, "error": ""}
-
-        deadline = time.monotonic() + 115.0
-        while not cancel_event.is_set() and time.monotonic() < deadline:
-            try:
-                result = _dispatch_resolved_native_voice_transcription(
-                    account_dir=account_dir,
-                    conversation=target.conversation,
-                    server_id=int(target.server_id),
-                    local_id=int(target.local_id),
-                    existing_text=str(target.text or ""),
-                )
-            except NativeVoiceTriggerError as exc:
-                if exc.code == "native_transport_busy":
-                    time.sleep(1.0)
-                    continue
-                return {"success": 0, "native": 0, "cached": 0, "failed": 1, "error": exc.user_message}
-
-            if str(result.get("status") or "") == "success":
-                return {"success": 1, "native": 1, "cached": 0, "failed": 0, "error": ""}
-            request_id = str(result.get("requestId") or "")
-            if not request_id:
-                return {
-                    "success": 0,
-                    "native": 0,
-                    "cached": 0,
-                    "failed": 1,
-                    "error": "微信原生语音转文字未返回任务编号。",
-                }
-            while not cancel_event.is_set() and time.monotonic() < deadline:
-                try:
-                    entry = lookup_native_voice_transcript_cache(
-                        account_dir,
-                        int(target.server_id),
-                        conversation=target.conversation,
-                        local_id=int(target.local_id),
-                        request_id=request_id,
-                        strict=True,
-                    )
-                except NativeVoiceTriggerError as exc:
-                    return {"success": 0, "native": 0, "cached": 0, "failed": 1, "error": exc.user_message}
-                if entry is not None and entry.status == "success" and entry.text:
-                    return {"success": 1, "native": 1, "cached": 0, "failed": 0, "error": ""}
-                if entry is not None and entry.status == "error":
-                    return {
-                        "success": 0,
-                        "native": 0,
-                        "cached": 0,
-                        "failed": 1,
-                        "error": entry.error_message or "微信原生语音转文字失败。",
-                    }
-                time.sleep(1.0)
-            break
-        if cancel_event.is_set():
-            raise _VoiceTranscriptionCancelled()
-        return {
-            "success": 0,
-            "native": 0,
-            "cached": 0,
-            "failed": 1,
-            "error": "等待微信原生语音转文字结果超时。",
-        }
-
-    def _run_native(self, job_id: str, account_dir: Path) -> None:
-        from .native_voice_transcription import list_native_voice_batch_targets
-
-        self._update(job_id, status="running", startedAt=time.time(), stage="scan")
-        try:
-            cancel_event = self._cancel_events[job_id]
-            scan_errors: list[str] = []
-            targets = list_native_voice_batch_targets(
-                account_dir,
-                cancel_event=cancel_event,
-                errors=scan_errors,
-            )
-            if cancel_event.is_set():
-                self._update(job_id, status="cancelled", currentServerId="", finishedAt=time.time())
-                return
-            if scan_errors:
-                self._update(
-                    job_id,
-                    warning=f"有 {len(set(scan_errors))} 个数据库范围未能完整扫描，结果可能不完整。",
-                    scanWarningCount=len(set(scan_errors)),
-                )
-            self._update(
-                job_id,
-                total=len(targets),
-                concurrency=1,
-                percent=100 if not targets else 0,
-                stage="transcribe",
-            )
-            if not targets:
-                self._update(job_id, status="done", currentServerId="", finishedAt=time.time())
-                return
-            for target in targets:
-                if cancel_event.is_set():
-                    break
-                self._update(job_id, currentServerId=str(target.server_id))
-                try:
-                    outcome = self._transcribe_native_batch_item(
-                        account_dir=account_dir,
-                        target=target,
-                        cancel_event=cancel_event,
-                    )
-                except _VoiceTranscriptionCancelled:
-                    break
-                self._record_batch_result(job_id, int(target.server_id), outcome, len(targets))
-            if cancel_event.is_set():
-                self._update(job_id, status="cancelled", currentServerId="", finishedAt=time.time())
-            else:
-                self._update(job_id, status="done", percent=100, currentServerId="", finishedAt=time.time())
-        except _VoiceTranscriptionCancelled:
-            self._update(job_id, status="cancelled", currentServerId="", finishedAt=time.time())
-        except Exception as exc:
-            self._update(
-                job_id,
-                status="error",
-                currentServerId="",
-                error=f"微信原生批量转写失败：{type(exc).__name__}",
-                finishedAt=time.time(),
-            )
 
     def _run(
         self,
@@ -3357,6 +3007,7 @@ class VoiceTranscriptionBatchManager:
                                 break
                             self._jobs[job_id]["currentServerId"] = str(server_id)
                             future = executor.submit(
+                                copy_context().run,
                                 self._transcribe_batch_item,
                                 service=service,
                                 account_dir=account_dir,

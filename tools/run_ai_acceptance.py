@@ -65,7 +65,7 @@ def main():
     node_tests = sorted(str(p.relative_to(ROOT / 'frontend')) for p in (ROOT / 'frontend/tests').glob('*.test.mjs'))
     check('frontend-node', [node, '--test', *node_tests], ROOT / 'frontend')
     check('frontend-generate', [node, 'node_modules/@nuxt/cli/bin/nuxi.mjs', 'generate'], ROOT / 'frontend')
-    check('desktop-contracts', [node, '--test', 'desktop/tests/ai-notifications.test.cjs', 'desktop/tests/ai-packaging.test.cjs',
+    check('desktop-contracts', [node, '--test', 'desktop/tests/ai-notifications.test.cjs',
                               'desktop/tests/renderer-startup.test.cjs', 'desktop/tests/renderer-cache.test.cjs',
                               'desktop/tests/output-dir-main.test.cjs'])
     summary['finished_utc'] = datetime.now(timezone.utc).isoformat()

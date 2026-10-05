@@ -16,6 +16,7 @@ export const useChatExport = ({ api, apiBase, contacts, selectedAccount, selecte
   const exportHtmlPageSize = ref(1000)
   const exportTranscribeVoice = ref(false)
   const exportDownloadRemoteMedia = ref(false)
+  const exportExtractImageKeys = ref(false)
   const exportMessageTypeOptions = [
     { value: 'text', label: '文本' },
     { value: 'image', label: '图片' },
@@ -770,6 +771,7 @@ export const useChatExport = ({ api, apiBase, contacts, selectedAccount, selecte
     exportHtmlPageSize.value = 1000
     exportTranscribeVoice.value = false
     exportDownloadRemoteMedia.value = false
+    exportExtractImageKeys.value = false
     const defaultListTab = selectedContact.value?.username ? 'current' : 'all'
     exportScope.value = 'selected'
     exportListTab.value = defaultListTab
@@ -947,6 +949,7 @@ export const useChatExport = ({ api, apiBase, contacts, selectedAccount, selecte
         include_media: includeMedia,
         media_kinds: mediaKinds,
         download_remote_media: exportFormat.value === 'html' && !!exportDownloadRemoteMedia.value && !privacyMode.value,
+        allow_process_key_extract: includeMedia && mediaKindSet.has('image') && !!exportExtractImageKeys.value,
         html_page_size: Math.max(0, Math.floor(Number(exportHtmlPageSize.value || 1000))),
         output_dir: isDesktopExportRuntime() ? String(exportFolder.value || '').trim() : null,
         privacy_mode: !!privacyMode.value,
@@ -1023,6 +1026,7 @@ export const useChatExport = ({ api, apiBase, contacts, selectedAccount, selecte
     exportHtmlPageSize,
     exportTranscribeVoice,
     exportDownloadRemoteMedia,
+    exportExtractImageKeys,
     exportMessageTypeOptions,
     exportMessageTypes,
     areAllExportMessageTypesSelected,

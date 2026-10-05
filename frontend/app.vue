@@ -4,7 +4,6 @@
     <div class="flex-1 flex flex-col min-h-0 min-w-0">
       <!-- Desktop titlebar lives above the page content (right column) -->
       <DesktopTitleBar v-if="showDesktopTitleBar" />
-      <DataSourceFallbackBanner :status="selectedDataSourceStatus" />
       <div :class="contentClass">
         <NuxtPage :keepalive="{ include: ['ChatPage'], max: 1 }" />
       </div>
@@ -52,7 +51,7 @@ const {
 const themeStore = useThemeStore()
 const privacyStore = usePrivacyStore()
 const chatAccounts = useChatAccountsStore()
-const { selectedAccount, selectedDataSourceStatus } = storeToRefs(chatAccounts)
+const { selectedAccount } = storeToRefs(chatAccounts)
 const noAccountGuideOpen = ref(false)
 
 const accountDataRoutePrefixes = [

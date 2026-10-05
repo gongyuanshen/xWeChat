@@ -60,8 +60,7 @@ async def verify(root, output, model_root):
         raise TimeoutError('首批或恢复批次等待超过 300 秒')
 
     local = service()
-    with patch('sqlite3.connect', readonly), patch('wechat_decrypt_tool.chat_helpers._resolve_account_dir', resolve), \
-            patch('wechat_decrypt_tool.account_source_policy.account_prefers_decrypted_snapshot', return_value=True):
+    with patch('sqlite3.connect', readonly), patch('wechat_decrypt_tool.chat_helpers._resolve_account_dir', resolve):
         try:
             spec = model_spec('bge-small-zh')
             verify_model(model_dir(model_root, spec['id']), spec)

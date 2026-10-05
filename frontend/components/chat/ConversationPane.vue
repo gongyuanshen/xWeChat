@@ -67,8 +67,8 @@
               <path d="m7.5 11.5 4.5-4.5 4.5 4.5" />
             </svg>
           </button>
-          <button class="header-btn-icon" @click="refreshSelectedMessages" :disabled="isLoadingMessages" title="刷新消息">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <button type="button" class="header-btn-icon" data-testid="chat-refresh" @click="refreshChatFromWechat" :disabled="isRefreshingMessages" :aria-busy="isRefreshingMessages" aria-label="刷新消息" :title="isRefreshingMessages ? '正在刷新消息' : '刷新消息'">
+            <svg class="w-4 h-4" :class="{ 'motion-safe:animate-spin': isRefreshingMessages }" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
             </svg>
           </button>
@@ -143,30 +143,16 @@
         </div>
       </div>
 
-      <div v-if="searchContext.active" class="chat-context-banner px-6 py-2 border-b border-emerald-200 bg-emerald-50 flex items-center gap-3">
-        <div class="chat-context-banner-title text-sm text-emerald-900">
-          {{ searchContextBannerText }}
-        </div>
-        <div class="ml-auto flex items-center gap-2">
-          <button type="button" class="chat-context-banner-btn text-xs px-3 py-1 rounded-md bg-white border border-emerald-200 hover:bg-emerald-100" @click="exitSearchContext">
-            退出定位
-          </button>
-          <button type="button" class="chat-context-banner-btn2 text-xs px-3 py-1 rounded-md bg-white border border-gray-200 hover:bg-gray-50" @click="refreshSelectedMessages">
-            返回最新
-          </button>
-        </div>
-      </div>
-
       <MessageList :state="state" />
 
       <MessageInputWorkspace :state="state" />
 
       <button
-        v-if="showJumpToBottom"
+        v-if="showJumpToBottom || searchContext.active"
         type="button"
         class="jump-to-bottom-btn absolute bottom-44 right-6 z-20 w-10 h-10 rounded-full border shadow flex items-center justify-center"
         title="回到最新"
-        @click="scrollToBottom"
+        @click="searchContext.active ? refreshSelectedMessages() : scrollToBottom()"
       >
         <svg class="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
@@ -221,6 +207,7 @@ export default defineComponent({
   setup(props) {
     return {
       ...props.state,
+      isRefreshingMessages: toRef(props.state, 'isRefreshingMessages'),
       insightsPanelOpen: toRef(props.state, 'insightsPanelOpen'),
       recognitionHeader: toRef(props.state, 'recognitionHeader')
     }

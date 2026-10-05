@@ -9,7 +9,7 @@ import sqlite3
 def main(args):
     data = args.data.resolve()
     os.environ.update(WECHAT_TOOL_DATA_DIR=str(data), WECHAT_TOOL_OUTPUT_DIR=str(data / 'output'),
-        WCE_NATIVE_CORE_SOURCE_DIR=str(args.native_core_dir.resolve()), WECHAT_TOOL_UI_DIR=str(args.ui.resolve()))
+        WECHAT_TOOL_UI_DIR=str(args.ui.resolve()))
     from wechat_decrypt_tool.ai.storage import AIStore
     from wechat_decrypt_tool.ai.providers import ModelService, public_profile
     from wechat_decrypt_tool.ai import service as ai_module
@@ -39,7 +39,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data', type=Path, default=Path(os.environ['APPDATA']) / 'wechat-data-analysis-desktop')
     parser.add_argument('--state', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--ui', type=Path, default=Path('frontend/.output/public'))
     parser.add_argument('--port', type=int, default=10592)
     main(parser.parse_args())

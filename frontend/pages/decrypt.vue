@@ -80,28 +80,7 @@
                 <svg class="w-4 h-4 mr-1 text-[#10AEEF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
-                点击按钮将优先使用 V4 内存扫描获取【数据库解密密钥】；失败时会询问您是否改用 Hook。您也可以手动输入已知的64位密钥。
-              </p>
-              <p class="mt-2 text-xs text-[#7F7F7F] flex items-start">
-                <svg class="w-4 h-4 mr-1 mt-0.5 text-[#10AEEF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <span>
-                  V4 内存扫描这部分参考了
-                  <a
-                    href="https://github.com/recarto404"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="text-[#576B95] underline decoration-[#576B95]/30 underline-offset-2 hover:text-[#07C160]"
-                  >recarto404</a>
-                  提供的扫内存技术方案。
-                </span>
-              </p>
-              <p v-if="formData.wechat_install_path" class="mt-2 text-xs text-[#7F7F7F] flex items-start">
-                <svg class="w-4 h-4 mr-1 mt-0.5 text-[#10AEEF]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                </svg>
-                <span>当前将使用第一步检测时保存的微信安装目录：<span class="font-mono break-all">{{ formData.wechat_install_path }}</span>。</span>
+                <span>离线模式：请先填写当前账号的 db_storage 绝对路径，再从已登录微信的内存中扫描并验证数据库密钥。您也可以手动输入已知的64位密钥。</span>
               </p>
             </div>
             
@@ -122,7 +101,7 @@
                 :class="{ 'border-red-500': formErrors.db_storage_path }"
                 required
               />
-              <p v-if="formErrors.db_storage_path" class="mt-1 text-sm text-red-600 flex items-center">
+              <p v-if="formErrors.db_storage_path" class="mt-1 text-sm text-red-600 flex items-center" role="alert">
                 <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
                 </svg>
@@ -252,6 +231,8 @@
                 class="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800"
               >
                 {{ imageKeyMemoryScanNote }}
+                <button v-if="platformCapabilitiesError" type="button" class="ml-2 underline"
+                  :disabled="!platformCapabilitiesLoaded" @click="loadPlatformCapabilities">重新检测扫描资源</button>
               </p>
               <div class="min-h-6" aria-live="polite">
                 <p
@@ -484,7 +465,7 @@
                 <p class="mb-2">可能的失败原因：</p>
                 <ul class="list-disc list-inside space-y-1">
                   <li><strong>解密后非有效图片</strong>：文件不是图片格式(如视频缩略图损坏)</li>
-                  <li><strong>V4-V2版本需要AES密钥</strong>：请使用 wx_key 获取 AES 密钥后再重试解密</li>
+                  <li><strong>V4-V2版本需要AES密钥</strong>：请返回图片密钥步骤，通过内存扫描或手动填写 AES 密钥后重试解密</li>
                   <li><strong>未知加密版本</strong>：新版微信使用了不支持的加密方式</li>
                   <li><strong>文件为空</strong>：原始文件损坏或为空文件</li>
                 </ul>
@@ -994,18 +975,9 @@
               v-else
               type="button"
               :disabled="!voiceOnboardingStatus?.available || voiceModelBusy || voiceOnboardingLoading || voiceOnboardingDeviceBusy"
-              @click="startVoiceOnboardingBatch('local')"
+              @click="startVoiceOnboardingBatch()"
               class="inline-flex items-center px-6 py-2.5 bg-[#07C160] text-white rounded-lg font-medium hover:bg-[#06AD56] disabled:cursor-not-allowed disabled:opacity-50"
             >{{ voiceOnboardingBatch?.status === 'done' ? '再次扫描全部语音' : '本地批量转文字' }}</button>
-            <button
-              v-if="!voiceBatchRunning"
-              type="button"
-              :disabled="!voiceNativeAvailable || voiceModelBusy || voiceOnboardingLoading || voiceOnboardingDeviceBusy"
-              :title="voiceNativeAvailable ? '逐条调用微信原生转写，任务会串行执行' : (voiceNativeReason || '微信原生转写当前不可用')"
-              @click="startVoiceOnboardingBatch('wechat-native')"
-              class="inline-flex items-center px-6 py-2.5 border border-[#07C160] text-[#078A45] rounded-lg font-medium hover:bg-[#F0F8F2] disabled:cursor-not-allowed disabled:opacity-50"
-            >微信原生批量转文字</button>
-            <p v-if="!voiceNativeAvailable && voiceNativeReason" class="basis-full text-xs text-[#A06A19]">{{ voiceNativeReason }}</p>
           </div>
         </div>
       </div>
@@ -1101,10 +1073,8 @@ const {
   getKeys,
   getImageKey,
   getImageKeyMemory,
-  getWxStatus,
   getPlatformCapabilities,
   getVoiceTranscriptionStatus,
-  getNativeVoiceTranscriptionStatus,
   setVoiceTranscriptionDevice,
   setVoiceTranscriptionModel,
   downloadVoiceTranscriptionModel,
@@ -1128,18 +1098,17 @@ let dbKeyRequestRevision = 0
 let dbKeyRequestController = null
 const platformCapabilities = ref({ platform: '' })
 const platformCapabilitiesLoaded = ref(false)
+const platformCapabilitiesError = ref('')
 const imageKeyMemoryScanChecking = computed(() => !platformCapabilitiesLoaded.value)
 const imageKeyMemoryScanSupported = computed(() => {
-  if (!platformCapabilitiesLoaded.value) return false
-  if (platformCapabilities.value?.platform === 'windows') {
-    return platformCapabilities.value?.image_key_memory_scan !== false
-  }
+  if (!platformCapabilitiesLoaded.value || platformCapabilitiesError.value) return false
   return platformCapabilities.value?.image_key_memory_scan === true
 })
 const imageKeyMemoryScanNote = computed(() => String(
   (!platformCapabilitiesLoaded.value && '正在检测当前平台的图片密钥扫描资源...')
+  || platformCapabilitiesError.value
   || platformCapabilities.value?.image_key_memory_scan_note
-  || '图片密钥扫描原生资源缺失或安装不完整，请重新安装完整发行包。'
+  || '后端未提供图片密钥扫描能力，请检查后端能力检测结果。'
 ))
 const DB_KEY_PERSISTENCE_WARNING = '数据库密钥未通过 session/message 跨库认证或保存失败；请查看失败详情，确认账号密钥及数据目录写入权限。'
 const guideDialog = reactive({
@@ -1191,7 +1160,6 @@ const steps = [
 ]
 
 const voiceOnboardingStatus = ref(null)
-const voiceNativeStatus = ref(null)
 const voiceOnboardingBatch = ref(null)
 const voiceBatchConcurrency = ref(0)
 const voiceBatchConcurrencyDraft = ref('0')
@@ -1291,8 +1259,6 @@ const voiceOnboardingDeviceLocked = computed(() => String(voiceOnboardingStatus.
 const voiceOnboardingCudaAvailable = computed(() => voiceOnboardingStatus.value?.cuda?.available === true)
 const voiceOnboardingCudaReason = computed(() => String(voiceOnboardingStatus.value?.cuda?.reason || '').trim())
 const voiceBatchRunning = computed(() => ['queued', 'running'].includes(String(voiceOnboardingBatch.value?.status || '')))
-const voiceNativeAvailable = computed(() => voiceNativeStatus.value?.available === true)
-const voiceNativeReason = computed(() => String(voiceNativeStatus.value?.reason || '').trim())
 const normalizeVoiceBatchConcurrency = (value) => {
   const concurrency = Number(value)
   return Number.isInteger(concurrency) && concurrency >= 0 ? concurrency : 0
@@ -1518,7 +1484,7 @@ const mediaKeys = reactive({
   aes_key: ''
 })
 
-// 手动输入密钥（从 wx_key 获取）
+// 手动输入图片密钥
 const manualKeys = reactive({
   xor_key: '',
   aes_key: ''
@@ -1947,27 +1913,6 @@ const isDbKeyRequestActive = (revision, controller) => (
   && !controller.signal.aborted
 )
 
-const waitForDbKeyDelay = (milliseconds, signal) => new Promise((resolve, reject) => {
-  if (signal.aborted) {
-    const error = new Error('数据库密钥获取已停止')
-    error.name = 'AbortError'
-    reject(error)
-    return
-  }
-
-  const onAbort = () => {
-    clearTimeout(timer)
-    const error = new Error('数据库密钥获取已停止')
-    error.name = 'AbortError'
-    reject(error)
-  }
-  const timer = setTimeout(() => {
-    signal.removeEventListener('abort', onAbort)
-    resolve()
-  }, milliseconds)
-  signal.addEventListener('abort', onAbort, { once: true })
-})
-
 const cancelDbKeyAcquisition = () => {
   if (!dbKeyRequestController && !isGettingDbKey.value) return
 
@@ -1995,8 +1940,49 @@ const showDbKeyPersistenceWarning = (result) => {
   })
 }
 
+const formatDbKeyError = (err) => {
+  const detail = err?.data?.detail ?? err?.detail
+  if (typeof detail === 'string') return detail
+  if (detail && typeof detail === 'object') {
+    return [detail.code, detail.message || detail.detail].filter(Boolean).join(': ') || JSON.stringify(detail)
+  }
+  return err?.message || String(err)
+}
+
+const loadPlatformCapabilities = async () => {
+  platformCapabilitiesLoaded.value = false
+  try {
+    const capabilities = await getPlatformCapabilities()
+    if (!capabilities || !String(capabilities.platform || '').trim()) {
+      throw new Error('后端未返回有效的平台能力信息')
+    }
+    platformCapabilities.value = capabilities
+    if (error.value === platformCapabilitiesError.value) error.value = ''
+    platformCapabilitiesError.value = ''
+    return true
+  } catch (err) {
+    platformCapabilities.value = { platform: '' }
+    platformCapabilitiesError.value = '读取平台能力失败: ' + formatDbKeyError(err)
+    error.value = platformCapabilitiesError.value
+    return false
+  } finally {
+    platformCapabilitiesLoaded.value = true
+  }
+}
+
 const handleGetDbKey = async () => {
-  if (isGettingDbKey.value) return
+  if (isGettingDbKey.value || !platformCapabilitiesLoaded.value) return
+  if (platformCapabilitiesError.value && !(await loadPlatformCapabilities())) return
+
+  const dbStoragePath = String(formData.db_storage_path || '').trim()
+  formErrors.db_storage_path = ''
+  if (
+    !/^(?:[a-z]:[\\/]|\\\\|\/)/i.test(dbStoragePath)
+    || !/[/\\]db_storage[\\/]*$/i.test(dbStoragePath)
+  ) {
+    formErrors.db_storage_path = '请填写当前账号 db_storage 目录的绝对路径后再扫描密钥'
+    return
+  }
 
   const shouldContinue = await requestGuideDialog({
     eyebrow: '密钥获取提示',
@@ -2007,7 +1993,7 @@ const handleGetDbKey = async () => {
       '确认下方数据库路径属于同一个微信账号',
       '获取期间不要退出微信或切换到其他账号'
     ],
-    note: '如果内存扫描失败，系统会再次询问是否切换到 Hook 获取。',
+    note: '离线模式使用纯源码扫描，并用所填目录中的数据库验证候选密钥。扫描失败会直接显示原因。',
     primaryLabel: '准备好了，开始获取',
     secondaryLabel: '暂不获取',
     tone: 'guide'
@@ -2025,117 +2011,36 @@ const handleGetDbKey = async () => {
 
   try {
     const wechatInstallPath = normalizeWechatInstallPath(formData.wechat_install_path || readStoredWechatInstallPath())
-    const dbStoragePath = String(formData.db_storage_path || '').trim()
     formData.wechat_install_path = wechatInstallPath
-    const statusRes = await getWxStatus({ signal: requestController.signal })
     if (!isDbKeyRequestActive(requestRevision, requestController)) return
-    const wxStatus = statusRes?.wx_status
 
     const applySuccessResult = (res) => {
       if (!isDbKeyRequestActive(requestRevision, requestController)) return
-      if (res.data?.db_key) {
-        formData.key = res.data.db_key
-      }
       let successMessage = ''
-      if (res.data?.method === 'key_v4') {
-        successMessage = '数据库解密密钥已通过 V4 内存扫描获取成功！'
+      if (res.data?.method === 'pure_memory') {
+        successMessage = '数据库解密密钥已通过纯源码内存扫描获取，并通过数据库验证！'
       } else {
-        successMessage = '数据库解密密钥已通过 Hook 获取成功！'
+        throw new Error(`后端返回了无法识别的密钥获取方法：${String(res.data?.method)}`)
       }
+      if (!/^[0-9a-f]{64}$/i.test(res.data?.db_key || '')) throw new Error('后端成功响应未包含有效的64位数据库密钥')
+      formData.key = res.data.db_key
       warning.value = successMessage
       setTimeout(() => {
         if (requestRevision === dbKeyRequestRevision && warning.value === successMessage) warning.value = ''
       }, 3000)
     }
 
-    const fetchByHook = async () => {
-      if (wxStatus?.is_running) {
-        warning.value = '即将改用 Hook 获取数据库密钥：5秒后会关闭并重启微信，请确保微信未开启“自动登录”，并在弹窗中正常登录。'
-        await waitForDbKeyDelay(5000, requestController.signal)
-      } else {
-        warning.value = '正在使用 Hook 获取数据库密钥，请确保微信未开启“自动登录”，并在弹窗中正常登录。'
-      }
-
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return null
-      return await getKeys({
-        wechat_install_path: wechatInstallPath,
-        db_storage_path: dbStoragePath,
-        key_mode: 'hook',
-        signal: requestController.signal
-      })
-    }
-
-    let res = null
-    if (dbStoragePath) {
-      warning.value = '正在优先尝试 V4 内存扫描获取数据库密钥。'
-      res = await getKeys({
-        wechat_install_path: wechatInstallPath,
-        db_storage_path: dbStoragePath,
-        key_mode: 'key_v4',
-        signal: requestController.signal
-      })
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return
-    } else {
-      const useHook = await requestGuideDialog({
-        eyebrow: '获取方式切换',
-        title: '是否改用 Hook 获取密钥？',
-        description: 'V4 内存扫描需要数据库存储路径来校验候选密钥。当前路径为空，可以返回填写，也可以直接切换到 Hook。',
-        details: [
-          'Hook 可能会关闭并重新启动微信',
-          'Hook 可能触发微信客户端账号安全提醒，相关提醒也可能延迟出现',
-          '请关闭微信自动登录，并在弹出的微信窗口中手动登录',
-          '登录时请选择当前准备解密的同一个账号'
-        ],
-        note: '选择“返回填写路径”不会执行 Hook，也不会关闭微信。',
-        primaryLabel: '继续使用 Hook',
-        secondaryLabel: '返回填写路径',
-        tone: 'warning'
-      })
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return
-      if (!useHook) {
-        warning.value = ''
-        formErrors.db_storage_path = '请填写数据库存储路径后再使用 V4 内存扫描'
-        return
-      }
-      res = await fetchByHook()
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return
-    }
+    warning.value = '正在使用纯源码内存扫描获取数据库密钥，并验证候选密钥。'
+    const res = await getKeys({
+      wechat_install_path: wechatInstallPath,
+      db_storage_path: dbStoragePath,
+      key_mode: 'pure_memory',
+      signal: requestController.signal
+    })
+    if (!isDbKeyRequestActive(requestRevision, requestController)) return
 
     if (res && res.status === 0) {
       applySuccessResult(res)
-    } else if (res?.data?.can_fallback_to_hook) {
-      const detail = res?.data?.key_v4_error || res?.errmsg || '未知错误'
-      warning.value = ''
-      const useHook = await requestGuideDialog({
-        eyebrow: '获取方式切换',
-        title: '内存扫描失败，是否改用 Hook？',
-        description: '可以继续改用 Hook 获取密钥。',
-        errorMessage: `V4 内存扫描未能获取密钥：${detail}`,
-        details: [
-          'Hook 可能会关闭并重新启动微信',
-          'Hook 可能触发微信客户端账号安全提醒，相关提醒也可能延迟出现',
-          '请关闭微信自动登录，并在弹出的微信窗口中手动登录',
-          '登录时请选择当前准备解密的同一个账号'
-        ],
-        note: '选择“暂不切换”会停止本次获取，不影响现有微信数据。',
-        primaryLabel: '继续使用 Hook',
-        secondaryLabel: '暂不切换',
-        tone: 'warning'
-      })
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return
-      if (!useHook) {
-        error.value = 'V4 内存扫描失败，已取消 Hook 获取。'
-        return
-      }
-
-      res = await fetchByHook()
-      if (!isDbKeyRequestActive(requestRevision, requestController)) return
-      if (res && res.status === 0) {
-        applySuccessResult(res)
-      } else {
-        error.value = 'Hook 获取失败: ' + (res?.errmsg || '未知错误')
-        warning.value = ''
-      }
     } else {
       error.value = '获取失败: ' + (res?.errmsg || '未知错误')
       warning.value = ''
@@ -2143,7 +2048,7 @@ const handleGetDbKey = async () => {
   } catch (e) {
     if (!isDbKeyRequestActive(requestRevision, requestController) || e?.name === 'AbortError') return
     console.error(e)
-    error.value = '系统错误: ' + e.message
+    error.value = '获取数据库密钥失败: ' + formatDbKeyError(e)
     warning.value = ''
   } finally {
     if (isDbKeyRequestActive(requestRevision, requestController)) {
@@ -2880,14 +2785,12 @@ const refreshVoiceOnboarding = async ({ preserveError = false } = {}) => {
   voiceOnboardingLoading.value = true
   if (!preserveError) voiceOnboardingError.value = ''
   try {
-    const [status, batch, nativeStatus] = await Promise.all([
+    const [status, batch] = await Promise.all([
       getVoiceTranscriptionStatus(),
       getLatestVoiceTranscriptionBatch(mediaAccount.value || ''),
-      mediaAccount.value ? getNativeVoiceTranscriptionStatus({ account: mediaAccount.value }) : Promise.resolve(null),
     ])
     if (!isVoiceOnboardingLifecycleActive(lifecycleEpoch) || refreshRevision !== voiceOnboardingRefreshRevision) return
     applyVoiceOnboardingStatus(status, { observationEpochs })
-    voiceNativeStatus.value = nativeStatus
     applyVoiceOnboardingBatch(batch)
     if (['queued', 'running'].includes(String(batch?.status || '')) && batch?.jobId) {
       void pollVoiceOnboardingBatch(batch.jobId, lifecycleEpoch)
@@ -3080,11 +2983,11 @@ const removeVoiceOnboardingModel = async (model) => {
   }
 }
 
-const startVoiceOnboardingBatch = async (engine = 'local') => {
+const startVoiceOnboardingBatch = async () => {
   const lifecycleEpoch = voiceOnboardingLifecycleEpoch
   if (
     !isVoiceOnboardingLifecycleActive(lifecycleEpoch)
-    || (engine === 'local' ? !voiceOnboardingStatus.value?.available : !voiceNativeAvailable.value)
+    || !voiceOnboardingStatus.value?.available
     || voiceBatchRunning.value
     || voiceOnboardingDeviceBusy.value
     || !commitVoiceBatchConcurrency()
@@ -3095,7 +2998,6 @@ const startVoiceOnboardingBatch = async (engine = 'local') => {
       account: mediaAccount.value || null,
       force: false,
       concurrency: voiceBatchConcurrency.value,
-      engine,
     })
     if (!isVoiceOnboardingLifecycleActive(lifecycleEpoch)) return
     applyVoiceOnboardingBatch(job)
@@ -3147,8 +3049,8 @@ const confirmBackFromRunningStep = () => {
     : currentStep.value === 0 && isGettingDbKey.value
       ? {
           title: '数据库密钥仍在获取',
-          description: '返回账号选择会停止当前页面等待结果；如果 Hook 已经开始，微信重启或登录流程仍可能继续完成。',
-          details: ['页面将不再接收本次密钥结果', '已经启动的 Hook 操作无法保证立即停止']
+          description: '返回账号选择会停止当前页面等待密钥扫描结果。',
+          details: ['页面将不再接收本次密钥结果', '已经启动的内存扫描可能仍在后台运行']
         }
     : currentStep.value === 2 && mediaDecrypting.value
       ? { title: '图片仍在解密', description: '返回填写图片密钥会停止当前图片解密，已经完成的图片会保留。' }
@@ -3307,19 +3209,7 @@ const skipToChat = async () => {
 // 页面加载时检查是否有选中的账户
 onMounted(async () => {
   if (process.client && typeof window !== 'undefined') {
-    try {
-      platformCapabilities.value = await getPlatformCapabilities()
-    } catch {
-      platformCapabilities.value = {
-        platform: 'windows',
-        database_key_extraction: true,
-        database_key_guidance: '',
-        image_key_memory_scan: true,
-        image_key_memory_scan_note: ''
-      }
-    } finally {
-      platformCapabilitiesLoaded.value = true
-    }
+    await loadPlatformCapabilities()
     formData.wechat_install_path = readStoredWechatInstallPath()
     const selectedAccount = sessionStorage.getItem('selectedAccount')
     logDecryptDebug('mounted:selected-account-raw', { raw: selectedAccount || '' })

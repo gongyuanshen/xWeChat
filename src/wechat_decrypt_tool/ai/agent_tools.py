@@ -120,94 +120,8 @@ class ChatTools:
                 'next_offsets': next_offsets, 'warning': '；'.join(dict.fromkeys(warnings))}
         return await asyncio.to_thread(collect)
 
-    async def live_search_segments(self, account, usernames, start, end):
-        """固定本次查询的会话顺序，先查最近活跃会话；仅连接只读实时源。"""
-        def inspect():
-            import sqlite3
-            from ..chat_helpers import _resolve_account_dir
-            from ..chat_search_index import get_chat_search_index_db_path
-            from ..account_source_policy import account_prefers_decrypted_snapshot
-            from ..wcdb_realtime import WCDB_REALTIME, get_sessions
-            from ..chat_export_service import _normalize_realtime_session_rows
-            directory = _resolve_account_dir(account)
-            if account_prefers_decrypted_snapshot(directory):
-                return {'segments': []}
-            try:
-                connection = WCDB_REALTIME.ensure_connected(directory)
-                with connection.lock:
-                    sessions = _normalize_realtime_session_rows(get_sessions(connection.handle))
-            except Exception as error:
-                from .diagnostics import failures
-                failures.report('agent.live_search.prepare', error)
-                return {'segments': [], 'warning': '实时数据暂不可用，搜索仍基于现有索引，最新消息可能未覆盖。'}
-            recent = {row['username']: int(row.get('sort_timestamp') or 0) for row in sessions}
-            path = get_chat_search_index_db_path(directory)
-            latest = {}
-            try:
-                with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
-                    for username in usernames:
-                        row = db.execute('SELECT create_time FROM message_meta WHERE username=? ORDER BY create_time DESC LIMIT 1', (username,)).fetchone()
-                        if row:
-                            latest[username] = int(row[0])
-            except sqlite3.Error:
-                pass
-            segments = []
-            for username in sorted(set(usernames), key=lambda u: (-recent.get(u, 0), u)):
-                low = max(start, latest.get(username, start))
-                # 会话元数据仅用于排序；不能因缺少时间或最后可见消息较旧跳过可读历史。
-                if low < end:
-                    segments.append({'username': username, 'start': low, 'end': end})
-            return {'segments': segments}
-        return await asyncio.to_thread(inspect)
 
-    async def live_search_page(self, account, segment, cursor, query, sender, checkpoint):
-        def read():
-            from .messages import iter_message_pages
-            from ..chat_helpers import _make_search_tokens, _match_tokens
-            stream = iter_message_pages(account, segment['username'], segment['start'], segment['end'] - 1,
-                require_realtime=True, checkpoint=checkpoint, page_offset=0, page_size=200,
-                cursor=cursor, emit_cursor=True, max_batch_bytes=1048576, message_weight=lambda m: size(message_payload(m)))
-            try:
-                page = next(stream)
-            finally:
-                stream.close()
-            tokens = _make_search_tokens(query)
-            matches = []
-            for message in page['messages']:
-                identity = message.get('sender_id') or (message.get('media') or {}).get('senderUsername') or message['sender']
-                if (not sender or identity == sender) and _match_tokens(message['text'], tokens):
-                    matches.append({**message, 'sender_id': identity, 'name': page.get('name') or segment['username'],
-                                    'match_methods': ['keyword']})
-            return {'messages': matches, 'scanned': len(page['messages']), 'has_more': page.get('has_more', False),
-                    'cursor': page.get('cursor')}
-        return await asyncio.to_thread(read)
 
-    async def search_freshness(self, account, username, start, end):
-        """索引中的最新消息只用于提示回查，不能视为完整覆盖截止时间。"""
-        def inspect():
-            import sqlite3
-            from ..chat_helpers import _resolve_account_dir
-            from ..chat_search_index import get_chat_search_index_db_path
-            from ..account_source_policy import account_prefers_decrypted_snapshot
-            directory = _resolve_account_dir(account)
-            result = {'kind': 'snapshot', 'latest_realtime_included': False}
-            if not username or account_prefers_decrypted_snapshot(directory):
-                return result
-            path = get_chat_search_index_db_path(directory)
-            try:
-                with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
-                    row = db.execute('SELECT create_time FROM message_meta WHERE username=? ORDER BY create_time DESC LIMIT 1',
-                                     (username,)).fetchone()
-            except sqlite3.Error:
-                return result
-            if row:
-                latest = int(row[0])
-                result['latest_indexed_message_time'] = latest
-                if latest < end:
-                    # 重叠读取最后一秒，避免同秒新增消息被跳过；稳定身份负责去重。
-                    result['realtime_read_hint'] = {'username': username, 'start': max(start, latest), 'end': end}
-            return result
-        return await asyncio.to_thread(inspect)
 
     @foreground_read
     async def recent_set(self, account, usernames, start, end, count, checkpoint, sender=None, on_progress=None):
@@ -338,12 +252,6 @@ class ChatTools:
         from ..chat_export_service import get_chat_export_targets_preview
         result = await asyncio.to_thread(get_chat_export_targets_preview, account=account, include_hidden=True, include_official=False)
         targets = {x['username']: x for x in result['targets']}
-        if result.get('source') == 'realtime':
-            # 实时会话列表可能已移除聊天，但消息库仍可读取；不能因此丢掉已保存历史。
-            snapshot = await asyncio.to_thread(get_chat_export_targets_preview, account=account, source='decrypted',
-                                                include_hidden=True, include_official=False)
-            for item in snapshot['targets']:
-                targets.setdefault(item['username'], item)
         return [{'username': x['username'], 'name': x.get('name') or x.get('displayName') or x['username'],
                  'isGroup': x.get('isGroup', x['username'].endswith('@chatroom'))} for x in targets.values()]
 
@@ -382,9 +290,8 @@ class ChatTools:
         from ..routers.chat import search_chat_messages
         result = await search_chat_messages(local_request(), q=query, account=account, username=username or None, sender=sender,
                                            start_time=start, end_time=max(start, end - 1), offset=offset, limit=50, source='auto', include_hidden=True,
-                                           allow_native_enrichment=False, retrieval_mode='hybrid')
+                                            retrieval_mode='hybrid')
         messages = [normalize(account, username, x) for x in result.get('hits', [])]
-        freshness = await self.search_freshness(account, username, start, end)
         device_note = result.get('device',{}).get('reason','')
         return {'messages': [x for x in messages if x], 'has_more': result.get('hasMore', False),
                 'next_offset': offset + len(result.get('hits', [])) if result.get('hasMore') else None,
@@ -392,7 +299,7 @@ class ChatTools:
                 'match_counts': {method: sum(method in x.get('match_methods', []) for x in messages if x)
                                  for method in ('keyword', 'semantic')},
                 'warning': '；'.join(filter(None,[result.get('coverage', {}).get('message') or '搜索索引来自本地快照；尚未解析的图片内容不在文字搜索范围内。',device_note])),
-                'data_source': 'snapshot_index', 'freshness': freshness, 'start': start, 'end': end}
+                'data_source': 'snapshot_index', 'freshness': {'kind': 'snapshot'}, 'start': start, 'end': end}
 
     @observed('agent.read.read')
     async def read(self, account, username, start, end, offset, count=None, *, max_batch_bytes=None):

@@ -23,15 +23,7 @@ test("npm Electron executable decrypts the fixed SNS JPEG fixture as Node", () =
   );
 });
 
-test("packaged backend smoke contract requires Electron run-as-node and WASM", () => {
-  const source = fs.readFileSync(
-    path.join(repoRoot, "src", "wechat_decrypt_tool", "backend_entry.py"),
-    "utf8",
-  );
-  assert.match(source, /--smoke-sns-wasm/);
-  assert.match(source, /weflow_decrypt_sns_image_bytes/);
-  assert.match(source, /keystreamProvider/);
-
+test("SNS media uses the configured Electron run-as-node WASM runtime", () => {
   const mediaSource = fs.readFileSync(
     path.join(repoRoot, "src", "wechat_decrypt_tool", "sns_media.py"),
     "utf8",

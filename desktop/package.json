@@ -7,106 +7,14 @@
     "dev": "node scripts/dev.cjs",
     "dev:gpu": "cross-env WECHAT_TOOL_QWEN_GPU=1 node scripts/dev.cjs",
     "dev:static": "npm --prefix ../frontend run generate && cross-env WECHAT_TOOL_STATIC_UI=1 electron .",
-    "build:ui": "npm --prefix ../frontend run generate && node scripts/copy-ui.cjs",
-    "build:backend": "uv sync --no-editable --extra build --extra voice-transcription && node scripts/build-backend.cjs",
-    "build:backend:gpu": "uv sync --no-editable --extra build --extra voice-transcription --extra voice-transcription-gpu && node scripts/build-backend.cjs --qwen-gpu",
-    "build:icon": "node scripts/build-icon.cjs",
-    "smoke:win": "node scripts/smoke-windows-package.cjs",
-    "smoke:win:real": "node scripts/smoke-windows-real-database.cjs",
-    "dist": "npm run dist:win:unsigned",
-    "dist:win:unsigned": "node scripts/build-windows-unsigned.cjs",
-    "dist:win": "npm run build:icon && npm run build:ui && npm run build:backend && electron-builder --win --x64 --publish never"
+    "build:icon": "node scripts/build-icon.cjs"
   },
   "dependencies": {
     "ffmpeg-static": "^5.3.0"
   },
-  "build": {
-    "appId": "com.xwechat.app",
-    "productName": "xwechat",
-    "artifactName": "${productName}-${version}-Setup.${ext}",
-    "icon": "build/icon.ico",
-    "beforePack": "scripts/native-core-before-pack.cjs",
-    "asar": true,
-    "directories": {
-      "output": "dist"
-    },
-    "electronFuses": {
-      "runAsNode": true
-    },
-    "files": [
-      "src/**/*",
-      "!src/wcdb-sidecar.cjs",
-      "!node_modules/ffmpeg-static/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/ui",
-        "to": "ui"
-      },
-      {
-        "from": "resources/backend",
-        "to": "backend"
-      },
-      {
-        "from": "resources/signing",
-        "to": "signing",
-        "filter": [
-          "windows-private-pki-root.cer",
-          "windows-private-pki.ps1"
-        ]
-      },
-      {
-        "from": "node_modules/ffmpeg-static",
-        "to": "ffmpeg",
-        "filter": [
-          "ffmpeg",
-          "ffmpeg.exe",
-          "ffmpeg.LICENSE",
-          "ffmpeg.README",
-          "ffmpeg.exe.LICENSE",
-          "ffmpeg.exe.README",
-          "LICENSE"
-        ]
-      }
-    ],
-    "win": {
-      "icon": "build/icon.ico",
-      "forceCodeSigning": true,
-      "signExts": [
-        "!wechatdb_broker.exe",
-        "!wechatdb_client.dll",
-        "wce_integrity.pyd",
-        "img_helper.dll"
-      ],
-      "signtoolOptions": {
-        "sign": "./scripts/windows-private-pki-sign.cjs",
-        "publisherName": [
-          "WDA Private PKI"
-        ],
-        "signingHashAlgorithms": [
-          "sha256"
-        ],
-        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
-      },
-      "target": [
-        "nsis"
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "include": "scripts/installer-custom.nsh",
-      "installerIcon": "build/installerIcon.ico",
-      "uninstallerIcon": "build/uninstallerIcon.ico",
-      "installerHeaderIcon": "build/installerHeaderIcon.ico"
-    }
-  },
   "devDependencies": {
     "cross-env": "^10.1.0",
     "electron": "^40.0.0",
-    "electron-builder": "26.15.3",
-    "electron-winstaller": "5.4.0",
     "png-to-ico": "^3.0.1"
   }
 }

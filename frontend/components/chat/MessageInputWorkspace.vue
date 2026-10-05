@@ -132,6 +132,7 @@
           </div>
           <button type="button" :class="`chat-input-${attachment.kind}-remove`" class="chat-input-attachment-remove px-2 py-1 text-gray-500 disabled:opacity-40" :disabled="isSending || !!selectingAttachment || !!attachment.confirmation" :aria-label="`移除 ${attachment.name}`" @click="removeAttachment(attachment.id)">移除</button>
         </div>
+        <p v-if="selectedAttachments.some(attachment => attachment.kind === 'image')" class="text-xs text-amber-700 dark:text-amber-300">发送图片会短暂激活微信，随后自动核对本地发送记录。</p>
       </div>
       <textarea
         ref="textareaRef"

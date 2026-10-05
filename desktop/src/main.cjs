@@ -56,17 +56,7 @@ const {
   resolveBackendStartupTimeoutMs,
   shouldRetryBackendOnDifferentPort,
 } = require("./backend-startup.cjs");
-const { applyNativeCoreRuntimePolicy } = require("./native-core-runtime.cjs");
 const { loadWithRedirect, resolveDesktopUiUrl } = require("./renderer-startup.cjs");
-const {
-  ENV_SOURCE_NATIVE_CORE_DIR,
-  applySourceRuntimeEnvironment,
-  ensureSourceNativeCore,
-} = require("./source-native-core-bootstrap.cjs");
-const { resolveNativeCoreRuntimeDir } = require("./native-core-path.cjs");
-const {
-  resolvePrivatePkiRuntime,
-} = require("./windows-private-pki-runtime.cjs");
 
 const DEFAULT_BACKEND_HOST = "127.0.0.1";
 const LAN_BACKEND_HOST = "0.0.0.0";
@@ -645,19 +635,6 @@ function removeAccountFamilyFromKeyStore(outputDir, accountName) {
   }
 }
 
-function clearNativeCoreRawKeyCache() {
-  const dataDir = resolveDataDir();
-  if (!dataDir) return false;
-  const cacheDir = path.join(dataDir, ".native-core-cache-v1");
-  try {
-    if (!fs.existsSync(cacheDir)) return false;
-    fs.rmSync(cacheDir, { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function deleteAccountDataFromDisk(account) {
   const { outputDir, databasesDir, accountName, accountDir } = resolveAccountDirInOutput(account);
   if (!fs.existsSync(accountDir) || !fs.statSync(accountDir).isDirectory()) {
@@ -718,7 +695,6 @@ async function deleteAccountDataFromDisk(account) {
       fs.rmSync(familyAccountDir, { recursive: true, force: true });
     }
     const removedKeyCache = removeAccountFamilyFromKeyStore(outputDir, accountName);
-    const removedNativeCoreCache = clearNativeCoreRawKeyCache();
     const accounts = listDecryptedAccountsOnDisk(databasesDir);
     result = {
       status: "success",
@@ -726,7 +702,6 @@ async function deleteAccountDataFromDisk(account) {
       accounts,
       default_account: accounts.length ? accounts[0] : null,
       removed_key_cache: removedKeyCache,
-      removed_native_core_cache: removedNativeCoreCache,
     };
   } finally {
     if (wasBackendRunning) {
@@ -1637,55 +1612,6 @@ function getFfmpegPath() {
   }
 }
 
-function getNativeCoreRuntimeDir(env = process.env) {
-  // dev.cjs performs this preflight before spawning the frontend. Keep this
-  // fallback for direct `electron .` and dev:static source launches.
-  if (
-    !app.isPackaged &&
-    process.platform === "win32" &&
-    !String(env[ENV_SOURCE_NATIVE_CORE_DIR] || "").trim()
-  ) {
-    const sourceNativeCore = ensureSourceNativeCore({ env });
-    applySourceRuntimeEnvironment(env, sourceNativeCore);
-  }
-  return resolveNativeCoreRuntimeDir({
-    env,
-    isPackaged: app.isPackaged,
-    repoRoot: repoRoot(),
-    resourcesPath: process.resourcesPath,
-  });
-}
-
-function configureNativeCoreRuntime(env) {
-  const policy = applyNativeCoreRuntimePolicy(env, {
-    isPackaged: app.isPackaged,
-    nativeDir: getNativeCoreRuntimeDir(env),
-    platform: process.platform,
-  });
-  logMain(
-    `[native-core] mode=${policy.mode} source=${policy.reason} artifacts=${policy.artifactState} packaged=${app.isPackaged}`
-  );
-  return policy;
-}
-
-function clearLegacyWcdbEnvironment(targetEnv = process.env) {
-  const names = [
-    "WECHAT_TOOL_WCDB_SIDECAR",
-    "WECHAT_TOOL_WCDB_SIDECAR_URL",
-    "WECHAT_TOOL_WCDB_SIDECAR_TOKEN",
-    "WECHAT_TOOL_WCDB_SIDECAR_HOST",
-    "WECHAT_TOOL_WCDB_SIDECAR_PORT",
-    "WECHAT_TOOL_WCDB_API_DLL_PATH",
-    "WECHAT_TOOL_WCDB_DLL_DIR",
-    "WECHAT_TOOL_WCDB_RESOURCE_PATHS",
-    "WECHAT_TOOL_KOFFI_DIR",
-  ];
-  for (const name of names) {
-    delete process.env[name];
-    if (targetEnv && targetEnv !== process.env) delete targetEnv[name];
-  }
-}
-
 function startBackend() {
   if (backendProc && backendProc.exitCode == null) return backendProc;
   backendProc = null;
@@ -1710,8 +1636,6 @@ function startBackend() {
   // Never turn the backend (or the Electron main process) globally into Node.
   // Python scopes this flag to the single WASM helper subprocess.
   delete env.ELECTRON_RUN_AS_NODE;
-  configureNativeCoreRuntime(env);
-  clearLegacyWcdbEnvironment(env);
   logMain(
     `[main] startBackend packaged=${app.isPackaged} port=${env.WECHAT_TOOL_PORT} dataDir=${env.WECHAT_TOOL_DATA_DIR} outputDir=${env.WECHAT_TOOL_OUTPUT_DIR}`
   );
@@ -3029,9 +2953,6 @@ async function ensureMainWindowReady() {
 
 async function main() {
   await app.whenReady();
-  if (app.isPackaged && process.platform === "win32") {
-    resolvePrivatePkiRuntime(process.resourcesPath);
-  }
   await refreshRendererCacheForPackagedUi();
   Menu.setApplicationMenu(null);
   registerWindowIpc();

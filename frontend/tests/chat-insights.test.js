@@ -6,7 +6,7 @@ import ChatInsightsPanel from '../components/chat/ChatInsightsPanel.vue'
 
 const choice = { profile_id: 'p', model_id: 'm', reasoning_effort: null }
 const localModel = (state = 'ready') => ({ id: 'laya', name: 'Laya', revision: 'revision', license: 'Apache-2.0', total_bytes: 681000000, downloaded_bytes: state === 'ready' ? 681000000 : 100, state, error: null, path: 'G:\\models\\laya', device: 'cpu', context_window: 1024 })
-const task = (id = 'one', overrides = {}) => ({ id, account: 'acc', username: 'friend', member_username: '', start: 1, end: 2, selected_model: choice, model: { model: 'm' }, status: 'completed', stage: '完成', progress: { read: 10, analyzed: 10, batches: 1 }, coverage: { total: 10, text: 10, skipped: 0, target_text: 10, participants: 2 }, data_source: 'realtime', portrait: null, error: null, references: [], ...overrides })
+const task = (id = 'one', overrides = {}) => ({ id, account: 'acc', username: 'friend', member_username: '', start: 1, end: 2, selected_model: choice, model: { model: 'm' }, status: 'completed', stage: '完成', progress: { read: 10, analyzed: 10, batches: 1 }, coverage: { total: 10, text: 10, skipped: 0, target_text: 10, participants: 2 }, data_source: 'decrypted', portrait: null, error: null, references: [], ...overrides })
 const wrappers = []
 afterEach(() => { wrappers.splice(0).forEach(w => w.unmount()); vi.useRealTimers() })
 function setup(handler = async () => [], renderPanel = false, keepAlive = false) {

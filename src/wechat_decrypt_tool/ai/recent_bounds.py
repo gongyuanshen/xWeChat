@@ -2,10 +2,11 @@
 import hashlib
 import sqlite3
 
+from ..chat_helpers import _quote_ident
+
 
 def query_bounds(paths, execute, usernames, start, end, checkpoint):
     """任一数据库或结果不完整便放弃剪枝；空值仅表示完整查询后范围为空。"""
-    from ..chat_realtime_reader import _quote_ident
     expected = {'msg_' + hashlib.md5(u.encode()).hexdigest(): u for u in usernames}
     bounds = dict.fromkeys(usernames)
     if not paths:
@@ -39,26 +40,16 @@ def query_bounds(paths, execute, usernames, start, end, checkpoint):
 def recent_bounds(account, usernames, start, end, checkpoint):
     """读取与消息流相同的真实渠道；不使用索引覆盖或会话预览时间判定无消息。"""
     from ..chat_helpers import _resolve_account_dir
-    from ..account_source_policy import account_prefers_decrypted_snapshot
-    from ..chat_export_service import _iter_message_db_paths, _resolve_account_db_storage_dir, _wcdb_exec_query
-    from ..chat_realtime_reader import _message_db_paths, _locked_call
-    from ..wcdb_realtime import WCDB_REALTIME
+    from ..chat_export_service import _iter_message_db_paths
     # 停止检查不放进降级捕获中，避免吞掉用户取消。
     checkpoint()
     try:
         directory = _resolve_account_dir(account)
-        if account_prefers_decrypted_snapshot(directory):
-            paths = list(_iter_message_db_paths(directory))
-            def execute(path, sql):
-                with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
-                    db.row_factory = sqlite3.Row
-                    return [dict(row) for row in db.execute(sql)]
-        else:
-            connection = WCDB_REALTIME.ensure_connected(directory)
-            paths = _message_db_paths(_resolve_account_db_storage_dir(directory), '')
-            def execute(path, sql):
-                return _locked_call(connection, _wcdb_exec_query, connection.handle,
-                                    kind='message', path=str(path), sql=sql)
+        paths = list(_iter_message_db_paths(directory))
+        def execute(path, sql):
+            with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True) as db:
+                db.row_factory = sqlite3.Row
+                return [dict(row) for row in db.execute(sql)]
     except Exception:
         return None
     # 检查点异常必须原样传播，数据源不可用才退回逐会话读取。

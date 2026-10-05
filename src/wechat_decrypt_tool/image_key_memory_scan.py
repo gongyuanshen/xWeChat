@@ -11,6 +11,7 @@ import ctypes
 import os
 import re
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -56,6 +57,15 @@ _ASCII_RUN_RE = re.compile(rb"[A-Za-z0-9]+")
 _UTF16_RUN_RE = re.compile(rb"(?:[A-Za-z0-9]\x00)+")
 
 ProgressCallback = Callable[[str], None]
+
+
+class ImageKeyScanCancelled(RuntimeError):
+    pass
+
+
+def raise_if_image_key_scan_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ImageKeyScanCancelled("图片密钥扫描已取消")
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,10 +285,12 @@ def _enumerate_scannable_regions(
     *,
     deadline: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[MemoryRegion, ...]:
     regions: list[MemoryRegion] = []
     address = 0
     while address < MAX_USER_ADDRESS:
+        raise_if_image_key_scan_cancelled(cancel_event)
         if _deadline_reached(deadline, clock):
             break
         try:
@@ -368,8 +380,10 @@ def scan_process_for_image_key(
     memory_api: _MemoryApi | None = None,
     deadline: float | None = None,
     clock: Callable[[], float] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ProcessMemoryKeyMatch | None:
     """Scan one process's committed writable regions for a verified AES key."""
+    raise_if_image_key_scan_cancelled(cancel_event)
     if not template_scan.templates:
         return None
     current_template = current_v2_template(template_scan)
@@ -400,6 +414,7 @@ def scan_process_for_image_key(
             handle,
             deadline=deadline,
             clock=clock_fn,
+            cancel_event=cancel_event,
         )
         total_size = sum(region.size for region in regions)
         _notify(
@@ -409,6 +424,7 @@ def scan_process_for_image_key(
         )
 
         for region_index, region in enumerate(regions):
+            raise_if_image_key_scan_cancelled(cancel_event)
             if _deadline_reached(deadline, clock_fn):
                 return None
             if region_index % 20 == 0:
@@ -417,6 +433,7 @@ def scan_process_for_image_key(
             offset = 0
             trailing = b""
             while offset < region.size:
+                raise_if_image_key_scan_cancelled(cancel_event)
                 if _deadline_reached(deadline, clock_fn):
                     return None
                 request_size = min(MEMORY_CHUNK_SIZE, region.size - offset)
@@ -429,6 +446,7 @@ def scan_process_for_image_key(
                 except Exception:
                     chunk = b""
 
+                raise_if_image_key_scan_cancelled(cancel_event)
                 if not chunk:
                     trailing = b""
                     offset += request_size
@@ -447,6 +465,7 @@ def scan_process_for_image_key(
                         full_read and offset + request_size >= region.size
                     ),
                 )
+                raise_if_image_key_scan_cancelled(cancel_event)
                 if match is not None:
                     return match
 
@@ -520,8 +539,10 @@ def scan_image_key_from_memory(
     | None = None,
     sleep: Callable[[float], None] | None = None,
     clock: Callable[[], float] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> MemoryImageKeyResolution | None:
     """Poll all WeChat processes until a V2-verified image AES key is found."""
+    raise_if_image_key_scan_cancelled(cancel_event)
     try:
         timeout_seconds = max(0.0, float(timeout))
         interval_seconds = float(interval)
@@ -535,17 +556,21 @@ def scan_image_key_from_memory(
     if _deadline_reached(deadline, clock_fn):
         return None
 
-    template_scan = scan_v2_templates(account_dir)
-    if _deadline_reached(deadline, clock_fn):
-        return None
+    def template_checkpoint() -> None:
+        raise_if_image_key_scan_cancelled(cancel_event)
+        if _deadline_reached(deadline, clock_fn):
+            raise TimeoutError("图片密钥样本扫描超时")
+
     try:
-        expanded_scan = scan_v2_templates(account_dir, limit=100)
-    except TypeError:
-        expanded_scan = template_scan
-    if _deadline_reached(deadline, clock_fn):
+        template_scan = scan_v2_templates(account_dir, checkpoint=template_checkpoint)
+        template_checkpoint()
+        expanded_scan = scan_v2_templates(account_dir, limit=100, checkpoint=template_checkpoint)
+        template_checkpoint()
+    except TimeoutError:
         return None
     if len(expanded_scan.templates) >= len(template_scan.templates):
         template_scan = expanded_scan
+    raise_if_image_key_scan_cancelled(cancel_event)
     if not template_scan.templates:
         _notify(progress, "No V2 image template was found")
         return None
@@ -559,6 +584,7 @@ def scan_image_key_from_memory(
     sleep_fn = sleep or time.sleep
 
     while clock_fn() < deadline:
+        raise_if_image_key_scan_cancelled(cancel_event)
         try:
             pids = _normalise_pids(provide_pids())
         except Exception:
@@ -570,6 +596,7 @@ def scan_image_key_from_memory(
             _notify(progress, f"Waiting for {process_label}")
 
         for pid in pids:
+            raise_if_image_key_scan_cancelled(cancel_event)
             if clock_fn() >= deadline:
                 return None
             try:
@@ -580,11 +607,15 @@ def scan_image_key_from_memory(
                         progress,
                         deadline=deadline,
                         clock=clock_fn,
+                        cancel_event=cancel_event,
                     )
                 else:
                     raw_match = process_scanner(pid, template_scan, progress)
+            except ImageKeyScanCancelled:
+                raise
             except Exception:
                 continue
+            raise_if_image_key_scan_cancelled(cancel_event)
             if clock_fn() >= deadline:
                 return None
             normalised = _normalise_scanner_match(raw_match)
@@ -609,7 +640,11 @@ def scan_image_key_from_memory(
         remaining = deadline - clock_fn()
         if remaining <= 0:
             return None
-        sleep_fn(min(interval_seconds, remaining))
+        if cancel_event is not None:
+            cancel_event.wait(min(interval_seconds, remaining))
+            raise_if_image_key_scan_cancelled(cancel_event)
+        else:
+            sleep_fn(min(interval_seconds, remaining))
     return None
 
 

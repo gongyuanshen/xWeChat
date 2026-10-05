@@ -49,48 +49,28 @@ test('朋友圈导出联系人列表只渲染视口附近节点', async () => {
 })
 
 
-test('朋友圈使用 SSE 事件单飞核对随视口浮动的上下窗口', async () => {
+test('朋友圈在焦点恢复时核对快照并保留视口位置', async () => {
   const source = await readFile(new URL('../pages/sns.vue', import.meta.url), 'utf8')
 
   assert.match(source, /const SNS_VISIBLE_RECONCILE_BUFFER_MIN = 20/)
   assert.match(source, /const SNS_VISIBLE_RECONCILE_WINDOW_MAX = 200/)
-  assert.match(source, /const SNS_INCREMENTAL_DEFAULT_SCAN_LIMIT = 200/)
-  assert.match(source, /const SNS_EVENT_RECONNECT_DELAYS_MS = \[1000, 2000, 5000, 10000, 30000\]/)
-  assert.match(source, /new EventSource\([\s\S]*?\/sns\/realtime\/events\?account=/)
-  assert.match(source, /source\.addEventListener\('change', onSnsRealtimeChange\)/)
-  assert.match(source, /source\.addEventListener\('full_sync_progress', onSnsFullSyncEvent\)/)
-  assert.match(source, /const versionChanged = !!\(version && version !== snsSnapshotVersion\)/)
-  assert.match(source, /api\.syncSnsRealtimeLatest\(\{[\s\S]*?force: 1,[\s\S]*?max_scan: maxScan/)
-  assert.match(source, /if \(snsVisibleReconcilePromise\) return snsVisibleReconcilePromise/)
-  assert.match(source, /const reconcileWindow = getSnsVisibleReconcileWindow()/)
-  assert.match(source, /const needsTargetedSync = !!selectedUsername \|\| reconcileWindow\.scanOffset > 0/)
-  assert.match(source, /maxScan: reconcileWindow.maxScan,[\s\S]*?scanOffset: reconcileWindow.scanOffset/)
-  assert.match(source, /mergeVisiblePostsWindow\(reconcileWindow\)/)
+  assert.match(source, /mergeVisiblePostsWindow\(getSnsVisibleReconcileWindow\(\)\)/)
   assert.match(source, /scheduleSnsVisibleWindowUpdate\(\)/)
   assert.match(source, /restoreSnsScrollAnchor\(anchor\)/)
-  assert.match(source, /syncResult\?\.snapshotChanged === true/)
-  assert.match(source, /await reconcileSnsSnapshotOnce\(\)[\s\S]*?connectSnsEventStream\(\)/)
-  assert.doesNotMatch(source, /SNS_VISIBLE_RECONCILE_INTERVAL_MS/)
-  assert.doesNotMatch(source, /scheduleSnsVisibleReconcile/)
+  assert.match(source, /await snsSync\.refreshView\(\)/)
+  assert.doesNotMatch(source, /SNS_VISIBLE_RECONCILE_INTERVAL_MS|\/sns\/realtime\//)
 })
 
 
-test('朋友圈手动刷新启动全账号任务并可恢复、取消和无感合并', async () => {
+test('朋友圈手动刷新通过独立快照服务触发采集', async () => {
   const source = await readFile(new URL('../pages/sns.vue', import.meta.url), 'utf8')
   const apiSource = await readFile(new URL('../composables/useApi.js', import.meta.url), 'utf8')
   const refresh = source.split('const refreshSnsData = async () => {', 2)[1]
-    .split(/\r?\n\r?\nconst cancelSnsFullSync/, 1)[0]
+    .split(/\r?\n\r?\nlet postsRequestGeneration/, 1)[0]
 
-  assert.match(apiSource, /const startSnsFullSync = async \(params = \{\}\) => \{[\s\S]*?\/sns\/realtime\/full_sync/)
-  assert.match(apiSource, /const getSnsFullSyncStatus = async/)
-  assert.match(apiSource, /const cancelSnsFullSync = async/)
-  assert.match(refresh, /api\.startSnsFullSync\(\{ account \}\)/)
-  assert.doesNotMatch(refresh, /selectedSnsUser|scanOffset|usernames|syncLatestSnsWithTimeout/)
-  assert.match(source, /const restoreSnsFullSyncStatus = async \(account\) =>/)
-  assert.match(source, /await restoreSnsFullSyncStatus\(String\(v \|\| ''\)\)/)
-  assert.match(source, /const SNS_FULL_SYNC_MERGE_THROTTLE_MS = 400/)
-  assert.match(source, /mergeVisiblePostsWindow\(getSnsVisibleReconcileWindow\(\)\)/)
-  assert.match(source, /restoreSnsScrollAnchor\(anchor\)/)
+  assert.match(refresh, /await snsSync\.refreshOnce\(\)/)
+  assert.match(apiSource, /const getSnsSnapshotStatus = async/)
+  assert.doesNotMatch(apiSource, /syncSnsRealtimeLatest|startSnsFullSync|getSnsFullSyncStatus|cancelSnsFullSync/)
 })
 
 

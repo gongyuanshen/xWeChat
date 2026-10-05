@@ -54,6 +54,9 @@ def should_include_in_database_count(file_name: str | Path) -> bool:
 
 
 def list_countable_database_names(account_dir: Path) -> list[str]:
+    from .snapshot_registry import resolve_account_database_dir
+
+    account_dir = resolve_account_database_dir(account_dir)
     if not account_dir.exists():
         return []
 

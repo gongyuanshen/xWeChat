@@ -11,7 +11,9 @@ import time
 import uuid
 
 from ..ai.storage import AIStore
-from ..app_paths import get_data_dir, get_output_dir
+from ..app_paths import get_data_dir, get_output_dir, get_output_databases_dir
+from ..account_workers import account_to_thread
+from ..snapshot_registry import account_work, create_account_task, SnapshotRegistryError
 from .catalog import model_dir, model_spec
 from .downloads import ModelDownloads
 from .index import SemanticIndex, make_chunks, fuse
@@ -67,10 +69,13 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
 
     @observed('search.configure', id_field='task_id')
     async def configure(self, account, values):
-        async with self.model_lock:
-            return await self._configure(account,values)
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            async with self.model_lock:
+                return await self._configure(account,values)
 
     async def _configure(self, account, values):
+        account_dir = get_output_databases_dir() / account
         self.revoked.discard(account)
         self.store.revoked_accounts.discard(account)
         old = self.config(account)
@@ -85,10 +90,10 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         self.store.put('config', cfg, id=account, account=account)
         # 范围或设备变更后，旧任务不得继续提交过期配置。
         await self.pause_account(account)
-        await asyncio.to_thread(self.clear_message_plans, account)
+        await account_to_thread(account_dir, self.clear_message_plans, account)
         if cfg.get('active'):
             start=cfg['start'] if cfg['start'] is not None else max(0,int(time.time())-cfg['days']*86400) if cfg['days'] else 0
-            await asyncio.to_thread(self.index(account).prune,cfg['active']['generation'],cfg['usernames'],start,cfg['end'] or 2**53)
+            await account_to_thread(account_dir, self.index(account).prune,cfg['active']['generation'],cfg['usernames'],start,cfg['end'] or 2**53)
             # 清理后同步实际覆盖范围，防止先缩小再扩大时把已删除内容误判为可复用。
             active = cfg['active']
             cfg['active'] = {**active, 'usernames': [u for u in active.get('usernames', []) if u in cfg['usernames']],
@@ -142,11 +147,14 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
 
     @observed('search.build', id_field='task_id')
     async def build(self, account, rebuild=False, incremental=True):
-        # 后台调度和前台提问可能同时触发；创建任务与配置更新共用锁。
-        async with self.model_lock:
-            return await self._build(account, rebuild, incremental)
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            # 后台调度和前台提问可能同时触发；创建任务与配置更新共用锁。
+            async with self.model_lock:
+                return await self._build(account, rebuild, incremental)
 
     async def _build(self, account, rebuild=False, incremental=True):
+        account_dir = get_output_databases_dir() / account
         cfg = self.config(account)
         if not cfg['enabled']: raise ValueError('请先启用本地语义检索')
         if not cfg['usernames']: raise ValueError('请选择需要建立索引的聊天')
@@ -159,7 +167,7 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         active = cfg.get('active') or {}
         new_generation = rebuild or active.get('model') != cfg['model'] or not active.get('generation')
         generation = uuid.uuid4().hex if new_generation else active['generation']
-        enrichment = await asyncio.to_thread(self.enrichment_version, account)
+        enrichment = await account_to_thread(account_dir, self.enrichment_version, account)
         # 增量保留同秒和短期补写窗口；旧转写/附件变化或每天一次校对重读范围。
         recent_only = incremental and not new_generation and enrichment == active.get('enrichment') and time.time()-active.get('reconciled',0)<86400
         # 按聊天判断覆盖范围；新增聊天或向前扩展历史必须补齐，设备设置不影响复用。
@@ -180,23 +188,25 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
             job['segments'] = reading_segments(cfg['usernames'], read_starts, end)
             job['coverage'] = {}
         self.update(job)
-        self.jobs[job['id']] = asyncio.create_task(self.run(job))
+        self.jobs[job['id']] = create_account_task(account_dir, self.run, job)
         return job
 
     @observed('search.resume', id_field='task_id')
     async def resume(self, account, id):
-        job = self.store.get('index_job', id)
-        if not job or job['account'] != account: raise ValueError('任务不存在')
-        if job['config']['revision'] != self.config(account).get('revision'):
-            raise ValueError('配置已改变，请按当前范围重新建立索引')
-        if id in self.jobs and not self.jobs[id].done(): return job
-        saved = self.index(account).progress(id)
-        if saved: job.update(saved)
-        self.cancelled.discard(id)
-        job.pop('finished', None)
-        self.update(job, status='queued', error='')
-        self.jobs[id] = asyncio.create_task(self.run(job))
-        return job
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            job = self.store.get('index_job', id)
+            if not job or job['account'] != account: raise ValueError('任务不存在')
+            if job['config']['revision'] != self.config(account).get('revision'):
+                raise ValueError('配置已改变，请按当前范围重新建立索引')
+            if id in self.jobs and not self.jobs[id].done(): return job
+            saved = self.index(account).progress(id)
+            if saved: job.update(saved)
+            self.cancelled.discard(id)
+            job.pop('finished', None)
+            self.update(job, status='queued', error='')
+            self.jobs[id] = create_account_task(account_dir, self.run, job)
+            return job
 
     @observed('search.pause_account', id_field='task_id')
     async def pause_account(self, account):
@@ -214,289 +224,306 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
     @asynccontextmanager
     async def open_pages(self, account, username, start, end, offset, checkpoint, page_size=0, on_progress=None, on_batch_size=None, cursor=None, frozen=None):
         """在专用线程中顺序推进和关闭游标，避免线程池切换破坏 SQLite 连接。"""
-        from ..ai.messages import iter_message_pages
-        from .reading import choose_read_batch_size
-        closing = threading.Event()
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            from ..ai.messages import iter_message_pages
+            from .reading import choose_read_batch_size
+            closing = threading.Event()
 
-        def check():
-            if closing.is_set():
-                raise InferenceFailure('读取已停止', 'cancelled')
-            checkpoint()
+            def check():
+                if closing.is_set():
+                    raise InferenceFailure('读取已停止', 'cancelled')
+                checkpoint()
 
-        def batch_size():
-            size = choose_read_batch_size(page_size)
-            if on_batch_size:
-                loop.call_soon_threadsafe(on_batch_size, size)
-            return size
+            def batch_size():
+                size = choose_read_batch_size(page_size)
+                if on_batch_size:
+                    loop.call_soon_threadsafe(on_batch_size, size)
+                return size
 
-        def pages():
-            if frozen:
-                plan, segment = frozen
-                position = offset
-                while True:
-                    result = plan.page(segment, position, batch_size(), check)
-                    position += len(result['messages'])
-                    if on_progress:
-                        loop.call_soon_threadsafe(on_progress, position)
-                    yield result
-                    if not result['has_more']:
-                        return
-            elif self.reader:
-                # 保留可注入的分页数据源，进度仍按事务提交的消息数量计算。
-                position = offset
-                while True:
-                    check()
-                    result = self.reader(account, username, start, end, position)
-                    yield result
-                    if not result.get('has_more', False):
-                        return
-                    position += len(result['messages'])
-            else:
-                yield from iter_message_pages(account, username, start, end,
-                    page_offset=offset, page_size=batch_size, checkpoint=check,
-                    cursor=cursor, emit_cursor=True,
-                    on_progress=(lambda count: loop.call_soon_threadsafe(on_progress, count)) if on_progress else None)
+            def pages():
+                if frozen:
+                    plan, segment = frozen
+                    position = offset
+                    while True:
+                        result = plan.page(segment, position, batch_size(), check)
+                        position += len(result['messages'])
+                        if on_progress:
+                            loop.call_soon_threadsafe(on_progress, position)
+                        yield result
+                        if not result['has_more']:
+                            return
+                elif self.reader:
+                    # 保留可注入的分页数据源，进度仍按事务提交的消息数量计算。
+                    position = offset
+                    while True:
+                        check()
+                        result = self.reader(account, username, start, end, position)
+                        yield result
+                        if not result.get('has_more', False):
+                            return
+                        position += len(result['messages'])
+                else:
+                    yield from iter_message_pages(account, username, start, end,
+                        page_offset=offset, page_size=batch_size, checkpoint=check,
+                        cursor=cursor, emit_cursor=True,
+                        on_progress=(lambda count: loop.call_soon_threadsafe(on_progress, count)) if on_progress else None)
 
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='local-search-reader')
-        loop = asyncio.get_running_loop()
-        stream = pages()
-        try:
-            yield lambda: executor_call(executor, next, stream, None)
-        finally:
-            closing.set()
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='local-search-reader')
+            loop = asyncio.get_running_loop()
+            stream = pages()
             try:
-                # 关闭排在正在进行的读取之后，取消时也不得从别的线程销毁游标。
-                await asyncio.shield(executor_call(executor, stream.close))
+                yield lambda: executor_call(executor, next, stream, None)
             finally:
-                executor.shutdown(wait=False)
+                closing.set()
+                # Close on the reader thread, after any in-flight SQLite cursor work.
+                close_task = executor_call(executor, stream.close)
+                def report_close(done):
+                    if not done.cancelled() and done.exception() is not None:
+                        failures.report('search.reader.close', done.exception())
+                close_task.add_done_callback(report_close)
+                try:
+                    await asyncio.shield(close_task)
+                finally:
+                    # A second cancellation may end this waiter; the shutdown worker
+                    # retains its own account lease until the reader really exits.
+                    await account_to_thread(account_dir, executor.shutdown, wait=True)
 
     @observed('search.run', id_field='task_id', execution=True)
     async def run(self, job):
-        cfg, account = job['config'], job['account']
-        plan = None
-        def cancelled(): return job['id'] in self.cancelled or account in self.revoked
-        def check():
-            if cancelled(): raise InferenceFailure('任务已暂停', 'cancelled')
-        async with self.queue_lock:
-            try:
-                check()
-                from tokenizers import Tokenizer
-                spec = model_spec(cfg['model'])
-                root = model_dir(self.downloads.root, cfg['model'])
-                tokenizer = Tokenizer.from_file(str(root / 'tokenizer.json'))
-                index = self.index(account)
-                self.update(job, status='running', read_count=job['processed'], embedded_count=job['embedded'])
-                plan = await self.count_message_total(job, check)
-                segments = job.get('segments')
-                for position in range(job['chat_index'], len(segments) if segments is not None else len(cfg['usernames'])):
-                    segment = segments[position] if segments is not None else None
-                    username = segment['username'] if segment else cfg['usernames'][position]
-                    offset = job['offset'] if position == job['chat_index'] else 0
-                    read_start = segment['start'] if segment else job.get('read_starts', {}).get(username, job.get('read_start', job['start']))
-                    read_end = segment['end'] if segment else job['end']
-                    read_base = job['processed'] - offset
+        account_dir = get_output_databases_dir() / job['account']
+        with account_work(account_dir):
+            cfg, account = job['config'], job['account']
+            plan = None
+            def cancelled(): return job['id'] in self.cancelled or account in self.revoked
+            def check():
+                if cancelled(): raise InferenceFailure('任务已暂停', 'cancelled')
+            async with self.queue_lock:
+                try:
+                    check()
+                    from tokenizers import Tokenizer
+                    spec = model_spec(cfg['model'])
+                    root = model_dir(self.downloads.root, cfg['model'])
+                    tokenizer = Tokenizer.from_file(str(root / 'tokenizer.json'))
+                    index = self.index(account)
+                    self.update(job, status='running', read_count=job['processed'], embedded_count=job['embedded'])
+                    plan = await self.count_message_total(job, check)
+                    segments = job.get('segments')
+                    for position in range(job['chat_index'], len(segments) if segments is not None else len(cfg['usernames'])):
+                        segment = segments[position] if segments is not None else None
+                        username = segment['username'] if segment else cfg['usernames'][position]
+                        offset = job['offset'] if position == job['chat_index'] else 0
+                        read_start = segment['start'] if segment else job.get('read_starts', {}).get(username, job.get('read_start', job['start']))
+                        read_end = segment['end'] if segment else job['end']
+                        read_base = job['processed'] - offset
 
-                    def reading_progress(count):
-                        # 展示读取中的真实数量，只有事务提交才能推进断点 processed/offset。
-                        total = read_base + count
-                        if not cancelled() and job['stage'] == 'reading' and total > job.get('read_count', 0):
-                            self.update(job, read_count=total)
+                        def reading_progress(count):
+                            # 展示读取中的真实数量，只有事务提交才能推进断点 processed/offset。
+                            total = read_base + count
+                            if not cancelled() and job['stage'] == 'reading' and total > job.get('read_count', 0):
+                                self.update(job, read_count=total)
 
-                    def batch_size_changed(size):
-                        if not cancelled() and job.get('read_batch_size_effective') != size:
-                            self.update(job, read_batch_size_effective=size)
+                        def batch_size_changed(size):
+                            if not cancelled() and job.get('read_batch_size_effective') != size:
+                                self.update(job, read_batch_size_effective=size)
 
-                    async with self.open_pages(account, username, read_start, read_end, offset, check,
-                            page_size=cfg.get('read_batch_size', 0), on_progress=reading_progress,
-                            on_batch_size=batch_size_changed, cursor=job.get('cursor') if offset else None,
-                            frozen=(plan, position)) as next_page:
-                        while True:
-                            check()
-                            await self.yield_to_queries(check)
-                            self.update(job, stage='reading', current_chat=username)
-                            page_started = time.monotonic()
-                            diagnostic_event('index.page.started', username=username, offset=offset, start=read_start, end=job['end'])
-                            result = await next_page()
-                            check()
-                            messages = result['messages']
-                            diagnostic_event('index.page.finished', username=username, offset=offset, count=len(messages), has_more=result.get('has_more',False), duration_ms=(time.monotonic()-page_started)*1000)
-                            await self.yield_to_queries(check)
-                            for m in messages:
-                                raw = m.get('media') or {}
-                                m['sender_id'] = raw.get('senderUsername') or m.get('sender', '')
-                                m['name'] = result.get('name', username)
-                            await asyncio.to_thread(self.local_text, account, messages)
-                            await self.yield_to_queries(check)
-                            self.update(job, stage='organizing', read_count=job['processed'] + len(messages))
-                            unchanged = await asyncio.to_thread(index.existing, job['generation'], messages)
-                            changed = await asyncio.to_thread(index.affected_messages, job['generation'], [m for m in messages if m['source'] not in unchanged])
-                            chunks = await asyncio.to_thread(make_chunks, changed, tokenizer)
-                            diagnostic_event('index.page.organized', count=len(changed), unchanged=len(unchanged), chunks=len(chunks))
-                            vectors = []
-                            last_embedding_update = time.monotonic()
-                            if chunks: self.update(job, stage='embedding')
-                            for batch_start in range(0, len(chunks), 8):
+                        async with self.open_pages(account, username, read_start, read_end, offset, check,
+                                page_size=cfg.get('read_batch_size', 0), on_progress=reading_progress,
+                                on_batch_size=batch_size_changed, cursor=job.get('cursor') if offset else None,
+                                frozen=(plan, position)) as next_page:
+                            while True:
                                 check()
                                 await self.yield_to_queries(check)
-                                batch = chunks[batch_start:batch_start + 8]
-                                strategy = cfg['device']
-                                # 语音任务占用显卡时，本地索引主动让出。
-                                try:
-                                    from ..voice_transcription import _VOICE_MODEL_ACTIVITY
-                                    if any(_VOICE_MODEL_ACTIVITY.values()): strategy = 'cpu'
-                                except ImportError:
-                                    pass
-                                diagnostic_event('index.batch.started', index=batch_start, batch_size=len(batch), strategy=strategy,
-                                                 reason_code='voice_priority' if strategy!=cfg['device'] else 'configured')
-                                values = await asyncio.to_thread(self.engine.encode, root, spec, [c['text'] for c in batch], strategy, cfg['device_id'], False, cancelled)
-                                diagnostic_event('index.batch.finished', index=batch_start, count=len(values), actual_device=self.engine.status.get('actual_device'))
-                                vectors.extend(values)
-                                if len(vectors) == len(chunks) or time.monotonic() - last_embedding_update >= 0.25:
-                                    self.update(job, embedded_count=job['embedded'] + len(vectors))
-                                    last_embedding_update = time.monotonic()
-                            check()
-                            more = result.get('has_more', False)
-                            next_job = {**job, 'chat_index': position if more else position + 1,
-                                        'offset': offset + len(messages) if more else 0,
-                                        'cursor': result.get('cursor') if more else None,
-                                        'processed': job['processed'] + len(messages), 'embedded': job['embedded'] + len(chunks),
-                                        'unchanged': job.get('unchanged', 0) + len(unchanged),
-                                        'warning': result.get('warning', ''), 'source': result.get('source', 'snapshot')}
-                            next_job['coverage'] = {**job.get('coverage', {}), str(position): {
-                                'username': username, 'start': read_start, 'end': read_end,
-                                'last_time': result.get('cursor', {}).get('time') if result.get('cursor') else None,
-                                'processed': offset + len(messages), 'complete': not more,
-                                'warning': result.get('warning', '')}}
-                            self.update(job, stage='saving')
-                            await asyncio.to_thread(index.commit, job['generation'], changed, chunks, vectors, next_job, check)
-                            job.update(next_job)
-                            self.publish_partial(job)
-                            self.update(job)
-                            if not more: break
-                            offset += len(messages)
-                check()
-                frozen_total = (await asyncio.to_thread(plan.metadata))['total']
-                if job['processed'] != frozen_total:
-                    raise InferenceFailure('本轮消息清单与已保存数量不一致，已保留进度，请重试。', 'count_mismatch')
-                current = self.config(account)
-                if current.get('revision') != cfg.get('revision'): raise InferenceFailure('配置已更新', 'cancelled')
-                # 完成清理、范围约束和统计后才发布成功状态。
-                await asyncio.to_thread(index.prune, job['generation'], cfg['usernames'], job['start'], job['end'])
-                stats = await asyncio.to_thread(index.stats, job['generation'])
-                coverage = committed_coverage(job) if cfg.get('agent_global') else job.get('coverage', {})
-                current['active'] = {'generation': job['generation'], 'model': cfg['model'], 'start': job['start'],
-                                     'end': job['end'], 'usernames': cfg['usernames'], 'updated': time.time(), 'source': job.get('source'),
-                                     'revision': cfg['revision'], 'enrichment': job.get('enrichment'),
-                                     'coverage': coverage,
-                                     'partial': cfg.get('agent_global', False) and not coverage_complete(coverage, cfg['usernames'], job['start'], job['end']),
-                                     'reconciled': cfg.get('active',{}).get('reconciled',time.time()) if job.get('incremental') else time.time()}
-                self.store.put('config', current, id=account, account=account)
-                await asyncio.to_thread(index.clear, job['generation'])
-                self.update(job, status='done', stage='done', index_stats=stats, finished=time.time())
-                try:
-                    await asyncio.to_thread(plan.discard)
-                except OSError as error:
-                    failures.report('search.plan.cleanup', error)
-            except InferenceFailure as error:
-                diagnostic_event('index.execution.interrupted' if error.category=='cancelled' else 'index.execution.failed',
-                                 level=logging.INFO if error.category=='cancelled' else logging.ERROR, error=error)
-                self.update(job, status='paused' if error.category == 'cancelled' else 'error', error=str(error), finished=time.time())
-            except Exception as error:
-                diagnostic_event('index.execution.failed', level=logging.ERROR, error=error)
-                self.update(job, status='error', error='索引处理失败，已保留进度，请检查数据源和模型后重试', error_type=type(error).__name__, finished=time.time())
-            finally:
-                if account in self.revoked:
-                    await asyncio.to_thread(self.clear_message_plans, account)
-                self.store.put('local_usage', {'kind': 'index', 'account': account, 'model': cfg['model'], 'status':job['status'],
-                    'messages': job['processed'], 'chunks': job['embedded'], 'seconds': time.time()-job['started'], **self.engine.status},id=job['id'],account=account)
+                                self.update(job, stage='reading', current_chat=username)
+                                page_started = time.monotonic()
+                                diagnostic_event('index.page.started', username=username, offset=offset, start=read_start, end=job['end'])
+                                result = await next_page()
+                                check()
+                                messages = result['messages']
+                                diagnostic_event('index.page.finished', username=username, offset=offset, count=len(messages), has_more=result.get('has_more',False), duration_ms=(time.monotonic()-page_started)*1000)
+                                await self.yield_to_queries(check)
+                                for m in messages:
+                                    raw = m.get('media') or {}
+                                    m['sender_id'] = raw.get('senderUsername') or m.get('sender', '')
+                                    m['name'] = result.get('name', username)
+                                await account_to_thread(account_dir, self.local_text, account, messages)
+                                await self.yield_to_queries(check)
+                                self.update(job, stage='organizing', read_count=job['processed'] + len(messages))
+                                unchanged = await account_to_thread(account_dir, index.existing, job['generation'], messages)
+                                changed = await account_to_thread(account_dir, index.affected_messages, job['generation'], [m for m in messages if m['source'] not in unchanged])
+                                chunks = await account_to_thread(account_dir, make_chunks, changed, tokenizer)
+                                diagnostic_event('index.page.organized', count=len(changed), unchanged=len(unchanged), chunks=len(chunks))
+                                vectors = []
+                                last_embedding_update = time.monotonic()
+                                if chunks: self.update(job, stage='embedding')
+                                for batch_start in range(0, len(chunks), 8):
+                                    check()
+                                    await self.yield_to_queries(check)
+                                    batch = chunks[batch_start:batch_start + 8]
+                                    strategy = cfg['device']
+                                    # 语音任务占用显卡时，本地索引主动让出。
+                                    try:
+                                        from ..voice_transcription import _VOICE_MODEL_ACTIVITY
+                                        if any(_VOICE_MODEL_ACTIVITY.values()): strategy = 'cpu'
+                                    except ImportError:
+                                        pass
+                                    diagnostic_event('index.batch.started', index=batch_start, batch_size=len(batch), strategy=strategy,
+                                                     reason_code='voice_priority' if strategy!=cfg['device'] else 'configured')
+                                    values = await account_to_thread(account_dir, self.engine.encode, root, spec, [c['text'] for c in batch], strategy, cfg['device_id'], False, cancelled)
+                                    diagnostic_event('index.batch.finished', index=batch_start, count=len(values), actual_device=self.engine.status.get('actual_device'))
+                                    vectors.extend(values)
+                                    if len(vectors) == len(chunks) or time.monotonic() - last_embedding_update >= 0.25:
+                                        self.update(job, embedded_count=job['embedded'] + len(vectors))
+                                        last_embedding_update = time.monotonic()
+                                check()
+                                more = result.get('has_more', False)
+                                next_job = {**job, 'chat_index': position if more else position + 1,
+                                            'offset': offset + len(messages) if more else 0,
+                                            'cursor': result.get('cursor') if more else None,
+                                            'processed': job['processed'] + len(messages), 'embedded': job['embedded'] + len(chunks),
+                                            'unchanged': job.get('unchanged', 0) + len(unchanged),
+                                            'warning': result.get('warning', ''), 'source': result.get('source', 'snapshot')}
+                                next_job['coverage'] = {**job.get('coverage', {}), str(position): {
+                                    'username': username, 'start': read_start, 'end': read_end,
+                                    'last_time': result.get('cursor', {}).get('time') if result.get('cursor') else None,
+                                    'processed': offset + len(messages), 'complete': not more,
+                                    'warning': result.get('warning', '')}}
+                                self.update(job, stage='saving')
+                                await account_to_thread(account_dir, index.commit, job['generation'], changed, chunks, vectors, next_job, check)
+                                job.update(next_job)
+                                self.publish_partial(job)
+                                self.update(job)
+                                if not more: break
+                                offset += len(messages)
+                    check()
+                    frozen_total = (await account_to_thread(account_dir, plan.metadata))['total']
+                    if job['processed'] != frozen_total:
+                        raise InferenceFailure('本轮消息清单与已保存数量不一致，已保留进度，请重试。', 'count_mismatch')
+                    current = self.config(account)
+                    if current.get('revision') != cfg.get('revision'): raise InferenceFailure('配置已更新', 'cancelled')
+                    # 完成清理、范围约束和统计后才发布成功状态。
+                    await account_to_thread(account_dir, index.prune, job['generation'], cfg['usernames'], job['start'], job['end'])
+                    stats = await account_to_thread(account_dir, index.stats, job['generation'])
+                    coverage = committed_coverage(job) if cfg.get('agent_global') else job.get('coverage', {})
+                    current['active'] = {'generation': job['generation'], 'model': cfg['model'], 'start': job['start'],
+                                         'end': job['end'], 'usernames': cfg['usernames'], 'updated': time.time(), 'source': job.get('source'),
+                                         'revision': cfg['revision'], 'enrichment': job.get('enrichment'),
+                                         'coverage': coverage,
+                                         'partial': cfg.get('agent_global', False) and not coverage_complete(coverage, cfg['usernames'], job['start'], job['end']),
+                                         'reconciled': cfg.get('active',{}).get('reconciled',time.time()) if job.get('incremental') else time.time()}
+                    self.store.put('config', current, id=account, account=account)
+                    await account_to_thread(account_dir, index.clear, job['generation'])
+                    self.update(job, status='done', stage='done', index_stats=stats, finished=time.time())
+                    try:
+                        await account_to_thread(account_dir, plan.discard)
+                    except OSError as error:
+                        failures.report('search.plan.cleanup', error)
+                except InferenceFailure as error:
+                    diagnostic_event('index.execution.interrupted' if error.category=='cancelled' else 'index.execution.failed',
+                                     level=logging.INFO if error.category=='cancelled' else logging.ERROR, error=error)
+                    self.update(job, status='paused' if error.category == 'cancelled' else 'error', error=str(error), finished=time.time())
+                except Exception as error:
+                    diagnostic_event('index.execution.failed', level=logging.ERROR, error=error)
+                    self.update(job, status='error', error='索引处理失败，已保留进度，请检查数据源和模型后重试', error_type=type(error).__name__, finished=time.time())
+                finally:
+                    if account in self.revoked:
+                        await account_to_thread(account_dir, self.clear_message_plans, account)
+                    self.store.put('local_usage', {'kind': 'index', 'account': account, 'model': cfg['model'], 'status':job['status'],
+                        'messages': job['processed'], 'chunks': job['embedded'], 'seconds': time.time()-job['started'], **self.engine.status},id=job['id'],account=account)
 
     @observed('search.hybrid', id_field='task_id')
     async def hybrid(self, account, keyword, q, usernames, start=None, end=None, sender=None, kinds=None, offset=0, limit=50, ticket=None):
-        cfg = self.config(account)
-        active = cfg.get('active') or {}
-        allowed = set(cfg['usernames']) & set(active.get('usernames', [])) & set(usernames)
-        warning = ''
-        if not cfg['enabled'] or not active or not allowed:
-            diagnostic_event('search.keyword.fallback', reason_code='disabled' if not cfg['enabled'] else 'scope_not_indexed')
-            return {**keyword, 'retrievalMode': 'keyword', 'coverage': {'message': '本地语义索引尚未覆盖所选范围，当前展示关键词结果'}}
-        key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
-        reset_search=False
-        if offset and not ticket:
-            ticket = next((k for k,v in reversed(list(self.queries.items())) if v['key']==key and v['expires']>time.time()),None)
-        if ticket:
-            cached = self.queries.get(ticket)
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            cfg = self.config(account)
+            active = cfg.get('active') or {}
+            allowed = set(cfg['usernames']) & set(active.get('usernames', [])) & set(usernames)
+            warning = ''
+            if not cfg['enabled'] or not active or not allowed:
+                diagnostic_event('search.keyword.fallback', reason_code='disabled' if not cfg['enabled'] else 'scope_not_indexed')
+                return {**keyword, 'retrievalMode': 'keyword', 'coverage': {'message': '本地语义索引尚未覆盖所选范围，当前展示关键词结果'}}
             key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
-            if cached and cached['key'] == key and cached['expires'] > time.time():
-                diagnostic_event('search.ticket.hit', ticket_id=ticket, offset=offset, cached=True)
-                return {**cached['response'], 'hits': cached['hits'][offset:offset+limit], 'hasMore': offset+limit < len(cached['hits']), 'resetSearch':False}
-            reset_search=bool(offset)
-            diagnostic_event('search.ticket.expired', offset=offset, cached=False)
-            offset=0
-        began = time.monotonic()
-        snapshot_keyword, committed_keyword_hits = keyword, []
-        self.foreground_queries += 1
-        try:
-            scope_start = cfg['start'] if cfg['start'] is not None else max(0, int(time.time())-cfg['days']*86400) if cfg['days'] else 0
-            query_start, query_end = max(start or 0, scope_start), min(end if end is not None else 2**53, cfg['end'] if cfg['end'] is not None else 2**53)
-            index = self.index(account)
-            def as_hit(m):
-                return {**m.get('media', {}), 'id': m['anchor'], 'anchorId': m['anchor'], 'username': m['username'],
-                        'conversationName': m.get('name', m['username']), 'senderDisplayName': m['sender'],
-                        'senderUsername': m.get('sender_id', m['sender']), 'createTime': m['time'],
-                        # 索引正文已经包含标题、引用和转写；AI 适配器不能再次拼接这些字段。
-                        'content': m['text'], 'aiText': m['text'], 'snippet': m['text'], 'renderType': m['kind']}
-            literal = await asyncio.to_thread(index.keyword, active['generation'], q, sorted(allowed), query_start, query_end, sender, kinds, 200)
-            # 渐进索引里的新消息可能尚未进入旧全文索引，原文命中必须独立于向量召回。
-            committed_keyword_hits = [as_hit(m) for m in literal]
-            keyword = {**keyword, 'hits': fuse([*committed_keyword_hits, *keyword.get('hits', [])], [])}
-            spec = model_spec(active['model'])
-            root = model_dir(self.downloads.root, active['model'])
-            vectors = await asyncio.to_thread(self.engine.encode, root, spec, [q], cfg['device'], cfg['device_id'], True)
-            rows = await asyncio.to_thread(index.search, active['generation'], vectors[0], sorted(allowed), query_start, query_end, sender, kinds, 200)
-            semantic = [as_hit(row['message']) for row in rows]
-            # 同一片段内的消息共享向量分数；直接匹配原文的消息应先于相邻闲聊。
-            needle = q.strip().casefold()
-            if needle:
-                semantic.sort(key=lambda hit: needle not in hit['content'].casefold())
-            hits = fuse(keyword.get('hits', []), semantic)
-            diagnostic_event('search.recall.finished', keyword_count=len(keyword.get('hits',[])), semantic_count=len(semantic), returned=len(hits), actual_device=self.engine.status.get('actual_device'))
-            coverage = {'message': '语义结果来自已建立的本地索引；新消息、未解析图片和范围外历史可能尚未覆盖。',
-                        'start': active['start'], 'end': active['end'], 'updated': active['updated'],
-                        'partial': bool(active.get('partial')) or bool(set(usernames)-allowed) or len(rows) >= 200 or len(literal) >= 200,
-                        'ranges': active.get('coverage', {}), 'source': active.get('source')}
-            ticket = uuid.uuid4().hex
-            response = {**keyword, 'retrievalMode': 'hybrid', 'coverage': coverage, 'total': len(hits), 'searchTicket': ticket,
-                        'device': self.engine.status, 'status': 'success', 'resetSearch':reset_search}
-            key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
-            self.queries = {k:v for k,v in self.queries.items() if v['expires'] > time.time()}
-            if len(self.queries) >= 32: self.queries.pop(next(iter(self.queries)))
-            self.queries[ticket] = {'key': key, 'response': response, 'hits': hits, 'expires': time.time()+600}
-            self.store.put('local_usage', {'kind':'search','account':account,'model':active['model'],'candidates':len(hits),
-                'seconds':time.monotonic()-began,**self.engine.status}, account=account)
-            return {**response, 'hits': hits[offset:offset+limit], 'hasMore': offset+limit<len(hits)}
-        except Exception as error:
-            diagnostic_event('search.keyword.fallback', level=logging.WARNING, error=error, reason_code='semantic_failed')
-            self.store.put('local_usage',{'kind':'search','account':account,'model':active.get('model'),'status':'error',
-                'seconds':time.monotonic()-began,'error_type':type(error).__name__,**self.engine.status},account=account)
-            # 旧全文结果已经按 offset 分页，不能再对它重复切片。
-            fallback_hits = fuse([*committed_keyword_hits[offset:offset+limit], *snapshot_keyword.get('hits', [])], [])
-            return {**keyword, 'hits': fallback_hits[:limit],
-                    'total': max(snapshot_keyword.get('total', 0), len(committed_keyword_hits), offset + len(fallback_hits)),
-                    'hasMore': offset + limit < len(committed_keyword_hits) or len(fallback_hits) > limit or bool(snapshot_keyword.get('hasMore')),
-                    'retrievalMode':'keyword','coverage':{'message':'语义检索暂不可用，当前展示关键词结果，请检查本地模型'}}
-        finally:
-            self.foreground_queries -= 1
+            reset_search=False
+            if offset and not ticket:
+                ticket = next((k for k,v in reversed(list(self.queries.items())) if v['key']==key and v['expires']>time.time()),None)
+            if ticket:
+                cached = self.queries.get(ticket)
+                key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
+                if cached and cached['key'] == key and cached['expires'] > time.time():
+                    diagnostic_event('search.ticket.hit', ticket_id=ticket, offset=offset, cached=True)
+                    return {**cached['response'], 'hits': cached['hits'][offset:offset+limit], 'hasMore': offset+limit < len(cached['hits']), 'resetSearch':False}
+                reset_search=bool(offset)
+                diagnostic_event('search.ticket.expired', offset=offset, cached=False)
+                offset=0
+            began = time.monotonic()
+            snapshot_keyword, committed_keyword_hits = keyword, []
+            self.foreground_queries += 1
+            try:
+                scope_start = cfg['start'] if cfg['start'] is not None else max(0, int(time.time())-cfg['days']*86400) if cfg['days'] else 0
+                query_start, query_end = max(start or 0, scope_start), min(end if end is not None else 2**53, cfg['end'] if cfg['end'] is not None else 2**53)
+                index = self.index(account)
+                def as_hit(m):
+                    return {**m.get('media', {}), 'id': m['anchor'], 'anchorId': m['anchor'], 'username': m['username'],
+                            'conversationName': m.get('name', m['username']), 'senderDisplayName': m['sender'],
+                            'senderUsername': m.get('sender_id', m['sender']), 'createTime': m['time'],
+                            # 索引正文已经包含标题、引用和转写；AI 适配器不能再次拼接这些字段。
+                            'content': m['text'], 'aiText': m['text'], 'snippet': m['text'], 'renderType': m['kind']}
+                literal = await account_to_thread(account_dir, index.keyword, active['generation'], q, sorted(allowed), query_start, query_end, sender, kinds, 200)
+                # 渐进索引里的新消息可能尚未进入旧全文索引，原文命中必须独立于向量召回。
+                committed_keyword_hits = [as_hit(m) for m in literal]
+                keyword = {**keyword, 'hits': fuse([*committed_keyword_hits, *keyword.get('hits', [])], [])}
+                spec = model_spec(active['model'])
+                root = model_dir(self.downloads.root, active['model'])
+                vectors = await account_to_thread(account_dir, self.engine.encode, root, spec, [q], cfg['device'], cfg['device_id'], True)
+                rows = await account_to_thread(account_dir, index.search, active['generation'], vectors[0], sorted(allowed), query_start, query_end, sender, kinds, 200)
+                semantic = [as_hit(row['message']) for row in rows]
+                # 同一片段内的消息共享向量分数；直接匹配原文的消息应先于相邻闲聊。
+                needle = q.strip().casefold()
+                if needle:
+                    semantic.sort(key=lambda hit: needle not in hit['content'].casefold())
+                hits = fuse(keyword.get('hits', []), semantic)
+                diagnostic_event('search.recall.finished', keyword_count=len(keyword.get('hits',[])), semantic_count=len(semantic), returned=len(hits), actual_device=self.engine.status.get('actual_device'))
+                coverage = {'message': '语义结果来自已建立的本地索引；新消息、未解析图片和范围外历史可能尚未覆盖。',
+                            'start': active['start'], 'end': active['end'], 'updated': active['updated'],
+                            'partial': bool(active.get('partial')) or bool(set(usernames)-allowed) or len(rows) >= 200 or len(literal) >= 200,
+                            'ranges': active.get('coverage', {}), 'source': active.get('source')}
+                ticket = uuid.uuid4().hex
+                response = {**keyword, 'retrievalMode': 'hybrid', 'coverage': coverage, 'total': len(hits), 'searchTicket': ticket,
+                            'device': self.engine.status, 'status': 'success', 'resetSearch':reset_search}
+                key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
+                self.queries = {k:v for k,v in self.queries.items() if v['expires'] > time.time()}
+                if len(self.queries) >= 32: self.queries.pop(next(iter(self.queries)))
+                self.queries[ticket] = {'key': key, 'response': response, 'hits': hits, 'expires': time.time()+600}
+                self.store.put('local_usage', {'kind':'search','account':account,'model':active['model'],'candidates':len(hits),
+                    'seconds':time.monotonic()-began,**self.engine.status}, account=account)
+                return {**response, 'hits': hits[offset:offset+limit], 'hasMore': offset+limit<len(hits)}
+            except SnapshotRegistryError:
+                raise
+            except Exception as error:
+                diagnostic_event('search.keyword.fallback', level=logging.WARNING, error=error, reason_code='semantic_failed')
+                self.store.put('local_usage',{'kind':'search','account':account,'model':active.get('model'),'status':'error',
+                    'seconds':time.monotonic()-began,'error_type':type(error).__name__,**self.engine.status},account=account)
+                # 旧全文结果已经按 offset 分页，不能再对它重复切片。
+                fallback_hits = fuse([*committed_keyword_hits[offset:offset+limit], *snapshot_keyword.get('hits', [])], [])
+                return {**keyword, 'hits': fallback_hits[:limit],
+                        'total': max(snapshot_keyword.get('total', 0), len(committed_keyword_hits), offset + len(fallback_hits)),
+                        'hasMore': offset + limit < len(committed_keyword_hits) or len(fallback_hits) > limit or bool(snapshot_keyword.get('hasMore')),
+                        'retrievalMode':'keyword','coverage':{'message':'语义检索暂不可用，当前展示关键词结果，请检查本地模型'}}
+            finally:
+                self.foreground_queries -= 1
 
     @observed('search.clear', id_field='task_id')
     async def clear(self, account):
-        await self.pause_account(account)
-        cfg = self.config(account)
-        cfg.pop('active', None)
-        if not cfg['enabled']: cfg['model']=None
-        self.store.put('config', cfg, id=account, account=account)
-        await asyncio.to_thread(self.index(account).clear)
-        await asyncio.to_thread(self.clear_message_plans, account)
-        self.queries.clear()
+        account_dir = get_output_databases_dir() / account
+        with account_work(account_dir):
+            await self.pause_account(account)
+            cfg = self.config(account)
+            cfg.pop('active', None)
+            if not cfg['enabled']: cfg['model']=None
+            self.store.put('config', cfg, id=account, account=account)
+            await account_to_thread(account_dir, self.index(account).clear)
+            await account_to_thread(account_dir, self.clear_message_plans, account)
+            self.queries.clear()
 
     @observed('search.purge', id_field='task_id')
     def purge(self, account):

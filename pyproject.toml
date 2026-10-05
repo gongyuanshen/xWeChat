@@ -21,7 +21,6 @@ dependencies = [
     "pilk>=0.2.4",
     "pypinyin>=0.53.0",
     "jieba>=0.42.1",
-    "wx_key>=2.0.1; sys_platform == 'win32'",
     "pefile>=2024.8.26; sys_platform == 'win32'",
     "pymem>=1.14.0; sys_platform == 'win32'",
     "yara-python>=4.5.2; sys_platform == 'win32'",
@@ -47,9 +46,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-build = [
-    "pyinstaller>=6.0.0",
-]
 voice-transcription = [
     "faster-whisper>=1.1.0",
     "opencc-python-reimplemented>=0.1.7",
@@ -68,30 +64,34 @@ dev = [
 ]
 
 [project.scripts]
-wechat-decrypt = "main:main"
+wechat-decrypt = "wechat_decrypt_tool.backend_entry:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/wechat_decrypt_tool"]
-include = [
-    "src/wechat_decrypt_tool/native/VoipEngine.dll",
-    "src/wechat_decrypt_tool/native/wce_integrity*.pyd",
-    "src/wechat_decrypt_tool/native/wechatdb_client.dll",
-    "src/wechat_decrypt_tool/native/wechatdb_broker.exe",
-    "src/wechat_decrypt_tool/native/wechatdb_native_build.json",
-    "src/wechat_decrypt_tool/native/weflow_wasm/weflow_wasm_keystream.js",
-    "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.js",
-    "src/wechat_decrypt_tool/native/weflow_wasm/wasm_video_decode.wasm",
-    "src/wechat_decrypt_tool/native/weflow_wasm/sns_image_fixture.json",
-    "src/wechat_decrypt_tool/resources/*.json",
-    "src/wechat_decrypt_tool/resources/licenses/*.txt",
+[tool.hatch.build]
+# Exclude binaries other than the local WXGF decoder.
+# The local WXGF decoder is the sole binary explicitly included per target.
+exclude = [
+    "src/wechat_decrypt_tool/native/*.dll",
+    "src/wechat_decrypt_tool/native/*.pyd",
+    "src/wechat_decrypt_tool/native/*.exe",
+    "src/wechat_decrypt_tool/native/*.so",
+    "src/wechat_decrypt_tool/native/*.dylib",
 ]
 
-[tool.uv]
-find-links = ["./tools/key_wheels/"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/wechat_decrypt_tool"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/wechat_decrypt_tool/native/VoipEngine.dll" = "wechat_decrypt_tool/native/VoipEngine.dll"
+
+[tool.hatch.build.targets.sdist]
+only-include = ["src/wechat_decrypt_tool", "pyproject.toml", "README.md"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"src/wechat_decrypt_tool/native/VoipEngine.dll" = "src/wechat_decrypt_tool/native/VoipEngine.dll"
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

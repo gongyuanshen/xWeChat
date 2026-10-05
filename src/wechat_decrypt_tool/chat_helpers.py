@@ -8,6 +8,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from collections import Counter
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, quote, urlparse
@@ -16,6 +17,7 @@ from .account_identity import resolve_account_self_username
 from .chat_accounts import list_chat_account_names, resolve_chat_account_context
 from .logging_config import get_logger
 from .sqlite_diagnostics import collect_sqlite_diagnostics, format_sqlite_diagnostics, is_usable_sqlite_db
+from .snapshot_registry import resolve_account_database_dir
 
 try:
     import zstandard as zstd  # type: ignore
@@ -375,6 +377,7 @@ def _looks_like_xml(s: str) -> bool:
 
 
 def _decode_message_content(compress_value: Any, message_value: Any) -> str:
+    """Decode storage formats without expanding text or XML entity layers."""
     def try_decode_text_blob(text: str) -> Optional[str]:
         t = (text or "").strip()
         if not t:
@@ -390,13 +393,13 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
                     try:
                         out = zstd.decompress(raw)
                         s2 = out.decode("utf-8", errors="ignore")
-                        s2 = html.unescape(s2.strip())
+                        s2 = s2.strip()
                         if _looks_like_xml(s2) or _is_mostly_printable_text(s2):
                             return s2
                     except Exception:
                         pass
                 s2 = raw.decode("utf-8", errors="ignore")
-                s2 = html.unescape(s2.strip())
+                s2 = s2.strip()
                 # Avoid decoding user-sent pure-hex text (e.g. "68656c6c6f") into arbitrary strings;
                 # only accept non-zstd hex if it still looks like a message XML payload.
                 s2_lower = s2.lower()
@@ -416,13 +419,13 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
                     try:
                         out = zstd.decompress(raw)
                         s2 = out.decode("utf-8", errors="ignore")
-                        s2 = html.unescape(s2.strip())
+                        s2 = s2.strip()
                         if _looks_like_xml(s2) or _is_mostly_printable_text(s2):
                             return s2
                     except Exception:
                         pass
                 s2 = raw.decode("utf-8", errors="ignore")
-                s2 = html.unescape(s2.strip())
+                s2 = s2.strip()
                 s2_lower = s2.lower()
                 if (
                     _looks_like_xml(s2)
@@ -441,7 +444,7 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
     # (often a zstd frame starting with 28b52ffd...), while compress_content is null.
     # NOTE: some callers set sqlite3.text_factory=bytes, so TEXT may arrive as bytes even when it
     # is actually hex/base64 text; decode from msg_text, not from the raw python type.
-    s = html.unescape(msg_text.strip())
+    s = msg_text.strip()
     s2 = try_decode_text_blob(s)
     if s2:
         msg_text = s2
@@ -452,7 +455,7 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
             try:
                 out = zstd.decompress(raw)
                 s = out.decode("utf-8", errors="ignore")
-                s = html.unescape(s.strip())
+                s = s.strip()
                 if _looks_like_xml(s) or _is_mostly_printable_text(s):
                     msg_text = s
             except Exception:
@@ -462,7 +465,7 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
         return msg_text
 
     if isinstance(compress_value, str):
-        s = html.unescape(compress_value.strip())
+        s = compress_value.strip()
         s2 = try_decode_text_blob(s)
         if s2:
             return s2
@@ -483,7 +486,7 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
         try:
             out = zstd.decompress(data)
             s = out.decode("utf-8", errors="ignore")
-            s = html.unescape(s.strip())
+            s = s.strip()
             if _looks_like_xml(s) or _is_mostly_printable_text(s):
                 return s
         except Exception:
@@ -491,7 +494,7 @@ def _decode_message_content(compress_value: Any, message_value: Any) -> str:
 
     try:
         s = data.decode("utf-8", errors="ignore")
-        s = html.unescape(s.strip())
+        s = s.strip()
         s2 = try_decode_text_blob(s)
         if s2:
             return s2
@@ -712,7 +715,7 @@ def _extract_voice_transcript_from_packed_info(packed_info: Any) -> str:
     return ""
 
 
-def _resource_lookup_chat_id(resource_conn: sqlite3.Connection, username: str) -> Optional[int]:
+def _resource_lookup_chat_id(resource_conn: sqlite3.Connection, username: str, *, strict: bool = False) -> Optional[int]:
     if not username:
         return None
     try:
@@ -723,6 +726,8 @@ def _resource_lookup_chat_id(resource_conn: sqlite3.Connection, username: str) -
         if row and row[0] is not None:
             return int(row[0])
     except Exception:
+        if strict:
+            raise
         return None
     return None
 
@@ -734,6 +739,8 @@ def _lookup_resource_md5(
     server_id: int,
     local_id: int,
     create_time: int,
+    *,
+    strict: bool = False,
 ) -> str:
     if server_id <= 0 and local_id <= 0:
         return ""
@@ -763,6 +770,8 @@ def _lookup_resource_md5(
                 if md5:
                     return md5
     except Exception:
+        if strict:
+            raise
         pass
 
     try:
@@ -777,6 +786,8 @@ def _lookup_resource_md5(
             if row and row[0] is not None:
                 return _extract_md5_from_blob(row[0])
     except Exception:
+        if strict:
+            raise
         pass
 
     return ""
@@ -790,14 +801,8 @@ def _strip_cdata(s: str) -> str:
 
 
 def _normalize_xml_url(url: str) -> str:
-    """Normalize URLs extracted from XML attributes/tags (e.g. decode '&amp;')."""
-    u = str(url or "").strip()
-    if not u:
-        return ""
-    try:
-        return html.unescape(u).strip()
-    except Exception:
-        return u.replace("&amp;", "&").strip()
+    """Trim a URL whose XML field has already been decoded."""
+    return str(url or "").strip()
 
 
 def _is_mp_weixin_article_url(url: str) -> bool:
@@ -877,14 +882,78 @@ def _extract_xml_tag_text(xml_text: str, tag: str) -> str:
     )
     if not m:
         return ""
-    return _strip_cdata(m.group(1) or "")
+    value = m.group(1) or ""
+    parts = re.split(r"(<!\[CDATA\[.*?\]\]>)", value, flags=re.DOTALL)
+    # Structured fields are consumed by another field reader; preserve their
+    # child markup, entity layers and CDATA until that reader selects a value.
+    if any(re.search(r"</?[A-Za-z_][^>]*>", part) for part in parts[::2]):
+        return value.strip()
+    return "".join(
+        part[9:-3] if index % 2 else html.unescape(part)
+        for index, part in enumerate(parts)
+    ).strip()
+
+
+class _RecordItemFieldParser(HTMLParser):
+    """Locate the appmsg field without parsing unrelated URL text as XML."""
+    def __init__(self, source: str):
+        super().__init__(convert_charrefs=False)
+        self.source = source
+        # HTMLParser positions count LF only, unlike str.splitlines().
+        self.line_offsets = [0] + [match.end() for match in re.finditer("\n", source)]
+        self.stack: list[str] = []
+        self.start: Optional[int] = None
+        self.fields: list[str] = []
+
+    def source_offset(self) -> int:
+        line, column = self.getpos()
+        return self.line_offsets[line - 1] + column
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "recorditem" and self.stack in (["appmsg"], ["msg", "appmsg"]):
+            self.start = self.source_offset()
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if not self.stack or self.stack[-1] != tag:
+            raise ValueError("Merged record envelope has mismatched tags")
+        if tag == "recorditem" and self.stack in (["appmsg", "recorditem"], ["msg", "appmsg", "recorditem"]):
+            end = self.source.index(">", self.source_offset()) + 1
+            self.fields.append(self.source[self.start:end])
+            self.start = None
+        self.stack.pop()
+
+    def handle_startendtag(self, tag, attrs):
+        if tag == "recorditem" and self.stack in (["appmsg"], ["msg", "appmsg"]):
+            self.fields.append(self.get_starttag_text())
+
+
+def _extract_record_item(text: str) -> str:
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
+        raise ValueError("Merged record XML cannot contain document type or entity declarations")
+    parser = _RecordItemFieldParser(text)
+    parser.feed(text)
+    parser.close()
+    if parser.stack:
+        raise ValueError("Merged record envelope has unclosed tags")
+    if len(parser.fields) > 1:
+        raise ValueError("Merged record envelope contains multiple recorditem fields")
+    if not parser.fields:
+        return ""
+    # The tokenizer only selects an exact field. Its wrapper and its embedded
+    # XML are still parsed strictly; malformed record data is never repaired.
+    node = ET.fromstring(parser.fields[0])
+    record = ((node.text or "") + "".join(ET.tostring(child, encoding="unicode") for child in node)).strip()
+    if record:
+        ET.fromstring(record)
+    return record
 
 
 def _extract_xml_attr(xml_text: str, attr: str) -> str:
     if not xml_text or not attr:
         return ""
     m = re.search(rf"{re.escape(attr)}\s*=\s*['\"]([^'\"]+)['\"]", xml_text, flags=re.IGNORECASE)
-    return (m.group(1) or "").strip() if m else ""
+    return html.unescape(m.group(1) or "").strip() if m else ""
 
 
 def _extract_xml_tag_or_attr(xml_text: str, name: str) -> str:
@@ -1303,9 +1372,18 @@ def _split_group_sender_prefix(
     return "", text
 
 
-def _extract_sender_from_group_xml(xml_text: str) -> str:
+def _extract_sender_from_group_xml(xml_text: str, *, local_type: Optional[int] = None) -> str:
     if not xml_text:
         return ""
+
+    if local_type == 266287972401:
+        root = ET.fromstring(xml_text.strip().strip('"'))
+        path = "./patinfo/fromusername" if root.tag == "appmsg" else "./appmsg/patinfo/fromusername"
+        return (root.findtext(path) or "").strip()
+    if local_type == 43:
+        root = ET.fromstring(xml_text.strip().strip('"'))
+        video = root.find("./videomsg")
+        return (video.get("fromusername", "") if video is not None else "").strip()
 
     probe_text = xml_text
     try:
@@ -1429,7 +1507,9 @@ def _parse_app_message(text: str) -> dict[str, Any]:
     if app_type == 19:
         # 合并转发聊天记录（Chat History）
         # 注意：recorditem 的 CDATA 内部可能包含 <refermsg> 等标签，不能据此把整条消息误判为引用消息。
-        record_item = _extract_xml_tag_text(text, "recorditem")
+        # WeChat's outer URL text may contain bare '&'. Parse only the defined
+        # field as XML, retaining CDATA and nested recorditem boundaries.
+        record_item = _extract_record_item(text)
         preview = (des or "").strip()
         if not preview:
             if record_item:
@@ -1770,6 +1850,7 @@ def _parse_app_message(text: str) -> dict[str, Any]:
 
 
 def _iter_message_db_paths(account_dir: Path) -> list[Path]:
+    account_dir = resolve_account_database_dir(account_dir)
     if not account_dir.exists():
         return []
 
@@ -2010,7 +2091,7 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
     best: dict[str, tuple[tuple[int, int, int], str]] = {}
     expected_ts_by_user: dict[str, int] = {}
 
-    session_db_path = Path(account_dir) / "session.db"
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
     if session_db_path.exists() and remaining:
         sconn: Optional[sqlite3.Connection] = None
         try:
@@ -2045,20 +2126,9 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
                             continue
                         expected_ts_by_user[u] = int(r["last_timestamp"] or 0)
         except sqlite3.DatabaseError as e:
-            expected_ts_by_user = {}
-            logger.warning(
-                "[sessions.preview] session timestamp lookup failed account=%s db=%s usernames=%s sample_usernames=%s error=%s diag=%s",
-                account_dir.name,
-                str(session_db_path),
-                len(remaining),
-                sorted([u for u in remaining if u])[:5],
-                str(e),
-                format_sqlite_diagnostics(
-                    collect_sqlite_diagnostics(session_db_path, quick_check=True, table_name="SessionTable")
-                ),
-            )
+            raise sqlite3.DatabaseError(f"Cannot read offline session database {session_db_path}: {e}") from e
         except Exception:
-            expected_ts_by_user = {}
+            raise
         finally:
             if sconn is not None:
                 sconn.close()
@@ -2113,34 +2183,11 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
                             "LIMIT 1"
                         ).fetchone()
                     except Exception:
-                        stage = "latest_row_without_name2id"
-                        r = conn.execute(
-                            "SELECT "
-                            "local_type, message_content, compress_content, create_time, sort_seq, local_id, '' AS sender_username "
-                            f"FROM {quoted} "
-                            "ORDER BY sort_seq DESC, local_id DESC "
-                            "LIMIT 1"
-                        ).fetchone()
+                        raise
                 except sqlite3.DatabaseError as e:
-                    logger.warning(
-                        "[sessions.preview] latest row query failed account=%s db=%s username=%s table=%s stage=%s error=%s diag=%s",
-                        account_dir.name,
-                        str(db_path),
-                        str(u),
-                        str(tn),
-                        stage,
-                        str(e),
-                        format_sqlite_diagnostics(
-                            collect_sqlite_diagnostics(db_path, quick_check=True, table_name=tn)
-                        ),
-                    )
-                    continue
+                    raise
                 except Exception as e:
-                    if _DEBUG_SESSIONS:
-                        logger.info(
-                            f"[sessions.preview] db={db_path.name} username={u} table={tn} query_failed={e}"
-                        )
-                    continue
+                    raise
                 if r is None:
                     continue
 
@@ -2163,31 +2210,7 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
                             "LIMIT 1"
                         ).fetchone()
                     except Exception:
-                        try:
-                            stage = "latest_row_by_create_time_without_name2id"
-                            r2 = conn.execute(
-                                "SELECT "
-                                "local_type, message_content, compress_content, create_time, sort_seq, local_id, '' AS sender_username "
-                                f"FROM {quoted} "
-                                "ORDER BY COALESCE(create_time, 0) DESC, COALESCE(sort_seq, 0) DESC, local_id DESC "
-                                "LIMIT 1"
-                            ).fetchone()
-                        except sqlite3.DatabaseError as e:
-                            logger.warning(
-                                "[sessions.preview] latest row requery failed account=%s db=%s username=%s table=%s stage=%s error=%s diag=%s",
-                                account_dir.name,
-                                str(db_path),
-                                str(u),
-                                str(tn),
-                                stage,
-                                str(e),
-                                format_sqlite_diagnostics(
-                                    collect_sqlite_diagnostics(db_path, quick_check=True, table_name=tn)
-                                ),
-                            )
-                            r2 = None
-                        except Exception:
-                            r2 = None
+                        raise
 
                     if r2 is not None:
                         r = r2
@@ -2200,6 +2223,11 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
 
                 raw_text = _decode_message_content(r["compress_content"], r["message_content"]).strip()
                 sender_username = _decode_sqlite_text(r["sender_username"]).strip()
+                # Native pat/video records may store their actor in XML rather than Name2Id.
+                if local_type in (266287972401, 43) and not sender_username:
+                    sender_username = _extract_sender_from_group_xml(raw_text, local_type=local_type)
+                if local_type != 10000 and (not sender_username):
+                    raise sqlite3.DatabaseError(f"Missing Name2Id sender mapping for local_id={local_id}.")
                 preview = _build_latest_message_preview(
                     username=u,
                     local_type=local_type,
@@ -2214,21 +2242,7 @@ def _load_latest_message_previews(account_dir: Path, usernames: list[str]) -> di
                 if prev is None or sort_key > prev[0]:
                     best[u] = (sort_key, preview)
         except sqlite3.DatabaseError as e:
-            logger.warning(
-                "[sessions.preview] malformed message db account=%s db=%s stage=%s username=%s table=%s remaining=%s sample_usernames=%s error=%s diag=%s",
-                account_dir.name,
-                str(db_path),
-                stage,
-                stage_username,
-                stage_table,
-                len(remaining),
-                sorted([u for u in remaining if u])[:5],
-                str(e),
-                format_sqlite_diagnostics(
-                    collect_sqlite_diagnostics(db_path, quick_check=True, table_name=(stage_table or None))
-                ),
-            )
-            continue
+            raise sqlite3.DatabaseError(f"Cannot read offline message database {db_path}: {e}") from e
         finally:
             if conn is not None:
                 try:
@@ -2344,8 +2358,10 @@ def _load_contact_rows(contact_db_path: Path, usernames: list[str]) -> dict[str,
                     (table,),
                 ).fetchone()
             except Exception:
-                exists = None
+                raise
             if not exists:
+                if table == 'contact':
+                    raise sqlite3.OperationalError("Required contact table is missing.")
                 return
             placeholders = ",".join(["?"] * len(targets))
             sql = f"""
@@ -2356,7 +2372,7 @@ def _load_contact_rows(contact_db_path: Path, usernames: list[str]) -> dict[str,
             try:
                 rows = conn.execute(sql, targets).fetchall()
             except Exception:
-                return
+                raise
             for r in rows:
                 item = _contact_row_to_dict(r)
                 username = str(item.get("username") or "").strip()
@@ -2367,6 +2383,8 @@ def _load_contact_rows(contact_db_path: Path, usernames: list[str]) -> dict[str,
         missing = [u for u in uniq if u not in result]
         query_table("stranger", missing)
         return result
+    except sqlite3.DatabaseError as exc:
+        raise sqlite3.DatabaseError(f"Cannot read contact database {contact_db_path}: {exc}") from exc
     finally:
         conn.close()
 

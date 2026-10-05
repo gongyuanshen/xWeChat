@@ -14,7 +14,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
@@ -203,25 +203,37 @@ def infer_xor_key_from_v2_tails(tails: Iterable[bytes]) -> int | None:
     return inferred
 
 
-def _safe_mtime_ns(path: Path) -> int:
+def _safe_mtime_ns(path: Path, checkpoint: Callable[[], None]) -> int:
+    checkpoint()
     try:
         return path.stat().st_mtime_ns
     except OSError:
         return 0
+    finally:
+        checkpoint()
 
 
-def _list_child_dirs(path: Path) -> list[Path]:
+def _list_child_dirs(path: Path, checkpoint: Callable[[], None]) -> list[Path]:
+    checkpoint()
     directories: list[Path] = []
     try:
         with os.scandir(path) as entries:
+            checkpoint()
             for entry in entries:
+                checkpoint()
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         directories.append(Path(entry.path))
                 except OSError:
                     continue
+                finally:
+                    checkpoint()
+    except TimeoutError:
+        raise
     except OSError:
         return []
+    finally:
+        checkpoint()
     return directories
 
 
@@ -230,10 +242,15 @@ def _offer_recent_template_files(
     heap: list[tuple[int, str, str]],
     capacity: int,
     excluded_paths: set[str] | None = None,
+    *,
+    checkpoint: Callable[[], None],
 ) -> None:
+    checkpoint()
     try:
         with os.scandir(directory) as entries:
+            checkpoint()
             for entry in entries:
+                checkpoint()
                 if not entry.name.lower().endswith("_t.dat"):
                     continue
                 try:
@@ -242,6 +259,8 @@ def _offer_recent_template_files(
                     mtime_ns = entry.stat(follow_symlinks=False).st_mtime_ns
                 except OSError:
                     continue
+                finally:
+                    checkpoint()
 
                 path_text = str(Path(entry.path))
                 path_key = os.path.normcase(os.path.abspath(path_text))
@@ -252,37 +271,44 @@ def _offer_recent_template_files(
                     heapq.heappush(heap, heap_item)
                 elif heap_item > heap[0]:
                     heapq.heapreplace(heap, heap_item)
+    except TimeoutError:
+        raise
     except OSError:
         return
+    finally:
+        checkpoint()
 
 
 def _recent_paths(heap: list[tuple[int, str, str]]) -> tuple[Path, ...]:
     return tuple(Path(item[2]) for item in sorted(heap, reverse=True))
 
 
-def _collect_preferred_paths(account_dir: Path, capacity: int) -> tuple[Path, ...]:
+def _collect_preferred_paths(account_dir: Path, capacity: int, checkpoint: Callable[[], None]) -> tuple[Path, ...]:
     attach_root = account_dir / "msg" / "attach"
-    attach_dirs = _list_child_dirs(attach_root)
-    attach_dirs.sort(key=lambda path: (-_safe_mtime_ns(path), path.name.casefold()))
+    attach_dirs = _list_child_dirs(attach_root, checkpoint)
+    attach_dirs.sort(key=lambda path: (-_safe_mtime_ns(path, checkpoint), path.name.casefold()))
 
     heap: list[tuple[int, str, str]] = []
     visited_dirs = 0
     for attach_dir in attach_dirs:
+        checkpoint()
         if visited_dirs >= _MAX_PREFERRED_DIRS:
             break
         visited_dirs += 1
-        month_dirs = [path for path in _list_child_dirs(attach_dir) if _MONTH_DIR_RE.fullmatch(path.name)]
+        month_dirs = [path for path in _list_child_dirs(attach_dir, checkpoint) if _MONTH_DIR_RE.fullmatch(path.name)]
         month_dirs.sort(key=lambda path: path.name, reverse=True)
         for month_dir in month_dirs:
+            checkpoint()
             if visited_dirs >= _MAX_PREFERRED_DIRS:
                 break
             visited_dirs += 1
-            img_dirs = [path for path in _list_child_dirs(month_dir) if path.name.casefold() == "img"]
+            img_dirs = [path for path in _list_child_dirs(month_dir, checkpoint) if path.name.casefold() == "img"]
             for img_dir in img_dirs:
+                checkpoint()
                 if visited_dirs >= _MAX_PREFERRED_DIRS:
                     break
                 visited_dirs += 1
-                _offer_recent_template_files(img_dir, heap, capacity)
+                _offer_recent_template_files(img_dir, heap, capacity, checkpoint=checkpoint)
     return _recent_paths(heap)
 
 
@@ -291,25 +317,29 @@ def _collect_fallback_paths(
     capacity: int,
     max_dirs: int,
     excluded_paths: set[str],
+    checkpoint: Callable[[], None],
 ) -> tuple[Path, ...]:
-    queue = [
-        path
-        for path in (account_dir / "msg", account_dir / "cache", account_dir / "resource")
-        if path.is_dir()
-    ]
+    queue = []
+    for path in (account_dir / "msg", account_dir / "cache", account_dir / "resource"):
+        checkpoint()
+        if path.is_dir():
+            queue.append(path)
+        checkpoint()
     heap: list[tuple[int, str, str]] = []
     visited_dirs = 0
     queue_index = 0
 
     while queue_index < len(queue) and visited_dirs < max_dirs:
+        checkpoint()
         directory = queue[queue_index]
         queue_index += 1
         visited_dirs += 1
-        _offer_recent_template_files(directory, heap, capacity, excluded_paths)
+        _offer_recent_template_files(directory, heap, capacity, excluded_paths, checkpoint=checkpoint)
 
-        child_dirs = _list_child_dirs(directory)
+        child_dirs = _list_child_dirs(directory, checkpoint)
         child_dirs.sort(key=lambda path: path.name.casefold())
         for child in child_dirs:
+            checkpoint()
             lower_name = child.name.casefold()
             if any(part in lower_name for part in _SKIPPED_FALLBACK_DIR_PARTS):
                 continue
@@ -319,29 +349,38 @@ def _collect_fallback_paths(
     return _recent_paths(heap)
 
 
-def _read_v2_templates(paths: Sequence[Path], limit: int) -> tuple[tuple[V2Template, ...], int]:
+def _read_v2_templates(paths: Sequence[Path], limit: int, checkpoint: Callable[[], None]) -> tuple[tuple[V2Template, ...], int]:
     templates: list[V2Template] = []
     files_scanned = 0
     for path in paths:
+        checkpoint()
         if len(templates) >= limit:
             break
         files_scanned += 1
         try:
             with path.open("rb") as stream:
+                checkpoint()
                 header = stream.read(V2_CIPHERTEXT_START + AES_BLOCK_SIZE)
+                checkpoint()
                 if len(header) < V2_CIPHERTEXT_START + AES_BLOCK_SIZE or not header.startswith(V2_MAGIC):
                     continue
                 stream.seek(-2, os.SEEK_END)
+                checkpoint()
                 tail = stream.read(2)
+                checkpoint()
+        except TimeoutError:
+            raise
         except (OSError, ValueError):
             continue
+        finally:
+            checkpoint()
 
         tail_xor_key = infer_xor_key_from_v2_tails((tail,))
         templates.append(
             V2Template(
                 path=path,
                 ciphertext=header[V2_CIPHERTEXT_START : V2_CIPHERTEXT_START + AES_BLOCK_SIZE],
-                mtime_ns=_safe_mtime_ns(path),
+                mtime_ns=_safe_mtime_ns(path, checkpoint),
                 tail_xor_key=tail_xor_key,
                 tail_bytes=tail,
             )
@@ -354,15 +393,19 @@ def scan_v2_templates(
     *,
     limit: int = 32,
     max_fallback_dirs: int = 500,
+    checkpoint: Callable[[], None] | None = None,
 ) -> TemplateScanResult:
-    """Find recent V2 thumbnail templates with bounded fallback traversal."""
+    """Find V2 thumbnails, checking a caller's cancellation/deadline between IOs."""
+    if checkpoint is None:
+        checkpoint = lambda: None
+    checkpoint()
     if limit <= 0:
         return TemplateScanResult(templates=(), inferred_xor_key=None, used_fallback=False, files_scanned=0)
 
     root = Path(account_dir)
     discovery_capacity = max(limit * 4, 64)
-    preferred_paths = _collect_preferred_paths(root, discovery_capacity)
-    templates, files_scanned = _read_v2_templates(preferred_paths, limit)
+    preferred_paths = _collect_preferred_paths(root, discovery_capacity, checkpoint)
+    templates, files_scanned = _read_v2_templates(preferred_paths, limit, checkpoint)
     used_fallback = False
 
     if not templates and max_fallback_dirs > 0:
@@ -373,13 +416,15 @@ def scan_v2_templates(
             discovery_capacity,
             max_fallback_dirs,
             excluded,
+            checkpoint,
         )
-        templates, fallback_scanned = _read_v2_templates(fallback_paths, limit)
+        templates, fallback_scanned = _read_v2_templates(fallback_paths, limit, checkpoint)
         files_scanned += fallback_scanned
 
     inferred_xor_key, xor_support = _infer_xor_key_with_support(
         template.tail_bytes for template in templates
     )
+    checkpoint()
 
     return TemplateScanResult(
         templates=templates,

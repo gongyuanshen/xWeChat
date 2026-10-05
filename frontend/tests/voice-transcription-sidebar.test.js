@@ -10,9 +10,6 @@ import { clearProjectVoiceTranscripts, useChatMessages } from '~/composables/cha
 import { notifyProjectVoiceTranscriptsInvalidated } from '~/lib/voice-transcript-invalidation'
 
 vi.mock('~/lib/server-error-logging', () => ({ reportServerError: vi.fn() }))
-vi.mock('~/stores/chatAccounts', () => ({
-  useChatAccountsStore: () => ({ applySourceResponse: vi.fn() })
-}))
 
 const chatPageSource = readFileSync(resolve(process.cwd(), 'pages/chat/[[username]].vue'), 'utf8')
 const voiceSidebarSource = readFileSync(resolve(process.cwd(), 'components/chat/VoiceTranscriptionSidebar.vue'), 'utf8')
@@ -44,7 +41,6 @@ const mountChatMessagesState = (api) => {
         apiBase: 'http://127.0.0.1:10392/api',
         selectedAccount,
         selectedContact,
-        realtimeEnabled: ref(false),
         privacyMode: ref(false),
         searchContext: ref({ active: false })
       })
@@ -72,8 +68,6 @@ const makeState = (overrides = {}) => ({
     ]
   }),
   voiceTranscriptionStatusLoading: ref(false),
-  nativeVoiceTranscriptionStatus: ref({ available: true, reason: '' }),
-  nativeVoiceTranscriptionUnavailableReason: ref(''),
   voicePanelBusy: ref(false),
   voicePanelError: ref(''),
   voiceBatchConcurrency: ref(0),
@@ -147,15 +141,6 @@ describe('聊天页语音转文字侧栏', () => {
     )
   })
 
-  it('微信原生结果不承诺 force 重跑，失败时只提供普通重试', () => {
-    expect(chatMessagesSource).toContain('const transcribeVoice = async (message) =>')
-    expect(chatMessagesSource).not.toContain('const transcribeVoice = async (message, { force')
-    expect(chatOverlaysSource).not.toContain('重新微信转文字')
-    expect(chatOverlaysSource).not.toContain('transcribe(message, { force:')
-    expect(chatOverlaysSource).toContain('重试微信转文字')
-    expect(chatOverlaysSource).toContain("voiceTranscriptModel === 'wechat-native'")
-  })
-
   it('展示模型、设备和批量进度，并允许取消任务', async () => {
     const state = makeState()
     const wrapper = mount(VoiceTranscriptionSidebar, { props: { state } })
@@ -202,16 +187,6 @@ describe('聊天页语音转文字侧栏', () => {
 
     await wrapper.get('.voice-batch-start').trigger('click')
     expect(state.startVoiceBatch).toHaveBeenCalledTimes(1)
-  })
-
-  it('消息侧栏提供独立微信原生批量入口', async () => {
-    const state = makeState({ voiceBatchJob: ref({ status: 'idle', percent: 0 }) })
-    const wrapper = mount(VoiceTranscriptionSidebar, { props: { state } })
-
-    expect(wrapper.get('.voice-batch-start').text()).toBe('本地批量转文字')
-    expect(wrapper.get('.voice-native-batch-start').text()).toBe('微信原生批量转文字')
-    await wrapper.get('.voice-native-batch-start').trigger('click')
-    expect(state.startVoiceBatch).toHaveBeenCalledWith('wechat-native')
   })
 
   it('并发线程数保留非法草稿并在修正前阻止启动', async () => {
@@ -352,9 +327,7 @@ describe('聊天页语音转文字侧栏', () => {
 
     expect(chatPageSource).toContain('const voiceBatchConcurrency = ref(0)')
     expect(chatPageSource).toContain('concurrency: normalizeVoiceBatchConcurrency(voiceBatchConcurrency.value)')
-    expect(chatPageSource).toContain("const startVoiceBatch = async (engine = 'local')")
-    expect(voiceSidebarSource).toContain('微信原生批量转文字')
-    expect(voiceSidebarSource).toContain("onStartVoiceBatch('wechat-native')")
+    expect(chatPageSource).toContain("const startVoiceBatch = async ()")
     expect(chatPageSource).toContain("hasOwnProperty.call(job, 'requestedConcurrency')")
 
     expect(decryptPageSource).toContain('data-testid="voice-onboarding-concurrency"')
@@ -377,9 +350,6 @@ describe('聊天页语音转文字侧栏', () => {
     expect(decryptPageSource).toContain('|| !commitVoiceBatchConcurrency()')
     expect(decryptPageSource).toContain('并发 {{ voiceBatchActualConcurrency }}')
     expect(decryptPageSource).toContain('concurrency: voiceBatchConcurrency.value')
-    expect(decryptPageSource).toContain('微信原生批量转文字')
-    expect(decryptPageSource).toContain("startVoiceOnboardingBatch('wechat-native')")
-    expect(decryptPageSource).toContain("getNativeVoiceTranscriptionStatus({ account: mediaAccount.value })")
     expect(decryptPageSource).toContain("hasOwnProperty.call(job, 'requestedConcurrency')")
     expect(decryptPageSource).toContain('syncVoiceBatchConcurrencyDraft(job.requestedConcurrency)')
   })
@@ -432,9 +402,8 @@ describe('聊天页语音转文字侧栏', () => {
     expect(chatMessagesSource).toMatch(/const onProjectVoiceTranscriptsInvalidated[\s\S]*?invalidateProjectVoiceTranscripts\(\)[\s\S]*?refreshSelectedMessages\(\)/)
     expect(chatMessagesSource).toContain('transcriptRevision !== projectTranscriptRevision')
     expect(chatMessagesSource).toMatch(/lookupChatVoiceTranscriptionCache[\s\S]*?transcriptRevision !== projectTranscriptRevision/)
-    expect(chatMessagesSource).toMatch(/triggerNativeVoiceTranscription[\s\S]*?if \(!requestIsCurrent\(\)\) return/)
     expect(chatMessagesSource).toMatch(/const restoreVoiceTranscripts[\s\S]*?const accountAtStart[\s\S]*?account: accountAtStart[\s\S]*?selectedAccount\.value[\s\S]*?accountAtStart/)
-    expect(chatMessagesSource).toMatch(/const transcribeVoice[\s\S]*?const accountAtStart[\s\S]*?account: accountAtStart[\s\S]*?selectedAccount\.value[\s\S]*?accountAtStart/)
+    expect(chatMessagesSource).toMatch(/const transcribeVoiceLocally[\s\S]*?const accountAtStart[\s\S]*?account: accountAtStart[\s\S]*?selectedAccount\.value[\s\S]*?accountAtStart/)
     const resetMessageStateSource = chatMessagesSource.slice(
       chatMessagesSource.indexOf('const resetMessageState = () =>'),
       chatMessagesSource.indexOf('const contactProfileCardOpen')
@@ -528,79 +497,6 @@ describe('聊天页语音转文字侧栏', () => {
     wrapper.unmount()
   })
 
-  it('单条转写始终使用请求开始时账号，切换账号后的迟到响应不会写回', async () => {
-    const transcription = createDeferred()
-    const api = {
-      triggerNativeVoiceTranscription: vi.fn(() => transcription.promise)
-    }
-    const { state, selectedAccount, wrapper } = mountChatMessagesState(api)
-    const message = {
-      id: 'voice-account-race',
-      serverIdStr: '1234567890123456789',
-      renderType: 'voice',
-      voiceTranscript: '',
-      voiceTranscriptStatus: 'idle',
-      voiceTranscriptModel: ''
-    }
-    state.allMessages.value = { wxid_friend: [message] }
-
-    const pending = state.transcribeVoice(message)
-    await vi.waitFor(() => expect(api.triggerNativeVoiceTranscription).toHaveBeenCalledTimes(1))
-    expect(api.triggerNativeVoiceTranscription).toHaveBeenCalledWith(expect.objectContaining({ account: 'account-a' }))
-
-    selectedAccount.value = 'account-b'
-    transcription.resolve({
-      status: 'success',
-      serverId: '1234567890123456789',
-      localId: '1',
-      text: '不应写入 B 的迟到文字',
-      language: '',
-      model: 'wechat-native'
-    })
-    await pending
-
-    expect(message.voiceTranscript).toBe('')
-    expect(message.voiceTranscriptModel).toBe('')
-    expect(message.voiceTranscriptStatus).not.toBe('success')
-    wrapper.unmount()
-  })
-
-  it('账号重置会使正在进行的单条转写响应失效', async () => {
-    const transcription = createDeferred()
-    const api = {
-      triggerNativeVoiceTranscription: vi.fn(() => transcription.promise)
-    }
-    const { state, wrapper } = mountChatMessagesState(api)
-    const message = {
-      id: 'voice-reset-race',
-      serverIdStr: '2234567890123456789',
-      renderType: 'voice',
-      voiceTranscript: '',
-      voiceTranscriptStatus: 'idle',
-      voiceTranscriptModel: ''
-    }
-    state.allMessages.value = { wxid_friend: [message] }
-
-    const pending = state.transcribeVoice(message)
-    await vi.waitFor(() => expect(api.triggerNativeVoiceTranscription).toHaveBeenCalledTimes(1))
-    state.resetMessageState()
-    transcription.resolve({
-      status: 'success',
-      serverId: '2234567890123456789',
-      localId: '1',
-      text: '重置后不应写回',
-      language: '',
-      model: 'wechat-native'
-    })
-    await pending
-
-    expect(state.allMessages.value).toEqual({})
-    expect(message.voiceTranscript).toBe('')
-    expect(message.voiceTranscriptModel).toBe('')
-    expect(message.voiceTranscriptStatus).not.toBe('success')
-    wrapper.unmount()
-  })
-
   it('批量 API 将自动和手动并发值写入请求体', async () => {
     const fetch = vi.fn(async (_url, options) => options.body)
     vi.stubGlobal('useApiBase', () => 'http://127.0.0.1:10392/api')
@@ -614,7 +510,6 @@ describe('聊天页语音转文字侧栏', () => {
     await api.startVoiceTranscriptionBatch({ account: 'wxid_demo', force: true, concurrency: 5 })
     await api.startVoiceTranscriptionBatch({ account: 'wxid_demo', force: true, concurrency: 16 })
     await api.startVoiceTranscriptionBatch({ account: 'wxid_demo', force: true, concurrency: 128 })
-    await api.startVoiceTranscriptionBatch({ account: 'wxid_demo', engine: 'wechat-native' })
 
     for (const call of [1, 2, 3, 4]) {
       expect(fetch).toHaveBeenNthCalledWith(call, '/chat/media/voice/transcription/batch', expect.objectContaining({
@@ -626,16 +521,13 @@ describe('聊天页语音转文字侧栏', () => {
         body: { account: 'wxid_demo', force: true, concurrency }
       }))
     }
-    expect(fetch).toHaveBeenNthCalledWith(8, '/chat/media/voice/transcription/batch', expect.objectContaining({
-      body: { account: 'wxid_demo', force: false, concurrency: 0, engine: 'wechat-native' }
-    }))
 
     for (const concurrency of [2.5, -1, '3', 'bad', ' ', true]) {
       await expect(api.startVoiceTranscriptionBatch({ account: 'wxid_demo', concurrency })).rejects.toThrow(
         '并发线程数必须是非负整数（0 表示自动）'
       )
     }
-    expect(fetch).toHaveBeenCalledTimes(8)
+    expect(fetch).toHaveBeenCalledTimes(7)
   })
 
   it('全局删除 API 不携带账号并调用明确的 all 路由', async () => {

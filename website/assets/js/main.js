@@ -1436,7 +1436,7 @@ function buildCTA() {
         .to(".gate__row", { opacity: 1, y: 0, duration: 0.75, ease: "flow" }, 0.86)
         .to("#gate-meta", {
           duration: 1.1,
-          scrambleText: { text: "LATEST RELEASE · WINDOWS & macOS · OPEN SOURCE", chars: "ABCDEF0123456789·", speed: 0.8 },
+          scrambleText: { text: "暂停发行 · 开发独立读取与导出底层", chars: "ABCDEF0123456789·", speed: 0.8 },
         }, 1.0)
         .call(() => stage.pulse(1.9), [], 1.05)
         .set(gate, { clearProps: "clipPath" }, 1.72) // 交还 hover 辉光的外溢空间
@@ -1500,7 +1500,7 @@ function setupCursor() {
     "03": (x, y) => "KEY 0x" + hx(x) + hx(y),             // 密钥
     "04": (x, y) => "0x" + hx(x) + "·" + hx(y),
     "05": () => "0 B · EGRESS",
-    "06": () => "GET LATEST ↓",
+    "06": () => "VIEW SOURCE ↗",
   };
   let act = "01";
   window.__cursorAct = (id) => {

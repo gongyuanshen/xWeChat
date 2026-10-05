@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import hashlib
 import json
@@ -242,7 +243,7 @@ def _compute_year_first_last_fallback(
     if not sender:
         return None, None
 
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -489,7 +490,7 @@ def _compute_sent_moment_refs_fallback(
         return None, None
 
     # Resolve all sessions (usernames) so we can map msg_xxx/chat_xxx tables back to usernames.
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -648,7 +649,7 @@ def _fetch_message_moment_payload(
     if not username:
         return None
 
-    db_path = account_dir / f"{ref.db_stem}.db"
+    db_path = resolve_account_database_dir(account_dir) / f"{ref.db_stem}.db"
     if not db_path.exists():
         return None
 
@@ -980,6 +981,13 @@ def _empty_night_companion() -> dict[str, Any]:
     }
 
 
+def _is_night_companion_session(username: str) -> bool:
+    """深夜伙伴仅统计普通微信单聊；此口径不改变聊天列表。"""
+    return not username.endswith(("@chatroom", "@openim")) and _should_keep_session(
+        username, include_official=False
+    )
+
+
 def _readable_night_index_text(token_text: Any, payload_json: Any) -> str:
     """message_fts.text 存的是逐字符分词文本（小写、单空格连接）。
 
@@ -1021,7 +1029,7 @@ def _night_partner_payload(
     night_messages: int,
     total: int,
 ) -> dict[str, Any]:
-    contact_rows = _load_contact_rows(account_dir / "contact.db", [username])
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", [username])
     display = _pick_display_name(contact_rows.get(username), username)
     avatar = _build_avatar_url(str(account_dir.name or ""), username) if username else ""
     share = round(night_messages * 100.0 / total, 1) if total > 0 else 0.0
@@ -1109,8 +1117,8 @@ def _compute_night_companion_from_index(
                 continue
             if not u or cnt <= 0:
                 continue
-            # 排除公众号/服务号/企业微信等非真人会话，计数与 partner 口径保持一致。
-            if not _should_keep_session(u, include_official=False):
+            # 企业微信、公众号和服务会话不计入总量、本人消息和伙伴占比。
+            if not _is_night_companion_session(u):
                 continue
             total += cnt
             mine += sent
@@ -1193,7 +1201,7 @@ def _compute_night_companion_fallback(
     start_ts, end_ts = _year_range_epoch_seconds(year)
     me = str(my_username or "").strip()
 
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -1248,10 +1256,7 @@ def _compute_night_companion_fallback(
 
             for table_name in tables:
                 username = resolve_username_from_table(table_name)
-                if not username or username.endswith("@chatroom"):
-                    continue
-                # 排除公众号/服务号/企业微信等非真人会话，与索引路径口径一致。
-                if not _should_keep_session(username, include_official=False):
+                if not username or not _is_night_companion_session(username):
                     continue
 
                 qt = _quote_ident(table_name)
@@ -1376,7 +1381,7 @@ def _compute_night_companion_fallback(
 
 
 def _compute_night_companion(*, account_dir: Path, year: int, my_username: str) -> dict[str, Any]:
-    """深夜守夜人：凌晨 0:00-5:59 的单聊双向消息统计（排除群聊 / biz 分片 / 系统消息）。"""
+    """凌晨 0:00-5:59 的普通微信单聊，排除企业微信、群聊、公众号、服务及系统消息。"""
 
     result = _compute_night_companion_from_index(
         account_dir=account_dir,
@@ -1448,7 +1453,7 @@ def build_card_01_cyber_schedule(
             usernames.append(ref_earliest.username)
         if ref_latest and ref_latest.username and ref_latest.username not in usernames:
             usernames.append(ref_latest.username)
-        contact_rows = _load_contact_rows(account_dir / "contact.db", usernames) if usernames else {}
+        contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", usernames) if usernames else {}
 
         if ref_earliest is not None:
             earliest_sent = _fetch_message_moment_payload(account_dir=account_dir, ref=ref_earliest, contact_rows=contact_rows)
@@ -1490,7 +1495,7 @@ def build_card_01_cyber_schedule(
         # Load contacts for new usernames not already in contact_rows.
         new_usernames = [u for u in extra_usernames if u not in contact_rows]
         if new_usernames:
-            extra_contacts = _load_contact_rows(account_dir / "contact.db", new_usernames)
+            extra_contacts = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", new_usernames)
             contact_rows.update(extra_contacts)
 
         if ref_first is not None:

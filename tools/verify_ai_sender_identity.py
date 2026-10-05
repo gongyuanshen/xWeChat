@@ -9,8 +9,6 @@ import httpx
 
 
 async def verify(args):
-    from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-    configure_native_core_entrypoint()
     from wechat_decrypt_tool.ai.agent_tools import ChatTools, normalize
     from wechat_decrypt_tool.ai.agent_references import material_references
     from wechat_decrypt_tool.ai.agent_budget import message_payload
@@ -75,7 +73,6 @@ async def verify(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--username', required=True)
     parser.add_argument('--start', type=int, required=True)
@@ -91,7 +88,6 @@ def main():
     if urlparse(args.backend).hostname not in ('127.0.0.1', 'localhost', '::1'):
         parser.error('只允许使用本机聊天接口')
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(args.data_dir.resolve())
-    os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
     asyncio.run(verify(args))
 
 

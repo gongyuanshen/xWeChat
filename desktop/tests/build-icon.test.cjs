@@ -19,9 +19,7 @@ test('icon build refreshes every brand asset from one PNG with all Windows icon 
   const source = path.join(root, 'frontend/public/logo.png');
   const script = path.join(root, 'desktop/scripts/build-icon.cjs');
   const pngs = ['desktop/src/icon.png', 'website/assets/img/logo.png'];
-  const icos = ['frontend/public/favicon.ico', 'desktop/src/icon.ico',
-    'desktop/resources/icon.ico', 'desktop/build/icon.ico', 'desktop/build/installerIcon.ico',
-    'desktop/build/uninstallerIcon.ico', 'desktop/build/installerHeaderIcon.ico'];
+  const icos = ['frontend/public/favicon.ico', 'desktop/src/icon.ico'];
   for (const relative of [...pngs, ...icos]) {
     const destination = path.join(root, relative);
     fs.mkdirSync(path.dirname(destination), { recursive: true });
@@ -42,6 +40,8 @@ test('icon build refreshes every brand asset from one PNG with all Windows icon 
       env: { ...process.env, NODE_PATH: path.join(desktopRoot, 'node_modules') },
     });
     assert.deepEqual(fs.readFileSync(source), sourceBytes, 'source image must stay unchanged');
+    assert.equal(fs.existsSync(path.join(root, 'desktop/build')), false, 'source icons must not create a packaging directory');
+    assert.equal(fs.existsSync(path.join(root, 'desktop/resources')), false, 'source icons must not create packaged resources');
 
     const expected = new PNG({ width: 32, height: 32 });
     input.data.copy(expected.data, 4 * 32 * 4);

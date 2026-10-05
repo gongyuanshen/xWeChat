@@ -11,10 +11,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from ..chat_accounts import resolve_chat_account_context
+from ..snapshot_registry import resolve_account_database_dir
 from ..chat_helpers import _resolve_msg_table_name_by_map
-from ..chat_realtime_reader import _account_username_candidates, _sql_literal
-from ..wcdb_realtime import WCDB_REALTIME, resolve_account_native_wxid
-from ..wcdb_realtime import exec_query as _wcdb_exec_query
 from .chat import _append_full_messages_from_rows, _postprocess_full_messages
 from .chat_media import _convert_silk_to_browser_audio
 from .general import _coerce_blob_bytes, _open_db_source, _resolve_general_contacts, _source_meta
@@ -428,148 +426,6 @@ def _quote_identifier(value: str) -> str:
     return '"' + str(value or "").replace('"', '""') + '"'
 
 
-def _attach_original_messages(
-    *,
-    ctx: Any,
-    items: list[dict[str, Any]],
-    base_url: str,
-) -> None:
-    targets_by_conversation: dict[str, dict[int, dict[str, Any]]] = {}
-    for item in items:
-        conversation = _text(item.get("conversationUsername"), max_len=260)
-        server_id = _safe_int(item.get("sourceId"), 0)
-        if conversation and server_id > 0:
-            targets_by_conversation.setdefault(conversation, {})[server_id] = item
-    if not targets_by_conversation:
-        return
-
-    try:
-        realtime = WCDB_REALTIME.ensure_connected(ctx.account_dir)
-    except Exception:
-        return
-
-    candidates = _account_username_candidates(realtime, ctx.account_dir)
-    my_rowid_select = "NULL AS __my_rowid"
-    if candidates:
-        values = ", ".join(_sql_literal(value) for value in candidates)
-        order = " ".join(
-            f"WHEN user_name = {_sql_literal(value)} THEN {index}" for index, value in enumerate(candidates)
-        )
-        my_rowid_select = (
-            "(SELECT rowid FROM Name2Id "
-            f"WHERE user_name IN ({values}) "
-            f"ORDER BY CASE {order} ELSE {len(candidates)} END LIMIT 1) AS __my_rowid"
-        )
-
-    pending = {
-        (conversation, server_id)
-        for conversation, rows in targets_by_conversation.items()
-        for server_id in rows
-    }
-    message_dir = Path(realtime.db_storage_dir) / "message"
-    db_paths = sorted(path for path in message_dir.glob("message_*.db") if path.is_file())
-    parsed_by_conversation: dict[str, list[dict[str, Any]]] = {}
-
-    for db_path in db_paths:
-        if not pending:
-            break
-        try:
-            with realtime.lock:
-                table_rows = _wcdb_exec_query(
-                    realtime.handle,
-                    kind="message",
-                    path=str(db_path),
-                    sql="SELECT name FROM sqlite_master WHERE type='table'",
-                )
-        except Exception:
-            continue
-        table_map = {
-            _text(row.get("name"), max_len=260).lower(): _text(row.get("name"), max_len=260)
-            for row in table_rows
-            if isinstance(row, dict) and _text(row.get("name"), max_len=260)
-        }
-
-        for conversation, server_map in targets_by_conversation.items():
-            wanted = sorted(server_id for server_id in server_map if (conversation, server_id) in pending)
-            if not wanted:
-                continue
-            table_name = _resolve_msg_table_name_by_map(table_map, conversation)
-            if not table_name:
-                continue
-            id_list = ",".join(str(server_id) for server_id in wanted)
-            table_sql = _quote_identifier(table_name)
-            # Same row shape as the realtime reader: resolve the sender via Name2Id
-            # and carry __my_rowid so the shared converter can tell sent from received.
-            joined_sql = (
-                f"SELECT m.*, n.user_name AS sender_username, {my_rowid_select} "
-                f"FROM {table_sql} m LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid "
-                f"WHERE m.server_id IN ({id_list})"
-            )
-            plain_sql = f"SELECT * FROM {table_sql} WHERE server_id IN ({id_list})"
-            rows = None
-            for candidate_sql in (joined_sql, plain_sql):
-                try:
-                    with realtime.lock:
-                        rows = _wcdb_exec_query(
-                            realtime.handle,
-                            kind="message",
-                            path=str(db_path),
-                            sql=candidate_sql,
-                        )
-                    break
-                except Exception:
-                    rows = None
-            if not rows:
-                continue
-            normalized_rows = []
-            for row in rows:
-                normalized = dict(row)
-                # Only backfill sender_username; injecting a computed_is_send default
-                # would be treated as an authoritative direction by the converter.
-                normalized.setdefault("sender_username", "")
-                normalized_rows.append(normalized)
-
-            merged: list[dict[str, Any]] = []
-            sender_usernames: list[str] = []
-            quote_usernames: list[str] = []
-            pat_usernames: set[str] = set()
-            try:
-                _append_full_messages_from_rows(
-                    merged=merged,
-                    sender_usernames=sender_usernames,
-                    quote_usernames=quote_usernames,
-                    pat_usernames=pat_usernames,
-                    rows=normalized_rows,
-                    db_path=db_path,
-                    table_name=table_name,
-                    username=conversation,
-                    account_dir=ctx.account_dir,
-                    is_group=conversation.endswith("@chatroom"),
-                    my_rowid=None,
-                    resource_conn=None,
-                    resource_chat_id=None,
-                    self_username=resolve_account_native_wxid(ctx.account_dir, realtime),
-                )
-                _postprocess_full_messages(
-                    merged=merged,
-                    sender_usernames=sender_usernames,
-                    quote_usernames=quote_usernames,
-                    pat_usernames=pat_usernames,
-                    account_dir=ctx.account_dir,
-                    username=conversation,
-                    base_url=base_url,
-                    contact_db_path=ctx.account_dir / "contact.db",
-                    head_image_db_path=ctx.account_dir / "head_image.db",
-                )
-            except Exception:
-                continue
-            parsed_by_conversation.setdefault(conversation, []).extend(merged)
-            for message in merged:
-                server_id = _safe_int(message.get("serverId"), 0)
-                target = server_map.get(server_id)
-                if target is not None:
-                    target["originalMessage"] = message
-                    pending.discard((conversation, server_id))
 
 
 def _favorite_text_parts(root: ET.Element | None, data_items: list[dict[str, Any]]) -> list[str]:
@@ -688,28 +544,10 @@ def _optional_rows(conn: Any, sql: str) -> list[dict[str, Any]]:
 @router.get("/api/favorites/media/voice", summary="读取收藏语音")
 def get_favorite_voice(server_id: int = Query(..., gt=0), account: Optional[str] = None):
     ctx = resolve_chat_account_context(account)
-    local_db_names = sorted(path.name for path in ctx.account_dir.glob("media_*.db") if path.is_file())
-    source_active = "realtime"
-    realtime_error = ""
-    try:
-        realtime = WCDB_REALTIME.ensure_connected(ctx.account_dir)
-    except Exception as exc:
-        realtime = None
-        realtime_error = str(exc)
-
-    if realtime is not None:
-        media_dir = Path(realtime.db_storage_dir) / "message"
-        db_names = sorted(path.name for path in media_dir.glob("media_*.db") if path.is_file())
-    else:
-        db_names = []
-
-    if not db_names and local_db_names:
-        source_active = "decrypted"
-        db_names = local_db_names
+    db_names = sorted(path.name for path in resolve_account_database_dir(ctx.account_dir).glob("media_*.db") if path.is_file())
+    source_active = "decrypted"
     if not db_names:
-        if realtime_error:
-            raise HTTPException(status_code=503, detail=f"实时语音库不可用：{realtime_error}")
-        raise HTTPException(status_code=404, detail="实时 media 数据库不存在。")
+        raise HTTPException(status_code=404, detail="No decrypted media database exists for this account.")
 
     voice_data = b""
     for db_name in db_names:
@@ -817,7 +655,7 @@ def list_favorites(
     q: str = "",
     kind: str = "all",
     tag_id: int = Query(0, ge=0),
-    source: str = Query("realtime", pattern="^(realtime|decrypted)$"),
+    source: str = Query("decrypted", pattern="^(auto|decrypted)$"),
     limit: int = Query(80, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -891,11 +729,6 @@ def list_favorites(
         if conversation_username and conversation_username in contact_map:
             item["conversationContact"] = contact_map[conversation_username]
 
-    _attach_original_messages(
-        ctx=ctx,
-        items=items,
-        base_url=str(request.base_url).rstrip("/"),
-    )
 
     type_counts: dict[str, int] = {}
     for item in items:

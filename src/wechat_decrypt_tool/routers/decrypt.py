@@ -12,8 +12,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
-from ..app_paths import get_output_databases_dir
-from ..chat_realtime_autosync import CHAT_REALTIME_AUTOSYNC
+from ..snapshot_registry import begin_legacy_database_write
+from ..app_paths import get_output_databases_dir, get_output_dir
+
 from ..logging_config import get_logger
 from ..path_fix import PathFixRoute
 from ..key_store import upsert_account_keys_in_store
@@ -61,29 +62,9 @@ def _resolve_decrypt_guard_accounts(db_storage_path: str) -> list[str]:
     return _normalize_decrypt_guard_accounts((scan_result.get("account_databases") or {}).keys())
 
 
-def _get_realtime_sync_all_lock(account: str):
-    from .chat import _realtime_sync_all_lock
-
-    return _realtime_sync_all_lock(account)
-
-
 def _release_decrypt_account_guards(guards: list[tuple[str, Any]], *, reason: str) -> None:
-    for account, lock in reversed(list(guards or [])):
-        try:
-            lock.release()
-            logger.info("[decrypt] released realtime sync_all lock account=%s reason=%s", account, reason)
-        except Exception:
-            logger.exception("[decrypt] release realtime sync_all lock failed account=%s reason=%s", account, reason)
-
-        try:
-            CHAT_REALTIME_AUTOSYNC.resume_account(account, reason=reason)
-            logger.info("[decrypt] resumed realtime autosync for account after decrypt account=%s reason=%s", account, reason)
-        except Exception:
-            logger.exception(
-                "[decrypt] resume realtime autosync failed account=%s reason=%s",
-                account,
-                reason,
-            )
+    for account, lease in reversed(list(guards or [])):
+        lease.release()
 
 
 async def _release_decrypt_guards_after_worker(
@@ -158,37 +139,13 @@ def _defer_decrypt_guard_acquire_cleanup(
 
 def _acquire_decrypt_account_guards(accounts: Any, *, reason: str) -> list[tuple[str, Any]]:
     guards: list[tuple[str, Any]] = []
-
-    for account in _normalize_decrypt_guard_accounts(accounts):
-        paused = False
-        try:
-            CHAT_REALTIME_AUTOSYNC.pause_account(account, reason=reason)
-            paused = True
-            logger.info("[decrypt] paused realtime autosync for account during decrypt account=%s reason=%s", account, reason)
-
-            lock = _get_realtime_sync_all_lock(account)
-            logger.info("[decrypt] waiting realtime sync_all lock account=%s reason=%s", account, reason)
-            lock.acquire()
-            logger.info("[decrypt] acquired realtime sync_all lock account=%s reason=%s", account, reason)
-            guards.append((account, lock))
-        except Exception:
-            if paused:
-                try:
-                    CHAT_REALTIME_AUTOSYNC.resume_account(account, reason=f"{reason}:acquire_failed")
-                    logger.info(
-                        "[decrypt] resumed realtime autosync after guard acquire failure account=%s reason=%s",
-                        account,
-                        f"{reason}:acquire_failed",
-                    )
-                except Exception:
-                    logger.exception(
-                        "[decrypt] resume realtime autosync after guard acquire failure failed account=%s reason=%s",
-                        account,
-                        reason,
-                    )
-            _release_decrypt_account_guards(guards, reason=reason)
-            raise
-
+    try:
+        for account in _normalize_decrypt_guard_accounts(accounts):
+            lease = begin_legacy_database_write(get_output_databases_dir() / account)
+            guards.append((account, lease))
+    except Exception:
+        _release_decrypt_account_guards(guards, reason=reason)
+        raise
     return guards
 
 
@@ -247,15 +204,15 @@ def _db_key_persistence_rejection(account_result: dict[str, Any]) -> str:
         if role != "other"
     }
 
-    # Current WeChat 4.x splits realtime data between session.db and one or
+    # Current WeChat 4.x splits account data between session.db and one or
     # more message_N.db files.  A raw encryption key captured from the later
     # two-iteration HMAC KDF can validate exactly one database, so accepting
     # any-success here silently replaces the reusable account passphrase and
-    # makes native-core fail on its next session probe.
+    # makes subsequent account database decryption fail.
     if "session" in role_presence or "message" in role_presence:
         missing = [role for role in ("session", "message") if role not in verified_roles]
         if missing:
-            return "required realtime databases did not verify: " + ",".join(missing)
+            return "required account databases did not verify: " + ",".join(missing)
         return ""
 
     # Older layouts may keep both roles in MicroMsg.db.  It still must have
@@ -298,50 +255,7 @@ def _save_db_key_for_account(account: str, key: str, account_result: dict[str, A
         db_key_source_db_storage_path=source_db_storage_path or None,
         raise_on_write_error=True,
     )
-    # Import lazily: wcdb_realtime depends on the key store and media helpers,
-    # while this router is imported during API startup.  Once the new key and
-    # source paths are durable, cached handles for either account spelling must
-    # not keep reading the previous db_storage directory.
-    from ..wcdb_realtime import WCDB_REALTIME
-
-    invalidated_accounts: list[str] = []
-    for candidate in (str(account), *aliases):
-        candidate = str(candidate or "").strip()
-        if not candidate or candidate in invalidated_accounts:
-            continue
-        WCDB_REALTIME.disconnect(candidate)
-        invalidated_accounts.append(candidate)
-
-    cache_root = source_db_storage_path
-    if not cache_root and source_wxid_dir:
-        cache_root = str(Path(source_wxid_dir) / "db_storage")
-    if cache_root:
-        try:
-            from ..native_core_realtime import prepare_account_raw_key_cache
-
-            prepared = prepare_account_raw_key_cache(
-                Path(cache_root),
-                key,
-                account=str(account),
-            )
-            logger.info(
-                "[decrypt] prepared encrypted native raw-key cache account=%s databases=%s",
-                str(account),
-                prepared,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[decrypt] native raw-key cache preparation skipped account=%s error=%s",
-                str(account),
-                str(exc).strip() or exc.__class__.__name__,
-            )
-    logger.info(
-        "[decrypt] saved db key and invalidated realtime connection account=%s aliases=%s source_wxid_dir=%s source_db_storage_path=%s",
-        str(account),
-        aliases,
-        source_wxid_dir,
-        source_db_storage_path,
-    )
+    logger.info("[decrypt] saved independently verified db key account=%s", account)
     return True
 
 
@@ -377,6 +291,39 @@ class DecryptRequest(BaseModel):
 
     key: str = Field(..., description="解密密钥，64位十六进制字符串")
     db_storage_path: str = Field(..., description="数据库存储路径，必须是绝对路径")
+
+
+@router.post("/api/decrypt/snapshot", summary="构建独立验证快照，不替换当前账号")
+async def build_database_snapshot(request: DecryptRequest):
+    from ..independent_snapshot import SnapshotBuildError, build_verified_snapshot
+    from ..snapshot_registry import begin_account_work
+    from ..wechat_decrypt import _derive_account_name_from_path
+
+    if re.fullmatch(r"[0-9a-fA-F]{64}", request.key) is None:
+        raise HTTPException(status_code=400, detail="密钥必须是64位十六进制字符串")
+    source = Path(request.db_storage_path)
+    if not source.is_absolute() or source.name.lower() != "db_storage":
+        raise HTTPException(status_code=400, detail="必须指定完整的绝对 db_storage 路径")
+    lease = begin_account_work(get_output_databases_dir() / _derive_account_name_from_path(source))
+    worker = asyncio.create_task(asyncio.to_thread(
+        build_verified_snapshot, source, request.key, get_output_dir() / "verified_snapshots",
+    ))
+    def finished(task):
+        lease.release()
+        if not task.cancelled() and task.exception() is not None:
+            error = task.exception()
+            logger.error("Independent snapshot worker failed: %s", error,
+                         exc_info=(type(error), error, error.__traceback__))
+    worker.add_done_callback(finished)
+    _track_deferred_decrypt_cleanup(worker)
+    try:
+        # A disconnected request cannot cancel the real thread or its lease.
+        return await asyncio.shield(worker)
+    except SnapshotBuildError as exc:
+        status_code = {"validation": 400, "source_changed": 409, "decrypt": 422}.get(exc.stage, 500)
+        raise HTTPException(status_code=status_code, detail={
+            "code": "snapshot_build_failed", "stage": exc.stage, "message": str(exc),
+        }) from exc
 
 
 @router.post("/api/decrypt", summary="解密微信数据库")
@@ -766,7 +713,7 @@ async def decrypt_databases_stream(
                 "diagnostic_warning_count": int(diagnostic_warning_count),
             }
 
-            # Save db key for frontend autofill and realtime WCDB access.
+            # Save the verified db key for frontend autofill and later snapshot decryption.
             db_key_persisted, db_key_persistence_errors = _persist_db_keys(account_results, k)
             result["db_key_persisted"] = db_key_persisted
             result["db_key_persistence_errors"] = db_key_persistence_errors

@@ -19,6 +19,9 @@ from .agent_budget import output_limit
 from .model_execution import model_policy
 from .model_selection import SelectedModel, selected_model
 from .providers import ProviderFailure, audit_task_id, public_profile
+from ..app_paths import get_output_dir
+from ..account_workers import account_to_thread
+from ..snapshot_registry import account_work, create_account_task
 
 
 ACTIVE = {'queued', 'running'}
@@ -37,12 +40,8 @@ def model_source(model):
 def self_username(account):
     from ..account_identity import resolve_account_self_username
     from ..chat_helpers import _resolve_account_dir
-    from ..wcdb_realtime import WCDB_REALTIME, resolve_account_native_wxid
-    from .insights import source_for_account
     account_dir = _resolve_account_dir(account)
-    if source_for_account(account) == 'snapshot':
-        return resolve_account_self_username(account_dir)
-    return resolve_account_native_wxid(account_dir, WCDB_REALTIME.get_connection(account_dir.name))
+    return resolve_account_self_username(account_dir)
 
 
 class LiveCancelled(Exception):
@@ -88,66 +87,69 @@ class InsightLiveService:
 
     def state(self, options):
         data = LiveStateInput.model_validate(options).model_dump()
-        scope, _ = self.scope(data)
-        # A changed visible original invalidates every presentation of its old conclusion,
-        # including header and batch restoration. Keep evidence; only a new analysis replaces it.
-        with self.store.lock:
-            for ref in data['messages']:
-                old = self.store.get('insight_live_label', digest([scope['id'], ref['identity']]))
-                if old and (old['fingerprint'] != ref['fingerprint'] or old['time'] != ref['time']):
-                    self.store.put('insight_live_label', old | dict(invalidated=True), account=scope['account'])
-        saved = self.store.get('insight_live_scope', scope['id'])
-        batch = self.get_batch(saved['last_batch_id'], scope['account']) if saved and saved.get('last_batch_id') else None
-        return dict(scope_id=scope['id'], enabled=bool(saved and saved['enabled']),
-            items=[item for ref in data['messages'] if (item := self._cached(scope, ref)) is not None],
-            batch=batch, mood=self.mood(scope))
+        with account_work(get_output_dir() / 'databases' / data['account']):
+            scope, _ = self.scope(data)
+            # A changed visible original invalidates every presentation of its old conclusion,
+            # including header and batch restoration. Keep evidence; only a new analysis replaces it.
+            with self.store.lock:
+                for ref in data['messages']:
+                    old = self.store.get('insight_live_label', digest([scope['id'], ref['identity']]))
+                    if old and (old['fingerprint'] != ref['fingerprint'] or old['time'] != ref['time']):
+                        self.store.put('insight_live_label', old | dict(invalidated=True), account=scope['account'])
+            saved = self.store.get('insight_live_scope', scope['id'])
+            batch = self.get_batch(saved['last_batch_id'], scope['account']) if saved and saved.get('last_batch_id') else None
+            return dict(scope_id=scope['id'], enabled=bool(saved and saved['enabled']),
+                items=[item for ref in data['messages'] if (item := self._cached(scope, ref)) is not None],
+                batch=batch, mood=self.mood(scope))
 
     async def settings(self, options):
         data = LiveSettingsInput.model_validate(options).model_dump()
-        scope, _ = self.scope(data)
-        with self.parent.ai.account_lifecycle_lock, self.store.lock:
-            if self.parent.stopping:
-                raise ValueError('分析服务正在停止')
-            self.parent.ai.deleted_accounts.discard(scope['account'])
-            self.store.revoked_accounts.discard(scope['account'])
-            previous = self.store.get('insight_live_scope', scope['id']) or {}
-            self.store.put('insight_live_scope', scope | dict(enabled=data['enabled'],
-                last_batch_id=previous.get('last_batch_id')), account=scope['account'])
-        if not data['enabled']:
-            for batch in self._batches(scope['account']):
-                if batch['scope_id'] == scope['id'] and batch['status'] in ACTIVE:
-                    await self.cancel(batch['id'], scope['account'])
-        return self.state({k: scope[k] for k in LiveScope.model_fields})
+        with account_work(get_output_dir() / 'databases' / data['account']):
+            scope, _ = self.scope(data)
+            with self.parent.ai.account_lifecycle_lock, self.store.lock:
+                if self.parent.stopping:
+                    raise ValueError('分析服务正在停止')
+                self.parent.ai.deleted_accounts.discard(scope['account'])
+                self.store.revoked_accounts.discard(scope['account'])
+                previous = self.store.get('insight_live_scope', scope['id']) or {}
+                self.store.put('insight_live_scope', scope | dict(enabled=data['enabled'],
+                    last_batch_id=previous.get('last_batch_id')), account=scope['account'])
+            if not data['enabled']:
+                for batch in self._batches(scope['account']):
+                    if batch['scope_id'] == scope['id'] and batch['status'] in ACTIVE:
+                        await self.cancel(batch['id'], scope['account'])
+            return self.state({k: scope[k] for k in LiveScope.model_fields})
 
     def create_batch(self, options):
-        from .insights import source_for_account
         from .insight_label_stream import delivery_mode
         data = LiveBatchInput.model_validate(options).model_dump()
-        scope, profile = self.scope(data)
-        if scope['engine'] == 'laya':
-            self.parent.local_models.require_ready()
-        mode = 'local' if profile is None else delivery_mode(profile)
-        with self.parent.ai.account_lifecycle_lock, self.store.lock:
-            saved = self.store.get('insight_live_scope', scope['id'])
-            if self.parent.stopping or scope['account'] in self.store.revoked_accounts:
-                raise ValueError('分析服务正在停止或账号数据已清除')
-            if not saved or not saved['enabled']:
-                raise ValueError('请先开启当前会话的意图识别')
-            previous = self.store.get('insight_live_batch', saved['last_batch_id']) if saved.get('last_batch_id') else None
-            if previous and previous['status'] in ACTIVE:
-                raise ValueError('当前模型已有批次正在分析，请等待完成')
-            if previous and previous['status'] == 'failed' and not data['retry']:
-                raise ValueError('上个批次失败，自动分析已停止；请明确点击重试')
-            refs = [ref for ref in data['messages'] if self._cached(scope, ref) is None]
-            batch = self.store.put('insight_live_batch', scope | dict(id=uuid.uuid4().hex,
-                messages=refs, requested_messages=data['messages'], context=data['context'], status='queued', created=time.time(),
-                data_source=source_for_account(scope['account']), delivery_mode=mode,
-                progress=dict(total=len(refs), analyzed=0), error=None, context_task_ids=[]), account=scope['account'])
-            saved['last_batch_id'] = batch['id']
-            self.store.put('insight_live_scope', saved, account=scope['account'])
-            self.jobs[batch['id']] = asyncio.get_running_loop().create_task(self.execute(batch['id'], copy.deepcopy(profile)))
-        self._event(batch)
-        return self.get_batch(batch['id'], scope['account'])
+        with account_work(get_output_dir() / 'databases' / data['account']):
+            scope, profile = self.scope(data)
+            if scope['engine'] == 'laya':
+                self.parent.local_models.require_ready()
+            mode = 'local' if profile is None else delivery_mode(profile)
+            with self.parent.ai.account_lifecycle_lock, self.store.lock:
+                saved = self.store.get('insight_live_scope', scope['id'])
+                if self.parent.stopping or scope['account'] in self.store.revoked_accounts:
+                    raise ValueError('分析服务正在停止或账号数据已清除')
+                if not saved or not saved['enabled']:
+                    raise ValueError('请先开启当前会话的意图识别')
+                previous = self.store.get('insight_live_batch', saved['last_batch_id']) if saved.get('last_batch_id') else None
+                if previous and previous['status'] in ACTIVE:
+                    raise ValueError('当前模型已有批次正在分析，请等待完成')
+                if previous and previous['status'] == 'failed' and not data['retry']:
+                    raise ValueError('上个批次失败，自动分析已停止；请明确点击重试')
+                refs = [ref for ref in data['messages'] if self._cached(scope, ref) is None]
+                batch = self.store.put('insight_live_batch', scope | dict(id=uuid.uuid4().hex,
+                    messages=refs, requested_messages=data['messages'], context=data['context'], status='queued', created=time.time(),
+                    data_source='snapshot', delivery_mode=mode,
+                    progress=dict(total=len(refs), analyzed=0), error=None, context_task_ids=[]), account=scope['account'])
+                saved['last_batch_id'] = batch['id']
+                self.store.put('insight_live_scope', saved, account=scope['account'])
+                self.jobs[batch['id']] = create_account_task(get_output_dir() / 'databases' / scope['account'],
+                        self.execute, batch['id'], copy.deepcopy(profile))
+            self._event(batch)
+            return self.get_batch(batch['id'], scope['account'])
 
     def _batches(self, account=None):
         return self.store.list('insight_live_batch', account)
@@ -189,7 +191,7 @@ class InsightLiveService:
             return [], []
         times = [ref['time'] for ref in refs.values()]
         pages = self.parent.reader(batch['account'], batch['username'], min(times), max(times),
-            require_realtime=batch['data_source'] == 'realtime', page_size=100,
+            page_size=100,
             checkpoint=lambda: self._check(batch['id']))
         material = {}
         try:
@@ -287,8 +289,8 @@ class InsightLiveService:
         self._event(self._check(batch['id']), label=record, mood=self.mood(dict(id=batch['scope_id'],
             account=batch['account'], username=batch['username'], self_username=batch['self_username'])))
 
-    async def _thread(self, function, *args, **kwargs):
-        operation = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    async def _thread(self, account, function, *args, **kwargs):
+        operation = asyncio.create_task(account_to_thread(get_output_dir() / 'databases' / account, function, *args, **kwargs))
         try:
             return await asyncio.shield(operation)
         finally:
@@ -305,7 +307,7 @@ class InsightLiveService:
             async with lock:
                 batch = self._check(id)
                 self._update(id, status='running')
-                items, context = await self._thread(self._read, batch)
+                items, context = await self._thread(batch['account'], self._read, batch)
                 self._check(id)
                 priors = self.portraits(batch, items)
                 self._update(id, context_task_ids=[json.loads(value)['task_id'] for value in priors.values()])
@@ -319,7 +321,7 @@ class InsightLiveService:
                         try:
                             for item in items:
                                 self._check(id)
-                                result = await self._thread(predict_message, runtime, item, context,
+                                result = await self._thread(batch['account'], predict_message, runtime, item, context,
                                     priors.get(item['sender_id']), private_chat=not batch['username'].endswith('@chatroom'))
                                 self._save(batch, item, result['label'], allowed, result['raw'])
                                 context = (context + [item])[-3:]

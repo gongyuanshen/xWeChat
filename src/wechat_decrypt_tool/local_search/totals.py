@@ -1,5 +1,6 @@
 """先准备完整消息快照，再发布固定总量；暂停继续不重新统计或更改分母。"""
-import asyncio
+from ..account_workers import account_to_thread
+from ..app_paths import get_output_databases_dir
 import hashlib
 import time
 
@@ -26,8 +27,9 @@ class MessageTotals:
         return plan
 
     async def count_message_total(self, job, check):
-        plan = await asyncio.to_thread(self.message_plan, job)
-        metadata = await asyncio.to_thread(plan.metadata)
+        account_dir = get_output_databases_dir() / job["account"]
+        plan = await account_to_thread(account_dir, self.message_plan, job)
+        metadata = await account_to_thread(account_dir, plan.metadata)
         if metadata['ready']:
             self.save_message_total(job, status='ready', value=metadata['total'], fixed=True, estimated=False)
             return plan
@@ -42,7 +44,7 @@ class MessageTotals:
             for position in range(metadata['start_index'], len(targets)):
                 await self.yield_to_queries(check)
                 check()
-                state = await asyncio.to_thread(plan.segment, position)
+                state = await account_to_thread(account_dir, plan.segment, position)
                 if state['complete']:
                     continue
                 target = targets[position]
@@ -54,11 +56,11 @@ class MessageTotals:
                         check()
                         result = await next_page()
                         check()
-                        await asyncio.to_thread(plan.append, position, result, check)
+                        await account_to_thread(account_dir, plan.append, position, result, check)
                         if not result.get('has_more', False):
                             break
             check()
-            metadata = await asyncio.to_thread(plan.freeze, len(targets))
+            metadata = await account_to_thread(account_dir, plan.freeze, len(targets))
             self.save_message_total(job, status='ready', value=metadata['total'], fixed=True, estimated=False)
             return plan
         except InferenceFailure:

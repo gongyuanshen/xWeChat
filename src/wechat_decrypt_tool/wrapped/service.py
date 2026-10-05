@@ -29,7 +29,7 @@ logger = get_logger(__name__)
 # an older partial cache.
 _IMPLEMENTED_UPTO_ID = 7
 # Bump this when we change card payloads/ordering while keeping the same implemented_upto.
-_CACHE_VERSION = 39
+_CACHE_VERSION = 40
 
 
 # "Manifest" is used by the frontend to render the deck quickly, then lazily fetch each card.
@@ -469,9 +469,6 @@ def build_wrapped_annual_meta(
     if available_years and y not in available_years:
         y = int(available_years[0])
 
-    if refresh:
-        # The manifest itself is static today, but we keep the flag for API symmetry.
-        pass
 
     return {
         "account": account_dir.name,

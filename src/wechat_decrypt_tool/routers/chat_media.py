@@ -12,15 +12,17 @@ import sys
 import time
 import re
 from pathlib import Path
-from typing import Any, Optional
-from urllib.parse import urlparse
+from typing import Any, Literal, Optional
+from urllib.parse import quote, urlparse
 
 import requests
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, Field, StrictStr, conint
+from fastapi.routing import APIRoute
+from pydantic import BaseModel, Field, conint, field_validator
 
-from ..account_source_policy import account_prefers_decrypted_snapshot
+
+from ..account_workers import AccountFileResponse, account_to_thread
 from ..avatar_cache import (
     AVATAR_CACHE_TTL_SECONDS,
     avatar_cache_entry_file_exists,
@@ -37,46 +39,15 @@ from ..avatar_cache import (
     write_avatar_cache_payload,
 )
 from ..logging_config import get_logger
-from ..source_fallback import normalize_data_source
-from ..media_helpers import (
-    _convert_silk_to_browser_audio,
-    _decrypt_emoticon_aes_cbc,
-    _detect_image_extension,
-    _detect_image_media_type,
-    _download_http_bytes,
-    _ensure_decrypted_resource_for_md5,
-    _fallback_search_media_by_file_id,
-    _fallback_search_media_by_md5,
-    _get_decrypted_resource_path,
-    _get_resource_dir,
-    _guess_media_type_by_path,
-    _is_probably_valid_image,
-    _iter_emoji_source_candidates,
-    _iter_media_source_candidates,
-    _order_media_candidates,
-    _read_and_maybe_decrypt_media,
-    _resolve_account_db_storage_dir,
-    _resolve_account_dir,
-    _resolve_account_wxid_dir,
-    _resolve_media_path_for_kind,
-    _resolve_media_path_from_hardlink,
-    _try_fetch_emoticon_from_remote,
-    _try_find_decrypted_resource,
-    _try_strip_media_prefix,
-)
-from ..chat_helpers import (
-    _decode_message_content,
-    _extract_md5_from_packed_info,
-    _extract_xml_attr,
-    _extract_xml_tag_or_attr,
-    _extract_xml_tag_text,
-    _load_contact_rows,
-    _pick_avatar_url,
-)
+from ..data_source import normalize_data_source
+from ..snapshot_registry import create_account_task, resolve_account_database_dir
+from ..media_helpers import _convert_silk_to_browser_audio, _detect_image_extension, _detect_image_media_type, _ensure_decrypted_resource_for_md5, _find_ffmpeg_executable, _fallback_search_media_by_file_id, _fallback_search_media_by_md5, _get_decrypted_resource_path, _get_resource_dir, _guess_media_type_by_path, _is_probably_valid_image, _iter_emoji_source_candidates, _iter_media_source_candidates, _order_media_candidates, _read_and_maybe_decrypt_media, _resolve_account_db_storage_dir, _resolve_account_dir, _resolve_account_wxid_dir, _resolve_media_path_for_kind, _resolve_media_path_from_hardlink, _try_find_decrypted_resource, _try_strip_media_prefix, _validate_image_bytes
+from ..chat_helpers import _extract_md5_from_packed_info, _load_contact_rows, _pick_avatar_url
 from ..path_fix import PathFixRoute
 from ..perf_trace import create_perf_trace
 from ..runtime_settings import remote_calls_enabled
-from ..wcdb_realtime import WCDB_REALTIME, exec_query as _wcdb_exec_query, get_avatar_urls as _wcdb_get_avatar_urls
+from .chat_send import get_wechat_bridge
+
 from ..voice_transcription import (
     VOICE_MODEL_DOWNLOAD_MANAGER,
     VOICE_TRANSCRIPTION_BATCH_MANAGER,
@@ -89,15 +60,7 @@ from ..voice_transcription import (
     set_voice_transcription_device,
     set_voice_transcription_model,
 )
-from ..native_voice_transcription import (
-    NativeVoiceTriggerError,
-    lookup_native_voice_transcript_cache,
-    normalize_native_voice_conversation,
-    parse_native_voice_message_id,
-    resolve_native_voice_target,
-    trigger_native_voice_transcription,
-)
-from ..native_core_voice_asr import native_core_voice_asr_status as native_bridge_status
+
 
 logger = get_logger(__name__)
 
@@ -117,6 +80,25 @@ class VoiceTranscriptionRequest(BaseModel):
     force: bool = Field(False, description="忽略缓存并重新识别")
 
 
+class NativeVoiceTranscriptionRequest(BaseModel):
+    account: str = Field(..., strict=True, min_length=1, description="当前账号目录名")
+    username: str = Field(..., strict=True, min_length=1, description="目标会话 username")
+    display_name: Optional[str] = Field(None, strict=True, description="目标会话展示名称")
+    message_id: str = Field(
+        ..., strict=True, pattern=r"(?i)^message_[0-9]+:(?:Msg|Chat)_[0-9a-f]{32}:[1-9][0-9]*$",
+        description="包含分库、消息表和 localId 的完整消息 ID",
+    )
+    server_id: str = Field(..., strict=True, pattern=r"^[1-9][0-9]*$", description="准确的十进制服务端 ID 字符串")
+    create_time: int = Field(..., strict=True, gt=0, description="消息创建时间，Unix 秒")
+
+    @field_validator("account", "username")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("字段不能为空或纯空白字符")
+        return value
+
+
 class VoiceTranscriptionCacheLookupRequest(BaseModel):
     server_ids: list[str] = Field(default_factory=list, description="语音消息服务端 ID 列表（精确字符串，避免 JS Number 精度丢失）")
     account: Optional[str] = Field(None, description="账号目录名")
@@ -130,37 +112,10 @@ class VoiceTranscriptionSettingsRequest(BaseModel):
 class VoiceTranscriptionBatchRequest(BaseModel):
     account: Optional[str] = Field(None, description="账号目录名")
     force: bool = Field(False, description="忽略现有本地模型缓存并重新识别")
-    engine: StrictStr = Field("local", description="批量转写方式：local 或 wechat-native")
+    engine: Literal["local"] = Field("local", description="本地批量转写")
     concurrency: Optional[conint(strict=True, ge=0)] = Field(  # type: ignore[valid-type]
         None,
         description="并发语音数；0 或省略表示自动，正整数不设固定上限",
-    )
-
-
-class NativeVoiceTranscriptionTriggerRequest(BaseModel):
-    server_id: Optional[StrictStr] = Field(
-        None,
-        description="语音消息服务端 ID（精确十进制字符串）",
-    )
-    local_id: Optional[StrictStr] = Field(
-        None,
-        description="语音消息本地 ID（精确十进制字符串）",
-    )
-    account: StrictStr = Field(..., description="账号目录名（必填）")
-    username: StrictStr = Field(..., description="会话 username")
-
-
-class NativeVoiceTranscriptCacheLookupItem(BaseModel):
-    server_id: StrictStr = Field(..., description="语音消息服务端 ID（精确十进制字符串）")
-    local_id: StrictStr = Field(..., description="语音消息本地 ID（精确十进制字符串）")
-
-
-class NativeVoiceTranscriptCacheLookupRequest(BaseModel):
-    account: StrictStr = Field(..., description="账号目录名（必填）")
-    username: StrictStr = Field(..., description="会话 username")
-    items: list[NativeVoiceTranscriptCacheLookupItem] = Field(
-        default_factory=list,
-        description="当前会话中待恢复的精确消息 identity",
     )
 
 
@@ -366,76 +321,8 @@ def _resolve_video_path_from_weflow_index(
     return None
 
 
-_REALTIME_VIDEO_HARDLINK_CACHE_TTL_SECONDS = 120.0
-_REALTIME_VIDEO_HARDLINK_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
-
-
 def _sql_quote(value: str) -> str:
     return "'" + str(value or "").replace("'", "''") + "'"
-
-
-def _resolve_video_file_token_from_realtime_hardlink(account_dir: Path, md5: str) -> str:
-    """Resolve XML video md5 to the real local msg/video basename via encrypted hardlink.db."""
-    md5_norm = _normalize_video_lookup_key(md5)
-    if not md5_norm:
-        return ""
-
-    cache_key = (str(account_dir.name), md5_norm)
-    now = time.monotonic()
-    cached = _REALTIME_VIDEO_HARDLINK_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < _REALTIME_VIDEO_HARDLINK_CACHE_TTL_SECONDS:
-        return cached[1]
-
-    resolved = ""
-    try:
-        conn = WCDB_REALTIME.ensure_connected(account_dir, timeout=5.0)
-        hardlink_db_path = Path(conn.db_storage_dir) / "hardlink" / "hardlink.db"
-        if not hardlink_db_path.exists():
-            return ""
-        md5_lit = _sql_quote(md5_norm)
-        sql = (
-            "SELECT md5, file_name, file_size, modify_time, dir1, dir2 "
-            "FROM video_hardlink_info_v4 "
-            f"WHERE md5 = {md5_lit} OR file_name LIKE '%' || {md5_lit} || '%' "
-            "ORDER BY modify_time DESC, dir1 DESC, rowid DESC LIMIT 1"
-        )
-        rows = _wcdb_exec_query(conn.handle, kind="hardlink", path=str(hardlink_db_path), sql=sql) or []
-        if rows:
-            file_name = str((rows[0] or {}).get("file_name") or "").strip()
-            resolved = _normalize_video_lookup_key(file_name) or file_name.lower()
-    except Exception:
-        resolved = ""
-
-    _REALTIME_VIDEO_HARDLINK_CACHE[cache_key] = (now, resolved)
-    return resolved
-
-
-def _resolve_video_path_from_realtime_hardlink(
-    *,
-    account_dir: Path,
-    md5: str,
-    wxid_dir: Optional[Path],
-    db_storage_dir: Optional[Path],
-    want_thumb: bool,
-) -> tuple[Optional[Path], str]:
-    token = _resolve_video_file_token_from_realtime_hardlink(account_dir, md5)
-    if not token:
-        return None, ""
-    path = _resolve_video_path_from_weflow_index(
-        md5=token,
-        wxid_dir=wxid_dir,
-        db_storage_dir=db_storage_dir,
-        want_thumb=want_thumb,
-    )
-    if path is not None:
-        return path, token
-    path = _fast_probe_video_path_by_md5(
-        md5=token,
-        wxid_dir=wxid_dir,
-        db_storage_dir=db_storage_dir,
-        want_thumb=want_thumb,
-    )
-    return path, token
 
 
 def _build_cached_media_response(request: Optional[Request], data: bytes, media_type: str) -> Response:
@@ -469,8 +356,6 @@ def _image_candidate_variant_rank(path: Path) -> int:
     if stem.endswith(("_t", ".t")):
         return 4
     return 2
-
-
 
 
 def _image_candidate_stat(path: Optional[Path]) -> tuple[int, float]:
@@ -578,7 +463,6 @@ def _resolve_avatar_remote_url(
     *,
     account_dir: Path,
     username: str,
-    prefer_realtime: bool = True,
 ) -> str:
     u = str(username or "").strip()
     if not u:
@@ -586,25 +470,13 @@ def _resolve_avatar_remote_url(
 
     # 1) contact.db first (cheap local lookup)
     try:
-        rows = _load_contact_rows(account_dir / "contact.db", [u])
+        rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", [u])
         row = rows.get(u)
         raw = str(_pick_avatar_url(row) or "").strip()
         if raw.lower().startswith(("http://", "https://")):
             return normalize_avatar_source_url(raw)
     except Exception:
         pass
-
-    # 2) WCDB fallback (more complete on enterprise/openim IDs)
-    if prefer_realtime:
-        try:
-            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            with wcdb_conn.lock:
-                mp = _wcdb_get_avatar_urls(wcdb_conn.handle, [u])
-            wa = str(mp.get(u) or "").strip()
-            if wa.lower().startswith(("http://", "https://")):
-                return normalize_avatar_source_url(wa)
-        except Exception:
-            pass
 
     return ""
 
@@ -1267,10 +1139,6 @@ async def get_chat_avatar(username: str, account: Optional[str] = None, source: 
     account_name = str(account_dir.name or "").strip()
     user_key = str(username or "").strip()
     requested_source = normalize_data_source(source, "auto")
-    if requested_source not in {"auto", "realtime", "decrypted"}:
-        raise HTTPException(status_code=400, detail="Invalid source. Use auto, realtime, or decrypted.")
-    if requested_source == "auto" and account_prefers_decrypted_snapshot(account_dir):
-        requested_source = "decrypted"
     if _avatar_trace_enabled():
         _trace_id, trace = create_perf_trace(
             logger,
@@ -1300,11 +1168,11 @@ async def get_chat_avatar(username: str, account: Optional[str] = None, source: 
         hasFile=bool(cached_file is not None),
     )
 
-    head_image_db_path = account_dir / "head_image.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
     if not head_image_db_path.exists():
         # A direct account may not ship a decrypted head_image.db. Keep the
         # cache fast path, then treat the local source as empty and continue
-        # to the WCDB/remote fallback below.
+        # to the contact avatar URL lookup below.
         if cached_file is not None and user_entry:
             headers = build_avatar_cache_response_headers(user_entry)
             trace("response:ready", result="user-cache-hit-no-head-image", mediaType=str(user_entry.get("media_type") or ""))
@@ -1396,11 +1264,10 @@ async def get_chat_avatar(username: str, account: Optional[str] = None, source: 
     finally:
         conn.close()
 
-    # 2) Fallback: remote avatar URL (contact/WCDB), cache by URL.
+    # 2) Remote avatar URL from contact.db, cached by URL.
     remote_url = _resolve_avatar_remote_url(
         account_dir=account_dir,
         username=user_key,
-        prefer_realtime=requested_source != "decrypted",
     )
     trace("remote-url:resolved", hasRemoteUrl=bool(remote_url))
     if remote_url and is_avatar_cache_enabled():
@@ -1515,7 +1382,7 @@ async def get_chat_avatar(username: str, account: Optional[str] = None, source: 
         lm0 = str((url_entry or {}).get("last_modified") or "").strip()
         try:
             trace("remote-download:start", hasEtag=bool(etag0), hasLastModified=bool(lm0))
-            payload, ct, etag_new, lm_new, not_modified = await asyncio.to_thread(
+            payload, ct, etag_new, lm_new, not_modified = await account_to_thread(account_dir,
                 _download_remote_avatar,
                 remote_url,
                 etag=etag0,
@@ -1645,16 +1512,22 @@ def _is_valid_md5(s: str) -> bool:
     return bool(re.fullmatch(r"[0-9a-f]{32}", v))
 
 
-@lru_cache(maxsize=4096)
 def _lookup_resource_md5_by_server_id(account_dir_str: str, server_id: int, want_local_type: int = 0) -> str:
+    account_dir_str = str(account_dir_str or "").strip()
+    if not account_dir_str:
+        return ""
+    return _lookup_resource_md5_by_server_id_cached(
+        str(resolve_account_database_dir(Path(account_dir_str))), server_id, want_local_type
+    )
+
+
+@lru_cache(maxsize=4096)
+def _lookup_resource_md5_by_server_id_cached(account_dir_str: str, server_id: int, want_local_type: int = 0) -> str:
     """Resolve on-disk resource md5 from message_resource.db by message_svr_id.
 
     WeChat 4.x often stores media on disk using an md5 derived from `packed_info` rather than
     the `fullmd5/thumbfullmd5` values found in message XML (including merged-forward records).
     """
-    account_dir_str = str(account_dir_str or "").strip()
-    if not account_dir_str:
-        return ""
     try:
         sid = int(server_id or 0)
     except Exception:
@@ -1690,11 +1563,19 @@ def _lookup_resource_md5_by_server_id(account_dir_str: str, server_id: int, want
             pass
 
 
-@lru_cache(maxsize=4096)
 def _lookup_image_md5_by_server_id_from_messages(account_dir_str: str, server_id: int, username: str) -> str:
     account_dir_str = str(account_dir_str or "").strip()
+    if not account_dir_str:
+        return ""
+    return _lookup_image_md5_by_server_id_from_messages_cached(
+        str(resolve_account_database_dir(Path(account_dir_str))), server_id, username
+    )
+
+
+@lru_cache(maxsize=4096)
+def _lookup_image_md5_by_server_id_from_messages_cached(account_dir_str: str, server_id: int, username: str) -> str:
     username = str(username or "").strip()
-    if not account_dir_str or not username:
+    if not username:
         return ""
 
     try:
@@ -1780,142 +1661,6 @@ def _pick_row_value(row: dict[str, Any], *names: str) -> Any:
         if key in lowered:
             return lowered[key]
     return None
-
-
-def _iter_realtime_message_db_paths_for_lookup(account_dir: Path, username: str) -> list[Path]:
-    db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-    if db_storage_dir is None:
-        return []
-    message_dir = Path(db_storage_dir) / "message"
-    try:
-        if not message_dir.exists() or not message_dir.is_dir():
-            return []
-    except Exception:
-        return []
-
-    normal: list[Path] = []
-    biz: list[Path] = []
-    other: list[Path] = []
-    try:
-        for p in message_dir.iterdir():
-            try:
-                if not p.is_file():
-                    continue
-            except Exception:
-                continue
-            name = p.name.lower()
-            if re.match(r"^message(_\d+)?\.db$", name):
-                normal.append(p)
-            elif re.match(r"^biz_message(_\d+)?\.db$", name):
-                biz.append(p)
-            elif name.endswith(".db") and "message" in name:
-                other.append(p)
-    except Exception:
-        return []
-
-    normal.sort(key=lambda x: x.name.lower())
-    biz.sort(key=lambda x: x.name.lower())
-    other.sort(key=lambda x: x.name.lower())
-    return (biz + normal + other) if str(username or "").strip().startswith("gh_") else (normal + biz + other)
-
-
-@lru_cache(maxsize=4096)
-def _lookup_image_md5_by_server_id_from_realtime_messages(account_dir_str: str, server_id: int, username: str) -> str:
-    account_dir_str = str(account_dir_str or "").strip()
-    username = str(username or "").strip()
-    if not account_dir_str or not username:
-        return ""
-
-    try:
-        sid = int(server_id or 0)
-    except Exception:
-        sid = 0
-    if not sid:
-        return ""
-
-    try:
-        table_name = f"Msg_{hashlib.md5(username.encode()).hexdigest()}"
-    except Exception:
-        return ""
-
-    account_dir = Path(account_dir_str)
-    try:
-        rt_conn = WCDB_REALTIME.ensure_connected(account_dir, timeout=3.0)
-    except Exception:
-        return ""
-
-    table_literal = _sql_quote(table_name)
-    table_sql = (
-        "SELECT name FROM sqlite_master "
-        f"WHERE type = 'table' AND lower(name) = lower({table_literal}) LIMIT 1"
-    )
-    sid_lit = str(int(sid))
-
-    for db_path in _iter_realtime_message_db_paths_for_lookup(account_dir, username):
-        try:
-            with rt_conn.lock:
-                table_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=table_sql) or []
-        except Exception:
-            continue
-        actual_table = ""
-        for item in table_rows:
-            if isinstance(item, dict):
-                actual_table = str(_pick_row_value(item, "name") or "").strip()
-                if actual_table:
-                    break
-        if not actual_table:
-            continue
-
-        quoted_table = _quote_sql_identifier(actual_table)
-        sql = (
-            "SELECT local_type, message_content, compress_content, "
-            "hex(packed_info_data) AS packed_info_hex "
-            f"FROM {quoted_table} "
-            f"WHERE server_id = {sid_lit} "
-            "ORDER BY create_time DESC, local_id DESC LIMIT 1"
-        )
-        try:
-            with rt_conn.lock:
-                rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=sql) or []
-        except Exception:
-            continue
-        if not rows or not isinstance(rows[0], dict):
-            continue
-
-        row = rows[0]
-        try:
-            local_type = int(_pick_row_value(row, "local_type") or 0)
-        except Exception:
-            local_type = 0
-        if local_type != 3:
-            continue
-
-        packed_hex = str(_pick_row_value(row, "packed_info_hex") or "").strip()
-        packed_bytes = b""
-        if packed_hex:
-            try:
-                packed_bytes = bytes.fromhex(packed_hex)
-            except Exception:
-                packed_bytes = b""
-
-        md5 = _extract_md5_from_packed_info(packed_bytes)
-        if not md5:
-            text = "\n".join(
-                str(_pick_row_value(row, key) or "")
-                for key in ("message_content", "compress_content")
-            )
-            found = re.search(r"(?i)([0-9a-f]{32})", text)
-            md5 = found.group(1) if found else ""
-
-        md5_norm = str(md5 or "").strip().lower()
-        if _is_valid_md5(md5_norm):
-            return md5_norm
-
-    return ""
-
-
-
-
 
 
 def _is_safe_http_url(url: str) -> bool:
@@ -2351,6 +2096,11 @@ async def download_chat_emoji(req: EmojiDownloadRequest):
 
     existing = _try_find_decrypted_resource(account_dir, md5)
     if existing and existing.exists() and (not req.force):
+        existing_data = existing.read_bytes()
+        try:
+            _validate_image_bytes(existing_data, expected_md5=md5)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {
             "status": "success",
             "account": account_dir.name,
@@ -2366,7 +2116,7 @@ async def download_chat_emoji(req: EmojiDownloadRequest):
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
             "Accept": "*/*",
         }
-        r = requests.get(emoji_url, headers=headers, timeout=20, stream=True)
+        r = requests.get(emoji_url, headers=headers, timeout=20, stream=True, allow_redirects=False)
         try:
             r.raise_for_status()
             max_bytes = 30 * 1024 * 1024
@@ -2381,27 +2131,37 @@ async def download_chat_emoji(req: EmojiDownloadRequest):
                     raise HTTPException(status_code=400, detail="Emoji download too large (>30MB).")
             return b"".join(chunks)
         finally:
-            try:
-                r.close()
-            except Exception:
-                pass
+            r.close()
 
     try:
-        data = await asyncio.to_thread(_download_bytes)
+        data = await account_to_thread(account_dir, _download_bytes)
     except HTTPException:
         raise
     except Exception as e:
-        logger.warning(f"emoji_download failed: md5={md5} url={emoji_url} err={e}")
-        raise HTTPException(status_code=500, detail=f"Emoji download failed: {e}")
+        logger.warning("emoji_download failed: md5=%s errorType=%s", md5, type(e).__name__)
+        raise HTTPException(status_code=500, detail=f"Emoji download failed: {type(e).__name__}") from e
 
     if not data:
         raise HTTPException(status_code=500, detail="Emoji download returned empty body.")
 
-    payload, media_type, ext = _detect_media_type_and_ext(data)
-    out_path = _get_decrypted_resource_path(account_dir, md5, ext)
+    payload = data
+    try:
+        media_type = _validate_image_bytes(payload, expected_md5=md5)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    ext = _detect_image_extension(payload)
+    # Replace the exact path that normal resource lookup selected. Keeping that
+    # path prevents a stale higher-priority extension from shadowing the new image;
+    # readers and the response MIME identify the image from its actual bytes.
+    out_path = existing if req.force and existing is not None else _get_decrypted_resource_path(account_dir, md5, ext)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     if out_path.exists() and (not req.force):
+        existing_data = out_path.read_bytes()
+        try:
+            media_type = _validate_image_bytes(existing_data, expected_md5=md5)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {
             "status": "success",
             "account": account_dir.name,
@@ -2411,15 +2171,24 @@ async def download_chat_emoji(req: EmojiDownloadRequest):
             "path": str(out_path),
             "resource_dir": str(out_path.parent),
             "media_type": media_type,
-            "bytes": len(payload),
+            "bytes": len(existing_data),
         }
 
-    try:
-        out_path.write_bytes(payload)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write emoji file: {e}")
+    import tempfile
 
-    logger.info(f"emoji_download: md5={md5} url={emoji_url} -> {out_path} bytes={len(payload)} mt={media_type}")
+    temporary_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="wb", dir=out_path.parent, prefix=f".{md5}.", suffix=".part", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(payload)
+        os.replace(temporary_path, out_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to write emoji file: {e}") from e
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+    logger.info("emoji_download: md5=%s bytes=%s mt=%s", md5, len(payload), media_type)
     return {
         "status": "success",
         "account": account_dir.name,
@@ -2476,20 +2245,12 @@ async def get_chat_image(
     trace("request:start")
 
     # Prefer the original image message's packed md5 when resolving a quote by server_id.
-    # For realtime/live messages the decrypted output DB can lag behind db_storage, so also
-    # query the live message shard before falling back to message_resource.db.
     if server_id:
         md5_from_msg = ""
-        md5_from_realtime = ""
         if username:
             md5_from_msg = _lookup_image_md5_by_server_id_from_messages(
                 str(account_dir), int(server_id), str(username)
             )
-            if not md5_from_msg:
-                md5_from_realtime = _lookup_image_md5_by_server_id_from_realtime_messages(
-                    str(account_dir), int(server_id), str(username)
-                )
-                md5_from_msg = md5_from_realtime
         resource_md5 = "" if md5_from_msg else _lookup_resource_md5_by_server_id(str(account_dir), int(server_id), want_local_type=3)
         if md5_from_msg:
             md5 = md5_from_msg
@@ -2498,7 +2259,6 @@ async def get_chat_image(
         trace(
             "server-id:resolved",
             messageMd5Found=bool(md5_from_msg),
-            realtimeMessageMd5Found=bool(md5_from_realtime),
             resourceMd5Found=bool(resource_md5),
             finalMd5=str(md5 or ""),
         )
@@ -2563,7 +2323,7 @@ async def get_chat_image(
     # 回退：从微信数据目录实时定位并解密
     roots_started_at = time.perf_counter()
     wxid_dir = _resolve_account_wxid_dir(account_dir)
-    hardlink_db_path = account_dir / "hardlink.db"
+    hardlink_db_path = resolve_account_database_dir(account_dir) / "hardlink.db"
     db_storage_dir = _resolve_account_db_storage_dir(account_dir)
     hardlink_has_image_table = _hardlink_has_table_prefix(str(hardlink_db_path), "image_hardlink_info")
     trace(
@@ -2595,9 +2355,11 @@ async def get_chat_image(
     candidates: list[Path] = []
     allow_deep_scan = False
 
+    # Explicit local refresh must bypass path caches too: WeChat may have saved
+    # a previously missing image since the last lookup.
     if md5:
         hardlink_started_at = time.perf_counter()
-        p = await asyncio.to_thread(
+        p = await account_to_thread(account_dir,
             _resolve_media_path_from_hardlink,
             hardlink_db_path,
             roots[0],
@@ -2618,8 +2380,8 @@ async def get_chat_image(
         # while md5 + conversation-scoped attach probing usually resolves current chat images in milliseconds.
         if (not p) and wxid_dir and username:
             fast_probe_started_at = time.perf_counter()
-            hit = await asyncio.to_thread(
-                _fast_probe_image_path_in_chat_attach,
+            hit = await account_to_thread(account_dir,
+                _fast_probe_image_path_in_chat_attach.__wrapped__ if prefer_live else _fast_probe_image_path_in_chat_attach,
                 wxid_dir_str=str(wxid_dir),
                 username=str(username),
                 md5=str(md5),
@@ -2639,8 +2401,8 @@ async def get_chat_image(
         # passed from recordItem XML before any broad file_id/deep scan.
         if (not p) and wxid_dir and username and (record_index is not None or _normalize_record_index_path(str(record_index_path or ""))):
             record_probe_started_at = time.perf_counter()
-            hit = await asyncio.to_thread(
-                _fast_probe_record_image_in_chat_attach,
+            hit = await account_to_thread(account_dir,
+                _fast_probe_record_image_in_chat_attach.__wrapped__ if prefer_live else _fast_probe_record_image_in_chat_attach,
                 wxid_dir_str=str(wxid_dir),
                 username=str(username),
                 md5=str(md5 or ""),
@@ -2670,8 +2432,8 @@ async def get_chat_image(
                 if not r:
                     continue
                 file_id_roots_checked += 1
-                hit = await asyncio.to_thread(
-                    _fallback_search_media_by_file_id,
+                hit = await account_to_thread(account_dir,
+                    _fallback_search_media_by_file_id.__wrapped__ if prefer_live else _fallback_search_media_by_file_id,
                     str(r),
                     str(file_id),
                     kind="image",
@@ -2695,7 +2457,9 @@ async def get_chat_image(
         allow_deep_scan = bool(deep_scan) or (not hardlink_has_image_table)
         if (not p) and wxid_dir and allow_deep_scan:
             deep_scan_started_at = time.perf_counter()
-            hit = await asyncio.to_thread(_fallback_search_media_by_md5, str(wxid_dir), str(md5), kind="image")
+            hit = await account_to_thread(account_dir,
+                _fallback_search_media_by_md5.__wrapped__ if prefer_live else _fallback_search_media_by_md5,
+                str(wxid_dir), str(md5), kind="image")
             trace(
                 "source:deep-scan",
                 found=bool(hit),
@@ -2705,7 +2469,7 @@ async def get_chat_image(
             if hit:
                 p = Path(hit)
                 try:
-                    candidates.extend(await asyncio.to_thread(_iter_media_source_candidates, Path(hit)))
+                    candidates.extend(await account_to_thread(account_dir, _iter_media_source_candidates, Path(hit)))
                 except Exception:
                     pass
     elif file_id:
@@ -2716,8 +2480,8 @@ async def get_chat_image(
             if not r:
                 continue
             file_id_roots_checked += 1
-            hit = await asyncio.to_thread(
-                _fallback_search_media_by_file_id,
+            hit = await account_to_thread(account_dir,
+                _fallback_search_media_by_file_id.__wrapped__ if prefer_live else _fallback_search_media_by_file_id,
                 str(r),
                 str(file_id),
                 kind="image",
@@ -2749,9 +2513,9 @@ async def get_chat_image(
         raise HTTPException(status_code=404, detail="Image not found.")
 
     candidates_started_at = time.perf_counter()
-    candidates.extend(await asyncio.to_thread(_iter_media_source_candidates, p))
+    candidates.extend(await account_to_thread(account_dir, _iter_media_source_candidates, p))
     candidate_count_before_order = len(candidates)
-    candidates = await asyncio.to_thread(_order_media_candidates, candidates)
+    candidates = await account_to_thread(account_dir, _order_media_candidates, candidates)
     trace(
         "candidates:resolved",
         sourcePath=str(p),
@@ -2802,7 +2566,7 @@ async def get_chat_image(
         decode_one_started_at = time.perf_counter()
         decode_error = ""
         try:
-            data, media_type = await asyncio.to_thread(
+            data, media_type = await account_to_thread(account_dir,
                 _read_and_maybe_decrypt_media,
                 src_path,
                 account_dir=account_dir,
@@ -2867,11 +2631,10 @@ async def get_chat_image(
     # 仅在 md5 有效时缓存到 resource 目录；file_id 可能非常长，避免写入超长文件名
     if md5 and media_type.startswith("image/"):
         try:
-            await asyncio.to_thread(_write_cached_chat_image, account_dir, str(md5), data)
+            await account_to_thread(account_dir, _write_cached_chat_image, account_dir, str(md5), data)
             trace("decrypted-cache:write", skipped=False)
         except Exception:
             trace("decrypted-cache:write", skipped=False, error=True)
-            pass
     else:
         trace("decrypted-cache:write", skipped=True)
 
@@ -2894,8 +2657,10 @@ async def get_chat_emoji(
         raise HTTPException(status_code=400, detail="Missing md5.")
     account_dir = _resolve_account_dir(account)
 
+    from ..local_emoticon import LocalEmoticonError
+
     # 优先从解密资源目录读取（更快）
-    decrypted_path = _try_find_decrypted_resource(account_dir, md5.lower())
+    decrypted_path = (None)
     if decrypted_path:
         data = decrypted_path.read_bytes()
         media_type = _detect_image_media_type(data[:32])
@@ -2908,56 +2673,21 @@ async def get_chat_emoji(
             pass
 
     wxid_dir = _resolve_account_wxid_dir(account_dir)
-    p = _resolve_media_path_for_kind(account_dir, kind="emoji", md5=str(md5), username=username)
+    try:
+        p = _resolve_media_path_for_kind(account_dir, kind="emoji", md5=str(md5), username=username)
+    except LocalEmoticonError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     data = b""
     media_type = "application/octet-stream"
     if p:
-        data, media_type = _read_and_maybe_decrypt_media(p, account_dir=account_dir, weixin_root=wxid_dir)
+        try:
+            data, media_type = _read_and_maybe_decrypt_media(
+                p, account_dir=account_dir, weixin_root=wxid_dir, media_kind="emoji", expected_md5=md5
+            )
+        except LocalEmoticonError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if media_type == "application/octet-stream":
-        # Some emojis are stored encrypted (see emoticon.db); try remote fetch as fallback.
-        data2, mt2 = _try_fetch_emoticon_from_remote(account_dir, str(md5).lower())
-        if data2 is not None and mt2:
-            data, media_type = data2, mt2
-
-    if media_type == "application/octet-stream" and emoji_url:
-        # Some merged-forward records include CDN URLs and AES keys inside recordItem, but the md5
-        # is missing from emoticon.db; allow the client to provide a safe remote URL as fallback.
-        url = html.unescape(str(emoji_url or "")).strip()
-        if url:
-            try:
-                payload = _download_http_bytes(url)
-            except Exception:
-                payload = b""
-
-            candidates: list[bytes] = [payload] if payload else []
-            dec = _decrypt_emoticon_aes_cbc(payload, str(aes_key or "").strip()) if payload and aes_key else None
-            if dec is not None:
-                candidates.insert(0, dec)
-
-            for blob in candidates:
-                if not blob:
-                    continue
-                try:
-                    data2, mt = _try_strip_media_prefix(blob)
-                except Exception:
-                    data2, mt = blob, "application/octet-stream"
-
-                if mt == "application/octet-stream":
-                    mt = _detect_image_media_type(data2[:32])
-                if mt == "application/octet-stream":
-                    try:
-                        if len(data2) >= 8 and data2[4:8] == b"ftyp":
-                            mt = "video/mp4"
-                    except Exception:
-                        pass
-
-                if mt.startswith("image/") and (not _is_probably_valid_image(data2, mt)):
-                    continue
-                if mt != "application/octet-stream":
-                    data, media_type = data2, mt
-                    break
 
     if (not p) and media_type == "application/octet-stream":
         raise HTTPException(status_code=404, detail="Emoji not found.")
@@ -3042,7 +2772,7 @@ async def get_chat_video_thumb(
     # Fallback: locate and decode from WeChat data directories.
     roots_started_at = time.perf_counter()
     wxid_dir = _resolve_account_wxid_dir(account_dir)
-    hardlink_db_path = account_dir / "hardlink.db"
+    hardlink_db_path = resolve_account_database_dir(account_dir) / "hardlink.db"
     extra_roots: list[Path] = []
     db_storage_dir = _resolve_account_db_storage_dir(account_dir)
     hardlink_has_video_table = _hardlink_has_table_prefix(str(hardlink_db_path), "video_hardlink_info")
@@ -3074,7 +2804,7 @@ async def get_chat_video_thumb(
     allow_deep_scan = False
     if md5_norm:
         hardlink_started_at = time.perf_counter()
-        p = await asyncio.to_thread(
+        p = await account_to_thread(account_dir,
             _resolve_media_path_from_hardlink,
             hardlink_db_path,
             roots[0],
@@ -3093,7 +2823,7 @@ async def get_chat_video_thumb(
         # WeFlow-style lookup: build a short-lived index of msg/video/YYYY-MM and resolve by local file token.
         if (not p) and (wxid_dir or db_storage_dir):
             index_started_at = time.perf_counter()
-            p = await asyncio.to_thread(
+            p = await account_to_thread(account_dir,
                 _resolve_video_path_from_weflow_index,
                 md5=md5_norm,
                 wxid_dir=wxid_dir,
@@ -3111,7 +2841,7 @@ async def get_chat_video_thumb(
         # This direct probe is retained as a cheap fallback when the index misses.
         if (not p) and (wxid_dir or db_storage_dir):
             fast_probe_started_at = time.perf_counter()
-            p = await asyncio.to_thread(
+            p = await account_to_thread(account_dir,
                 _fast_probe_video_path_by_md5,
                 md5=md5_norm,
                 wxid_dir=wxid_dir,
@@ -3131,28 +2861,11 @@ async def get_chat_video_thumb(
                 elapsedMsLocal=round((time.perf_counter() - fast_probe_started_at) * 1000.0, 1),
             )
 
-        if (not p) and (wxid_dir or db_storage_dir):
-            realtime_started_at = time.perf_counter()
-            p, resolved_token = await asyncio.to_thread(
-                _resolve_video_path_from_realtime_hardlink,
-                account_dir=account_dir,
-                md5=md5_norm,
-                wxid_dir=wxid_dir,
-                db_storage_dir=db_storage_dir,
-                want_thumb=True,
-            )
-            trace(
-                "source:realtime-hardlink",
-                found=bool(p),
-                resolvedToken=str(resolved_token or ""),
-                path=str(p or ""),
-                elapsedMsLocal=round((time.perf_counter() - realtime_started_at) * 1000.0, 1),
-            )
 
         allow_deep_scan = bool(deep_scan) or (not hardlink_has_video_table)
         if (not p) and wxid_dir and allow_deep_scan:
             deep_scan_started_at = time.perf_counter()
-            hit = await asyncio.to_thread(_fallback_search_media_by_md5, str(wxid_dir), md5_norm, kind="video_thumb")
+            hit = await account_to_thread(account_dir, _fallback_search_media_by_md5, str(wxid_dir), md5_norm, kind="video_thumb")
             if hit:
                 p = Path(hit)
             trace(
@@ -3168,7 +2881,7 @@ async def get_chat_video_thumb(
             if not r:
                 continue
             file_id_roots_checked += 1
-            hit = await asyncio.to_thread(
+            hit = await account_to_thread(account_dir,
                 _fallback_search_media_by_file_id,
                 str(r),
                 file_id_norm,
@@ -3191,7 +2904,7 @@ async def get_chat_video_thumb(
         raise HTTPException(status_code=404, detail="Video thumbnail not found.")
 
     read_started_at = time.perf_counter()
-    data, media_type = await asyncio.to_thread(_read_and_maybe_decrypt_media, p, account_dir=account_dir, weixin_root=wxid_dir)
+    data, media_type = await account_to_thread(account_dir, _read_and_maybe_decrypt_media, p, account_dir=account_dir, weixin_root=wxid_dir)
     trace(
         "decode:done",
         path=str(p),
@@ -3260,7 +2973,7 @@ async def get_chat_video(
 
     roots_started_at = time.perf_counter()
     wxid_dir = _resolve_account_wxid_dir(account_dir)
-    hardlink_db_path = account_dir / "hardlink.db"
+    hardlink_db_path = resolve_account_database_dir(account_dir) / "hardlink.db"
     extra_roots: list[Path] = []
     db_storage_dir = _resolve_account_db_storage_dir(account_dir)
     hardlink_has_video_table = _hardlink_has_table_prefix(str(hardlink_db_path), "video_hardlink_info")
@@ -3292,7 +3005,7 @@ async def get_chat_video(
     allow_deep_scan = False
     if md5_norm:
         hardlink_started_at = time.perf_counter()
-        p = await asyncio.to_thread(
+        p = await account_to_thread(account_dir,
             _resolve_media_path_from_hardlink,
             hardlink_db_path,
             roots[0],
@@ -3309,7 +3022,7 @@ async def get_chat_video(
         )
         if (not p) and (wxid_dir or db_storage_dir):
             index_started_at = time.perf_counter()
-            p = await asyncio.to_thread(
+            p = await account_to_thread(account_dir,
                 _resolve_video_path_from_weflow_index,
                 md5=md5_norm,
                 wxid_dir=wxid_dir,
@@ -3324,7 +3037,7 @@ async def get_chat_video(
             )
         if (not p) and (wxid_dir or db_storage_dir):
             fast_probe_started_at = time.perf_counter()
-            p = await asyncio.to_thread(
+            p = await account_to_thread(account_dir,
                 _fast_probe_video_path_by_md5,
                 md5=md5_norm,
                 wxid_dir=wxid_dir,
@@ -3343,27 +3056,10 @@ async def get_chat_video(
                 path=str(p or ""),
                 elapsedMsLocal=round((time.perf_counter() - fast_probe_started_at) * 1000.0, 1),
             )
-        if (not p) and (wxid_dir or db_storage_dir):
-            realtime_started_at = time.perf_counter()
-            p, resolved_token = await asyncio.to_thread(
-                _resolve_video_path_from_realtime_hardlink,
-                account_dir=account_dir,
-                md5=md5_norm,
-                wxid_dir=wxid_dir,
-                db_storage_dir=db_storage_dir,
-                want_thumb=False,
-            )
-            trace(
-                "source:realtime-hardlink",
-                found=bool(p),
-                resolvedToken=str(resolved_token or ""),
-                path=str(p or ""),
-                elapsedMsLocal=round((time.perf_counter() - realtime_started_at) * 1000.0, 1),
-            )
         allow_deep_scan = bool(deep_scan) or (not hardlink_has_video_table)
         if (not p) and wxid_dir and allow_deep_scan:
             deep_scan_started_at = time.perf_counter()
-            hit = await asyncio.to_thread(_fallback_search_media_by_md5, str(wxid_dir), md5_norm, kind="video")
+            hit = await account_to_thread(account_dir, _fallback_search_media_by_md5, str(wxid_dir), md5_norm, kind="video")
             if hit:
                 p = Path(hit)
             trace(
@@ -3379,7 +3075,7 @@ async def get_chat_video(
             if not r:
                 continue
             file_id_roots_checked += 1
-            hit = await asyncio.to_thread(
+            hit = await account_to_thread(account_dir,
                 _fallback_search_media_by_file_id,
                 str(r),
                 file_id_norm,
@@ -3429,7 +3125,7 @@ async def get_chat_video(
     if md5_norm:
         materialize_started_at = time.perf_counter()
         try:
-            materialized = await asyncio.to_thread(
+            materialized = await account_to_thread(account_dir,
                 _ensure_decrypted_resource_for_md5,
                 account_dir,
                 md5=md5_norm,
@@ -3454,7 +3150,7 @@ async def get_chat_video(
 
     # Fast path bytes???? Range?
     read_started_at = time.perf_counter()
-    data, media_type = await asyncio.to_thread(_read_and_maybe_decrypt_media, p, account_dir=account_dir, weixin_root=wxid_dir)
+    data, media_type = await account_to_thread(account_dir, _read_and_maybe_decrypt_media, p, account_dir=account_dir, weixin_root=wxid_dir)
     if media_type == "application/octet-stream":
         media_type = _guess_media_type_by_path(p, fallback="video/mp4")
     trace(
@@ -3468,12 +3164,90 @@ async def get_chat_video(
     return Response(content=data, media_type=media_type)
 
 
+@router.post("/api/chat/media/video/preview", summary="Generate an explicitly requested local video preview")
+async def create_chat_video_preview(
+    request: Request,
+    md5: Optional[str] = None,
+    file_id: Optional[str] = None,
+    account: Optional[str] = None,
+    username: Optional[str] = None,
+    server_id: Optional[int] = None,
+    src_local_id: Optional[int] = None,
+    src_create_time: Optional[int] = None,
+    file_size: Optional[int] = None,
+    record_index: Optional[int] = None,
+    record_index_path: Optional[str] = None,
+    record_attach: Optional[str] = None,
+    deep_scan: bool = False,
+):
+    from ..video_preview import create_video_preview, VideoPreviewError, VideoPreviewCancelled
+
+    account_dir = _resolve_account_dir(account)
+    original = await get_chat_video(
+        md5=md5, file_id=file_id, account=account, username=username, server_id=server_id,
+        src_local_id=src_local_id, src_create_time=src_create_time, file_size=file_size,
+        record_index=record_index, record_index_path=record_index_path,
+        record_attach=record_attach, deep_scan=deep_scan,
+    )
+    if not isinstance(original, FileResponse):
+        raise HTTPException(status_code=422, detail="Video preview requires a resolved local video file")
+
+    async def wait_for_disconnect():
+        # This bodyless POST can consume receive directly. is_disconnected's
+        # pre-cancelled probe cannot cross BaseHTTPMiddleware's checkpoints.
+        while (await request.receive())['type'] != 'http.disconnect':
+            pass
+
+    monitor = asyncio.create_task(wait_for_disconnect())
+
+    async def disconnected():
+        if monitor.done():
+            monitor.result()
+            return True
+        return False
+
+    try:
+        preview = await create_account_task(account_dir, create_video_preview,
+            Path(original.path), _get_resource_dir(account_dir) / 'video_previews',
+            _find_ffmpeg_executable(), disconnected,
+        )
+    except VideoPreviewCancelled as exc:
+        raise HTTPException(status_code=499, detail=str(exc)) from exc
+    except VideoPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        if not monitor.done():
+            monitor.cancel()
+        try:
+            await monitor
+        except asyncio.CancelledError:
+            pass  # The request's single receive watcher has been reaped.
+    url = (str(request.base_url).rstrip('/') + '/api/chat/media/video/preview/'
+           + preview.parent.name + '?account=' + quote(account_dir.name))
+    return {'status': 'success', 'url': url}
+
+
+@router.get("/api/chat/media/video/preview/{preview_id}", summary="Read a verified local video preview")
+async def get_chat_video_preview(preview_id: str, account: Optional[str] = None):
+    from ..video_preview import verified_preview, VideoPreviewError
+
+    account_dir = _resolve_account_dir(account)
+    try:
+        path = await account_to_thread(account_dir, verified_preview,
+            _get_resource_dir(account_dir) / 'video_previews', preview_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except VideoPreviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return AccountFileResponse(str(path), account_dir=account_dir, media_type='video/mp4')
+
+
 @router.get("/api/chat/media/voice", summary="获取语音消息资源")
 async def get_chat_voice(server_id: int, account: Optional[str] = None):
     if not server_id:
         raise HTTPException(status_code=400, detail="Missing server_id.")
     account_dir = _resolve_account_dir(account)
-    data = await asyncio.to_thread(load_voice_data, account_dir, int(server_id))
+    data = await account_to_thread(account_dir, load_voice_data, account_dir, int(server_id))
     if not data:
         raise HTTPException(status_code=404, detail="Voice not found.")
 
@@ -3570,14 +3344,14 @@ async def start_chat_voice_transcription_batch(req: VoiceTranscriptionBatchReque
         }
         if str(req.engine or "local") != "local":
             start_args["engine"] = str(req.engine)
-        return await asyncio.to_thread(
+        return await account_to_thread(account_dir,
             VOICE_TRANSCRIPTION_BATCH_MANAGER.start,
             **start_args,
         )
     except VoiceTranscriptionError as exc:
         status_code = (
             503
-            if exc.code in {"model_not_ready", "dependency_missing", "disabled", "native_not_ready"}
+            if exc.code in {"model_not_ready", "dependency_missing", "disabled"}
             else 409
             if exc.code in {"batch_busy", "model_busy", "service_retired"}
             else 400
@@ -3626,7 +3400,7 @@ async def delete_chat_voice_transcription_cache(request: Request, account: str):
         raise HTTPException(status_code=400, detail="Missing account.")
     account_dir = _resolve_account_dir(account_name)
     try:
-        return await asyncio.to_thread(
+        return await account_to_thread(account_dir,
             VOICE_TRANSCRIPTION_BATCH_MANAGER.delete_cache_if_idle,
             account=account_dir.name,
             account_dir=account_dir,
@@ -3660,11 +3434,28 @@ async def delete_all_chat_voice_transcription_caches(request: Request):
         ) from exc
 
 
+async def transcribe_chat_voice_native(req: NativeVoiceTranscriptionRequest, request: Request):
+    _require_local_voice_mutation(request)
+    session_title = req.display_name.strip() if req.display_name and req.display_name.strip() else req.username.strip()
+    return await get_wechat_bridge().transcribe_voice_native(
+        session_title, account=req.account, username=req.username,
+        message_id=req.message_id, server_id=req.server_id, create_time=req.create_time,
+    )
+
+
+# Message identities and titles use normal JSON escapes, not filesystem path repair.
+router.add_api_route(
+    "/api/chat/media/voice/transcription/native", transcribe_chat_voice_native,
+    methods=["POST"], summary="请求微信转写唯一定位的单条语音", route_class_override=APIRoute,
+)
+
+
 @router.post("/api/chat/media/voice/transcription", summary="将语音消息转成中文文字")
 async def transcribe_chat_voice(req: VoiceTranscriptionRequest, request: Request):
     _require_local_voice_mutation(request)
     if int(req.server_id or 0) <= 0:
         raise HTTPException(status_code=400, detail="Missing server_id.")
+    account_dir = _resolve_account_dir(req.account)
     cache_generation = capture_voice_transcript_cache_generation()
 
     def run_transcription():
@@ -3672,7 +3463,6 @@ async def transcribe_chat_voice(req: VoiceTranscriptionRequest, request: Request
         try:
             service = service_lease.service
             service.ensure_available()
-            account_dir = _resolve_account_dir(req.account)
             return service.transcribe_voice(
                 account_dir=account_dir,
                 server_id=int(req.server_id),
@@ -3683,7 +3473,7 @@ async def transcribe_chat_voice(req: VoiceTranscriptionRequest, request: Request
             service_lease.release()
 
     try:
-        return await asyncio.to_thread(run_transcription)
+        return await account_to_thread(account_dir, run_transcription)
     except VoiceTranscriptionError as exc:
         status_code = {
             "invalid_server_id": 400,
@@ -3703,276 +3493,6 @@ async def transcribe_chat_voice(req: VoiceTranscriptionRequest, request: Request
         ) from exc
 
 
-@router.get(
-    "/api/chat/media/voice/transcription/native",
-    summary="读取单条微信原生语音转写结果（不触发识别）",
-)
-async def get_chat_native_voice_transcription(
-    request: Request,
-    response: Response,
-    account: StrictStr,
-    username: StrictStr,
-    server_id: StrictStr,
-    local_id: StrictStr,
-    request_id: Optional[StrictStr] = None,
-):
-    _require_local_voice_mutation(request)
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        account_name = str(account).strip()
-        if not account_name:
-            raise NativeVoiceTriggerError("invalid_account", "缺少 account。")
-        conversation = normalize_native_voice_conversation(str(username))
-        target_server_id = parse_native_voice_message_id(str(server_id), "server_id")
-        target_local_id = parse_native_voice_message_id(str(local_id), "local_id")
-        native_request_id = str(request_id or "").strip()
-        if native_request_id and (
-            len(native_request_id.encode("utf-8")) > 256
-            or any(ord(char) < 0x20 or ord(char) == 0x7F for char in native_request_id)
-        ):
-            raise NativeVoiceTriggerError(
-                "invalid_request_id",
-                "request_id 格式无效。",
-            )
-        account_dir = _resolve_account_dir(account_name)
-
-        if native_request_id:
-            entry = await asyncio.to_thread(
-                lookup_native_voice_transcript_cache,
-                account_dir,
-                target_server_id,
-                conversation=conversation,
-                local_id=target_local_id,
-                request_id=native_request_id,
-                strict=True,
-            )
-            if entry is None or entry.request_id != native_request_id:
-                return {
-                    "status": "expired",
-                    "serverId": str(target_server_id),
-                    "localId": str(target_local_id),
-                    "requestId": native_request_id,
-                    "text": "",
-                    "language": "",
-                    "model": "",
-                    "code": "native_result_expired",
-                    "message": "微信原生语音转文字任务不存在或已过期。",
-                }
-            if entry.status == "error":
-                return {
-                    "status": "error",
-                    "serverId": str(target_server_id),
-                    "localId": str(target_local_id),
-                    "requestId": native_request_id,
-                    "text": "",
-                    "language": "",
-                    "model": "",
-                    "code": entry.error_code or "native_transcript_failed",
-                    "message": entry.error_message or "微信原生语音转文字未能返回结果。",
-                }
-            text = entry.text if entry.status == "success" else ""
-            return {
-                "status": "success" if text else "pending",
-                "serverId": str(target_server_id),
-                "localId": str(target_local_id),
-                "requestId": native_request_id,
-                "text": text,
-                "language": "",
-                "model": "wechat-native" if text else "",
-            }
-
-        resolved_local_id, resolved_server_id, text = await asyncio.to_thread(
-            resolve_native_voice_target,
-            account_dir,
-            conversation=conversation,
-            server_id=target_server_id,
-            local_id=target_local_id,
-        )
-        return {
-            "status": "success" if text else "pending",
-            "serverId": str(resolved_server_id),
-            "localId": str(resolved_local_id),
-            "requestId": "",
-            "text": text,
-            "language": "",
-            "model": "wechat-native" if text else "",
-        }
-    except NativeVoiceTriggerError as exc:
-        status_code = {
-            "invalid_account": 400,
-            "invalid_conversation": 400,
-            "invalid_message_id": 400,
-            "invalid_request_id": 400,
-            "voice_message_not_found": 404,
-            "voice_message_id_mismatch": 409,
-            "voice_message_ambiguous": 409,
-            "voice_message_unsynced": 409,
-            "native_message_lookup_unavailable": 503,
-            "native_result_store_unavailable": 503,
-        }.get(exc.code, 502)
-        raise HTTPException(
-            status_code=status_code,
-            detail={"code": exc.code, "message": exc.user_message},
-        ) from exc
-
-
-@router.get(
-    "/api/chat/media/voice/transcription/native/status",
-    summary="检查微信原生语音转写桥接能力（只读）",
-)
-async def get_chat_native_voice_transcription_status(
-    request: Request,
-    response: Response,
-    account: StrictStr,
-):
-    _require_local_voice_mutation(request)
-    response.headers["Cache-Control"] = "no-store"
-    account_name = str(account).strip()
-    if not account_name:
-        raise HTTPException(status_code=400, detail="Missing account.")
-    account_dir = _resolve_account_dir(account_name)
-    return await asyncio.to_thread(native_bridge_status, account_dir)
-
-
-@router.post(
-    "/api/chat/media/voice/transcription/native/cache_lookup",
-    summary="批量读取项目保存的微信原生语音转写结果",
-)
-async def lookup_chat_native_voice_transcription_cache(
-    req: NativeVoiceTranscriptCacheLookupRequest,
-    request: Request,
-    response: Response,
-):
-    _require_local_voice_mutation(request)
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        account = str(req.account).strip()
-        if not account:
-            raise NativeVoiceTriggerError("invalid_account", "缺少 account。")
-        conversation = normalize_native_voice_conversation(str(req.username))
-        if len(req.items) > 512:
-            raise NativeVoiceTriggerError(
-                "invalid_message_id",
-                "单次最多读取 512 条微信原生转写缓存。",
-            )
-        account_dir = _resolve_account_dir(account)
-        identities: list[tuple[int, int]] = []
-        seen: set[tuple[int, int]] = set()
-        for item in req.items:
-            server_id = parse_native_voice_message_id(str(item.server_id), "server_id")
-            local_id = parse_native_voice_message_id(str(item.local_id), "local_id")
-            identity = (server_id, local_id)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            identities.append(identity)
-
-        def read_entries() -> list[dict[str, str]]:
-            results: list[dict[str, str]] = []
-            for server_id, local_id in identities:
-                entry = lookup_native_voice_transcript_cache(
-                    account_dir,
-                    server_id,
-                    conversation=conversation,
-                    local_id=local_id,
-                    strict=True,
-                )
-                if entry is None:
-                    continue
-                item = {
-                    "serverId": str(server_id),
-                    "localId": str(local_id),
-                    "status": entry.status,
-                    "requestId": entry.request_id,
-                }
-                if entry.status == "success" and entry.text:
-                    item.update(
-                        {
-                            "text": entry.text,
-                            "language": "",
-                            "model": "wechat-native",
-                        }
-                    )
-                elif entry.status == "pending":
-                    item["pollAfterMs"] = 1200
-                elif entry.status == "error":
-                    item.update(
-                        {
-                            "code": entry.error_code,
-                            "message": entry.error_message,
-                        }
-                    )
-                else:
-                    continue
-                results.append(item)
-            return results
-
-        return {
-            "status": "success",
-            "items": await asyncio.to_thread(read_entries),
-        }
-    except NativeVoiceTriggerError as exc:
-        status_code = {
-            "invalid_account": 400,
-            "invalid_conversation": 400,
-            "invalid_message_id": 400,
-            "native_result_store_unavailable": 503,
-        }.get(exc.code, 502)
-        raise HTTPException(
-            status_code=status_code,
-            detail={"code": exc.code, "message": exc.user_message},
-        ) from exc
-
-
-@router.post(
-    "/api/chat/media/voice/transcription/native/trigger",
-    summary="触发单条微信原生语音转写",
-)
-async def trigger_chat_native_voice_transcription(
-    req: NativeVoiceTranscriptionTriggerRequest,
-    request: Request,
-    response: Response,
-):
-    _require_local_voice_mutation(request)
-    response.headers["Cache-Control"] = "no-store"
-    try:
-        account = str(req.account).strip()
-        if not account:
-            raise NativeVoiceTriggerError("invalid_account", "缺少 account。")
-        account_dir = _resolve_account_dir(account)
-        return await asyncio.to_thread(
-            trigger_native_voice_transcription,
-            account_dir=account_dir,
-            conversation=req.username,
-            server_id=req.server_id,
-            local_id=req.local_id,
-        )
-    except NativeVoiceTriggerError as exc:
-        status_code = {
-            "invalid_message_id": 400,
-            "missing_message_id": 400,
-            "invalid_account": 400,
-            "invalid_conversation": 400,
-            "voice_message_not_found": 404,
-            "voice_message_id_mismatch": 409,
-            "voice_message_ambiguous": 409,
-            "voice_message_unsynced": 409,
-            "native_message_lookup_unavailable": 503,
-            "native_transport_unavailable": 503,
-            "native_weixin_not_running": 503,
-            "native_weixin_version_unsupported": 503,
-            "native_transport_busy": 429,
-            "native_trigger_timeout": 504,
-            "native_trigger_rejected": 409,
-            "native_transport_failed": 502,
-            "native_transport_invalid_response": 502,
-        }.get(exc.code, 502)
-        raise HTTPException(
-            status_code=status_code,
-            detail={"code": exc.code, "message": exc.user_message},
-        ) from exc
-
-
 @router.post("/api/chat/media/voice/transcription/cache_lookup", summary="批量读取语音转写缓存（不触发识别）")
 async def lookup_chat_voice_transcription_cache(req: VoiceTranscriptionCacheLookupRequest):
     account_dir = _resolve_account_dir(req.account)
@@ -3985,7 +3505,7 @@ async def lookup_chat_voice_transcription_cache(req: VoiceTranscriptionCacheLook
         if sid > 0:
             parsed_ids.append(sid)
     service = get_voice_transcription_service()
-    items = await asyncio.to_thread(service.lookup_cached_transcripts, account_dir, parsed_ids)
+    items = await account_to_thread(account_dir, service.lookup_cached_transcripts, account_dir, parsed_ids)
     return {
         "status": "success",
         "items": {str(sid): value for sid, value in items.items()},
@@ -4012,7 +3532,7 @@ async def open_chat_media_folder(
         if not server_id:
             raise HTTPException(status_code=400, detail="Missing server_id.")
 
-        media_db_path = account_dir / "media_0.db"
+        media_db_path = resolve_account_database_dir(account_dir) / "media_0.db"
         if not media_db_path.exists():
             raise HTTPException(status_code=404, detail="media_0.db not found.")
 
@@ -4138,6 +3658,7 @@ async def open_chat_media_folder(
                         md5=str(md5),
                         source_path=source_path,
                         weixin_root=wxid_dir,
+                        media_kind="emoji",
                     )
                     if materialized:
                         p = materialized
@@ -4191,7 +3712,7 @@ async def open_chat_media_folder(
                     materialized_ok = True
                     opened_kind = "decrypted"
 
-        if kind_key == "emoji" and md5:
+        if kind_key == "emoji" and md5 and not materialized_ok:
             try:
                 existing2 = _try_find_decrypted_resource(account_dir, str(md5).lower())
                 if existing2:

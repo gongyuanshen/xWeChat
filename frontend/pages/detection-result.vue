@@ -148,7 +148,7 @@
               微信安装目录
             </label>
             <p class="mt-1 text-[12px] leading-5 text-[#7F7F7F]">
-              一键获取数据库密钥会优先使用这里的路径；V4 模式失败后会询问是否改用 Hook。
+              一键获取数据库密钥使用纯源码内存扫描，并用当前账号的数据库验证候选密钥。
             </p>
             <input
               id="wechatInstallPath"

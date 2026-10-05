@@ -16,6 +16,9 @@ from .messages import advance_cursor, filter_after, read_messages
 from .providers import ModelService, ProviderFailure, public_profile
 from .schemas import Matches, RuleInput, Summary, TaskInput
 from .storage import AIStore
+from ..app_paths import get_output_dir
+from ..account_workers import account_to_thread
+from ..snapshot_registry import SnapshotRegistryError, account_work, create_account_task
 
 
 class TaskCancelled(Exception):
@@ -125,24 +128,25 @@ class AIService:
     @observed('summary.create_task', id_field='task_id')
     def create_task(self, options, rule=None, prepared=None):
         options = TaskInput.model_validate(options).model_dump()
-        # 截止到上一完整秒，同一秒的后续消息留给下一轮。
-        end = min(options["range"].get("end") or int(time.time()) - 1, int(time.time()) - 1)
-        range = options["range"]
-        start = range.get("start")
-        if range["mode"] == "hours":
-            start = max(0, end - int(range["hours"] * 3600))
-        models = self.snapshot_models(options)
-        task = self.store.put("task", {**options, "range": {**range, "start": start, "end": end},
-            "trace_id": diagnostic_context.get().get('trace_id') or new_id(),
-            "status": "queued", "stage": "等待执行", "created": time.time(), "models": models,
-            "rule_id": rule["id"] if rule else "", "rule_revision": rule.get("revision") if rule else None,
-            "kind": rule["kind"] if rule else "summary", "condition": rule.get("condition", "") if rule else "",
-            "cursors": copy.deepcopy(rule.get("cursors", {})) if rule else {}, "results": [], "overview": {},
-            "cancel_requested": False, "progress": 0, "error": "", "attempts": 0, "retry_at": 0})
-        if prepared is not None:
-            self.store.put("prepared", {"conversations": prepared}, id=task["id"], account=task["account"])
-        diagnostic_event('summary.task.created', task_id=task['id'], start=start, end=end, mode=range['mode'], count=len(options['conversations']))
-        return task
+        with account_work(get_output_dir() / "databases" / options["account"]):
+            # 截止到上一完整秒，同一秒的后续消息留给下一轮。
+            end = min(options["range"].get("end") or int(time.time()) - 1, int(time.time()) - 1)
+            range = options["range"]
+            start = range.get("start")
+            if range["mode"] == "hours":
+                start = max(0, end - int(range["hours"] * 3600))
+            models = self.snapshot_models(options)
+            task = self.store.put("task", {**options, "range": {**range, "start": start, "end": end},
+                "trace_id": diagnostic_context.get().get('trace_id') or new_id(),
+                "status": "queued", "stage": "等待执行", "created": time.time(), "models": models,
+                "rule_id": rule["id"] if rule else "", "rule_revision": rule.get("revision") if rule else None,
+                "kind": rule["kind"] if rule else "summary", "condition": rule.get("condition", "") if rule else "",
+                "cursors": copy.deepcopy(rule.get("cursors", {})) if rule else {}, "results": [], "overview": {},
+                "cancel_requested": False, "progress": 0, "error": "", "attempts": 0, "retry_at": 0})
+            if prepared is not None:
+                self.store.put("prepared", {"conversations": prepared}, id=task["id"], account=task["account"])
+            diagnostic_event('summary.task.created', task_id=task['id'], start=start, end=end, mode=range['mode'], count=len(options['conversations']))
+            return task
 
     def task_profile(self, task, vision=False):
         snapshot = task["models"]["vision" if vision else "text"]
@@ -154,41 +158,42 @@ class AIService:
 
     @observed('summary.read_conversations', id_field='task_id')
     async def read_conversations(self, options, rule=None, checkpoint=None):
-        end = options["range"].get("end") or int(time.time()) - 1
-        conversations = []
-        for username in options["conversations"]:
-            if checkpoint:
-                checkpoint()
-            cursor = (rule or {}).get("cursors", {}).get(username)
-            start = options["range"].get("start")
-            incremental = bool(rule and (rule["kind"] == "alert" or rule["trigger"] == "count" or options["range"]["mode"] == "since"))
-            if incremental and cursor:
-                start = cursor["time"]
-            count = options["range"]["count"] if options["range"]["mode"] == "count" and not incremental else None
-            try:
-                read_started = time.monotonic()
-                diagnostic_event('summary.conversation.read.started', username=username, start=start, end=end, incremental=incremental, count=count)
-                conv = await asyncio.to_thread(self.reader, options["account"], username, start, end, count,
-                    bool(rule and rule["kind"] == "alert"), checkpoint)
+        with account_work(get_output_dir() / "databases" / options["account"]):
+            end = options["range"].get("end") or int(time.time()) - 1
+            conversations = []
+            for username in options["conversations"]:
+                if checkpoint:
+                    checkpoint()
+                cursor = (rule or {}).get("cursors", {}).get(username)
+                start = options["range"].get("start")
+                incremental = bool(rule and (rule["kind"] == "alert" or rule["trigger"] == "count" or options["range"]["mode"] == "since"))
                 if incremental and cursor:
-                    conv["messages"] = filter_after(conv["messages"], cursor)
-                conv["context"] = []
-                if rule and rule["kind"] == "alert" and conv["messages"]:
-                    # 只补充近期对话，低频会话不能为了凑足条数回溯多年前的无关资料。
-                    context_end = conv["messages"][0]["time"]
-                    context_start = max(0, context_end - 24 * 3600, options["range"].get("start") or 0)
-                    context = await asyncio.to_thread(self.reader, options["account"], username, context_start,
-                        context_end, 20, True, checkpoint)
-                    new_sources = {m["source"] for m in conv["messages"]}
-                    conv["context"] = [m for m in context["messages"] if m["source"] not in new_sources]
-                conversations.append(conv)
-                diagnostic_event('summary.conversation.read.finished', username=username, returned=len(conv['messages']), duration_ms=(time.monotonic()-read_started)*1000)
-            except TaskCancelled:
-                raise
-            except Exception as exc:
-                diagnostic_event('summary.conversation.read.failed', level=logging.ERROR, error=exc, username=username)
-                conversations.append({"username": username, "name": username, "messages": [], "error": "消息读取失败：" + (str(exc) if isinstance(exc, ValueError) else "请检查消息数据源")})
-        return conversations
+                    start = cursor["time"]
+                count = options["range"]["count"] if options["range"]["mode"] == "count" and not incremental else None
+                try:
+                    read_started = time.monotonic()
+                    diagnostic_event('summary.conversation.read.started', username=username, start=start, end=end, incremental=incremental, count=count)
+                    conv = await account_to_thread(get_output_dir() / "databases" / options["account"], self.reader, options["account"], username, start, end, count,
+                        checkpoint=checkpoint)
+                    if incremental and cursor:
+                        conv["messages"] = filter_after(conv["messages"], cursor)
+                    conv["context"] = []
+                    if rule and rule["kind"] == "alert" and conv["messages"]:
+                        # 只补充近期对话，低频会话不能为了凑足条数回溯多年前的无关资料。
+                        context_end = conv["messages"][0]["time"]
+                        context_start = max(0, context_end - 24 * 3600, options["range"].get("start") or 0)
+                        context = await account_to_thread(get_output_dir() / "databases" / options["account"], self.reader, options["account"], username, context_start,
+                            context_end, 20, checkpoint=checkpoint)
+                        new_sources = {m["source"] for m in conv["messages"]}
+                        conv["context"] = [m for m in context["messages"] if m["source"] not in new_sources]
+                    conversations.append(conv)
+                    diagnostic_event('summary.conversation.read.finished', username=username, returned=len(conv['messages']), duration_ms=(time.monotonic()-read_started)*1000)
+                except (TaskCancelled, SnapshotRegistryError):
+                    raise
+                except Exception as exc:
+                    diagnostic_event('summary.conversation.read.failed', level=logging.ERROR, error=exc, username=username)
+                    conversations.append({"username": username, "name": username, "messages": [], "error": "消息读取失败：" + (str(exc) if isinstance(exc, ValueError) else "请检查消息数据源")})
+            return conversations
 
     @observed('summary.graph_read', id_field='task_id')
     async def graph_read(self, state):
@@ -459,28 +464,30 @@ class AIService:
     @observed('summary.save_rule', id_field='rule_id')
     async def save_rule(self, options, id=None):
         rule = RuleInput.model_validate(options).model_dump()
-        old = self.store.get("rule", id) if id else None
-        changed_scope = not old or old["account"] != rule["account"] or old["conversations"] != rule["conversations"]
-        reset_baseline = changed_scope or (rule["enabled"] and not old.get("enabled", False))
-        rule["revision"] = (old or {}).get("revision", 0) + 1
-        rule["cursors"] = (old or {}).get("cursors", {})
-        rule["error"] = ""
-        if rule["enabled"]:
-            self.snapshot_models(rule)
-        if reset_baseline:
-            end = int(time.time())
-            rule["cursors"] = {}
-            for username in rule["conversations"]:
-                conv = await asyncio.to_thread(self.reader, rule["account"], username, end, end, None, rule["kind"] == "alert" and rule["enabled"])
-                rule["cursors"][username] = advance_cursor(conv["messages"], {"time": end, "ids": []})
-        rule["next_due"] = next_due(rule)
-        return self.store.put("rule", rule, id=id)
+        with account_work(get_output_dir() / "databases" / rule["account"]):
+            old = self.store.get("rule", id) if id else None
+            changed_scope = not old or old["account"] != rule["account"] or old["conversations"] != rule["conversations"]
+            reset_baseline = changed_scope or (rule["enabled"] and not old.get("enabled", False))
+            rule["revision"] = (old or {}).get("revision", 0) + 1
+            rule["cursors"] = (old or {}).get("cursors", {})
+            rule["error"] = ""
+            if rule["enabled"]:
+                self.snapshot_models(rule)
+            if reset_baseline:
+                end = int(time.time())
+                rule["cursors"] = {}
+                for username in rule["conversations"]:
+                    conv = await account_to_thread(get_output_dir() / "databases" / rule["account"], self.reader, rule["account"], username, end, end, None)
+                    rule["cursors"][username] = advance_cursor(conv["messages"], {"time": end, "ids": []})
+            rule["next_due"] = next_due(rule)
+            return self.store.put("rule", rule, id=id)
 
     @observed('summary.run_rule', id_field='rule_id')
     async def run_rule(self, rule, force=False):
-        lock = self.rule_locks.setdefault(rule["id"], asyncio.Lock())
-        async with lock:
-            return await self._run_rule(rule, force)
+        with account_work(get_output_dir() / "databases" / rule["account"]):
+            lock = self.rule_locks.setdefault(rule["id"], asyncio.Lock())
+            async with lock:
+                return await self._run_rule(rule, force)
 
     async def _run_rule(self, rule, force=False):
         if any(t.get("rule_id") == rule["id"] for t in self.store.tasks_in_status(["queued", "running"])):
@@ -512,25 +519,30 @@ class AIService:
                         if task["status"] in {"failed", "partial"} and task.get("retry_at") and task["retry_at"] <= time.time():
                             rule = self.store.get("rule", task["rule_id"])
                             if rule and rule["enabled"] and rule["revision"] == task["rule_revision"]:
-                                await self.reset_graph(task["id"])
-                                self.update_task(task["id"], status="queued", retry_at=0)
+                                with account_work(get_output_dir() / "databases" / task["account"]):
+                                    await self.reset_graph(task["id"])
+                                    self.update_task(task["id"], status="queued", retry_at=0)
                     pending = self.store.tasks_in_status(["queued", "running"])
                     if pending:
-                        self.worker = asyncio.create_task(self.execute(pending[-1]["id"]))
+                        pending_task = pending[-1]
+                        self.worker = create_account_task(get_output_dir() / "databases" / pending_task["account"],
+                                                          self.execute, pending_task["id"])
                 for rule in self.store.list("rule"):
                     if not rule["enabled"] or rule["next_due"] > time.time():
                         continue
                     try:
-                        await self.run_rule(rule)
-                        failures.recovered('summary.rule.'+rule['id'])
-                        latest = self.store.get("rule", rule["id"])
-                        if latest and latest["revision"] == rule["revision"]:
-                            self.store.put("rule", latest | {"next_due": next_due(rule)}, id=rule["id"])
+                        with account_work(get_output_dir() / "databases" / rule["account"]):
+                            await self.run_rule(rule)
+                            failures.recovered('summary.rule.'+rule['id'])
+                            latest = self.store.get("rule", rule["id"])
+                            if latest and latest["revision"] == rule["revision"]:
+                                self.store.put("rule", latest | {"next_due": next_due(rule)}, id=rule["id"])
                     except Exception as exc:
                         failures.report('summary.rule.'+rule['id'], exc)
-                        latest = self.store.get("rule", rule["id"])
-                        if latest and latest["revision"] == rule["revision"]:
-                            self.store.put("rule", latest | {"next_due": time.time() + max(60, rule["interval_seconds"]), "error": str(exc) if isinstance(exc, (ValueError, ProviderFailure)) else "自动任务暂时失败，将重试"}, id=rule["id"])
+                        with account_work(get_output_dir() / "databases" / rule["account"]):
+                            latest = self.store.get("rule", rule["id"])
+                            if latest and latest["revision"] == rule["revision"]:
+                                self.store.put("rule", latest | {"next_due": time.time() + max(60, rule["interval_seconds"]), "error": str(exc) if isinstance(exc, (ValueError, ProviderFailure)) else "自动任务暂时失败，将重试"}, id=rule["id"])
                 failures.recovered('summary.scheduler')
             except Exception as exc:
                 failures.report('summary.scheduler', exc)

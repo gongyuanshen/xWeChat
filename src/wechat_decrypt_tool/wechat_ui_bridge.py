@@ -16,8 +16,10 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import stat
 import sys
+import threading
 import time
 from typing import Any, Callable, Literal, Optional, Union
 
@@ -157,17 +159,6 @@ class SendReceipt:
     timestamp: float
 
 
-@dataclass
-class ImageSendReceipt:
-    """Confirmed local image submission; not a server-delivery receipt."""
-
-    success: bool
-    session_title: str
-    image_name: str
-    image_format: Literal["JPEG", "PNG"]
-    image_size_bytes: int
-    duration_ms: float
-    timestamp: float
 
 
 @dataclass
@@ -180,6 +171,22 @@ class FileSendReceipt:
     file_size_bytes: int
     duration_ms: float
     timestamp: float
+
+
+@dataclass
+class ImageSendReceipt:
+    """An exact image in a new local outgoing record, not recipient delivery."""
+
+    success: bool
+    session_title: str
+    image_name: str
+    image_format: str
+    image_size_bytes: int
+    duration_ms: float
+    timestamp: float
+    server_id: str
+    match_kind: str
+    generation: str
 
 
 @dataclass
@@ -311,6 +318,7 @@ class WeChatBridge:
 
         self.rate_limiter = rate_limiter or WeChatRateLimiter()
         self._lock = lock
+        self._images_in_flight: set[tuple[str, str]] = set()
         self.send_timeout_s = float(send_timeout_s)
 
     def _get_lock(self) -> asyncio.Lock:
@@ -379,7 +387,7 @@ class WeChatBridge:
         return candidates[0][1]
 
     def _find_main_window_hwnd(self, pid: Optional[int] = None) -> Optional[int]:
-        """Window probe: WeChat 3.x (WeChatMainWndForPC) or WeChat 4.x Qt class/title."""
+        """Select the real main window, excluding Qt history and media windows."""
         if not self.win32gui:
             return None
         self._ensure_desktop_access()
@@ -400,34 +408,36 @@ class WeChatBridge:
         except Exception:
             pass
 
-        # 2. Try WeChat 4.x Qt window enumeration
+        # Qt history and image windows share the native QWindowIcon class.
+        # Its UIA provider class, not enumeration order, identifies the main UI.
         candidates: list[int] = []
+        main_windows: list[int] = []
 
         def enum_cb(h: int, _extra: Any) -> None:
             if not self.win32gui.IsWindow(h):
                 return
-            match_pid = (pid is None)
-            if pid is not None and self.win32process:
-                try:
-                    _, win_pid = self.win32process.GetWindowThreadProcessId(h)
-                    match_pid = (win_pid == pid)
-                except Exception:
-                    match_pid = False
-            if match_pid:
-                try:
-                    title = self.win32gui.GetWindowText(h)
-                    cls = self.win32gui.GetClassName(h).lower()
-                    if title in ("微信", "WeChat") or "qwindowicon" in cls or "wechat" in cls:
-                        candidates.append(h)
-                except Exception:
-                    pass
+            if pid is not None and self.win32process.GetWindowThreadProcessId(h)[1] != pid:
+                return
+            native_class = self.win32gui.GetClassName(h)
+            if native_class == "WeChatMainWndForPC":
+                main_windows.append(h)
+            elif "qwindowicon" in native_class.lower():
+                candidates.append(h)
 
         try:
             self.win32gui.EnumWindows(enum_cb, None)
-        except Exception:
-            pass
-
-        return candidates[0] if candidates else None
+            if candidates:
+                import uiautomation as auto
+                with auto.UIAutomationInitializerInThread():
+                    main_windows.extend(hwnd for hwnd in candidates
+                                        if auto.ControlFromHandle(hwnd).ClassName == "mmui::MainWindow")
+        except Exception as exc:
+            raise WeChatBridgeError("无法核验微信主窗口身份，请查看后台异常日志",
+                                    code="WECHAT_WINDOW_PROBE_FAILED", status_code=502) from exc
+        if len(main_windows) > 1:
+            raise WeChatBridgeError("当前微信进程存在多个主窗口，无法唯一定位",
+                                    code="WECHAT_WINDOW_AMBIGUOUS", status_code=409)
+        return main_windows[0] if main_windows else None
 
     def _find_main_window(self, pid: Optional[int] = None) -> int:
         hwnd = self._find_main_window_hwnd(pid)
@@ -862,86 +872,280 @@ class WeChatBridge:
             timestamp=time.time(),
         )
 
+
+
+
     @staticmethod
-    def _validate_image_path(image_path: str) -> tuple[Path, Literal["JPEG", "PNG"], int, str]:
-        """Validate the file once at the send boundary and fingerprint source bytes."""
+    def _validate_image_path(image_path: str) -> tuple[Path, str]:
+        """Decode a real JPEG/PNG at the send boundary and fingerprint its bytes."""
         if not isinstance(image_path, str) or not image_path.strip():
             raise WeChatBridgeError("图片路径不能为空", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
         path = Path(image_path)
-        if not path.is_absolute():
-            raise WeChatBridgeError("图片路径必须为本地绝对路径", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
+        if (not path.is_absolute() or path.is_reserved() or "\x00" in image_path
+                or image_path.replace("/", "\\").startswith("\\\\.\\")):
+            raise WeChatBridgeError("图片路径必须为普通文件的本地绝对路径", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
         try:
             path = path.resolve(strict=True)
-            if not path.is_file():
-                raise WeChatBridgeError("图片路径必须指向文件", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
+            if not stat.S_ISREG(path.stat().st_mode):
+                raise WeChatBridgeError("图片路径必须指向普通文件", code="WECHAT_IMAGE_PATH_INVALID", status_code=400)
             data = path.read_bytes()
         except FileNotFoundError as exc:
             raise WeChatBridgeError("图片文件不存在", code="WECHAT_IMAGE_FILE_NOT_FOUND", status_code=404) from exc
         except (OSError, ValueError) as exc:
             raise WeChatBridgeError("图片文件无法读取，请检查路径和文件权限", code="WECHAT_IMAGE_FILE_UNREADABLE", status_code=400) from exc
-
         expected_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}.get(path.suffix.lower())
         if expected_format is None:
             raise WeChatBridgeError("仅支持 JPG、JPEG 或 PNG 图片", code="WECHAT_IMAGE_FORMAT_UNSUPPORTED", status_code=400)
         try:
             with Image.open(io.BytesIO(data)) as image:
-                image_format = image.format
-                if image_format != expected_format:
+                if image.format != expected_format:
                     raise WeChatBridgeError("图片真实格式与扩展名不一致，或不是 JPEG/PNG", code="WECHAT_IMAGE_FORMAT_UNSUPPORTED", status_code=400)
                 image.verify()
-            # verify() checks container integrity; load() also decodes pixels,
-            # exposing truncated JPEG data before touching the client.
+            # Container verification alone does not reject every truncated JPEG.
             with Image.open(io.BytesIO(data)) as image:
                 image.load()
         except (UnidentifiedImageError, OSError, SyntaxError, ValueError, Image.DecompressionBombError) as exc:
             raise WeChatBridgeError("图片内容损坏或无法完整解码", code="WECHAT_IMAGE_INVALID", status_code=400) from exc
-        return path, image_format, len(data), hashlib.sha256(data).hexdigest()
+        return path, hashlib.sha256(data).hexdigest()
 
-    async def send_image(self, session_title: str, image_path: str, *, account: str, username: str) -> ImageSendReceipt:
-        """Send one validated image through the Qt client, sharing text serialization."""
+    @staticmethod
+    async def _await_operation(operation, *args, _on_cancel=None, **kwargs):
+        task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError:
+                # The worker cannot be cancelled. Keep the caller's send lock
+                # until its UI/snapshot operation has actually finished.
+                cancelled = True
+                if _on_cancel is not None:
+                    _on_cancel()
+                if task.cancelled():
+                    raise
+            except Exception:
+                if cancelled:
+                    logger.exception("WeChat operation failed while finishing a cancelled request")
+                    raise asyncio.CancelledError from None
+                raise
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def transcribe_voice_native(self, session_title: str, *, account: str, username: str,
+                                      message_id: str, server_id: str, create_time: int) -> dict[str, Any]:
+        """One native UI action, serialized with sends until exact evidence arrives."""
+        session = session_title.strip()
+        if not session:
+            raise WeChatSessionNotFoundError("会话名称不能为空")
+        cancelled = threading.Event()
+        async with self._get_lock():
+            return await self._await_operation(self._transcribe_voice_native, session,
+                account, username, message_id, server_id, create_time, cancelled,
+                _on_cancel=cancelled.set)
+
+    def _verify_native_voice_process(self, hwnd: int, observation, expected=None):
+        """Positive OS handle evidence binds the window's process to this source."""
+        started = time.monotonic()
+        try:
+            pid = self.win32process.GetWindowThreadProcessId(hwnd)[1]
+            process = self.psutil.Process(pid)
+            identity = (pid, process.create_time())
+            if ((expected is not None and identity != expected)
+                    or process.name().lower() not in {"weixin.exe", "wechat.exe"}):
+                raise ValueError("微信窗口进程身份发生变化")
+            paths = (Path(item.path).resolve() for item in process.open_files())
+            matched = any(path.is_relative_to(observation.source_dir)
+                and re.fullmatch(r'message_\d+\.db(?:-wal|-shm)?', path.name, re.IGNORECASE)
+                for path in paths)
+            if (not matched or not process.is_running() or process.create_time() != identity[1]
+                    or self.win32process.GetWindowThreadProcessId(hwnd)[1] != pid):
+                raise ValueError("微信窗口进程未持有所选账号的消息数据库")
+            if time.monotonic() - started > 5:
+                raise TimeoutError("微信账号进程核验超时")
+            return identity
+        except Exception as exc:
+            raise WeChatBridgeError(f"无法核验微信窗口与当前账号的来源关系：{exc}",
+                code="WECHAT_NATIVE_VOICE_PROCESS_UNVERIFIED", status_code=409) from exc
+
+    def _transcribe_voice_native(self, session, account, username, message_id, server_id, create_time, cancelled):
+        from .app_paths import get_output_dir
+        from .snapshot_refresh import SNAPSHOT_REFRESH, SnapshotRefreshError
+        from .snapshot_registry import begin_account_work, SnapshotRegistryError
+        from .wechat_native_voice import NativeVoiceError, NativeVoiceObservation
+
+        lease, ui = None, None
+        started = time.monotonic()
+        def check_cancelled():
+            if cancelled.is_set():
+                raise asyncio.CancelledError
+        try:
+            check_cancelled()
+            account = SNAPSHOT_REFRESH._validate_account(account)
+            lease = begin_account_work(get_output_dir() / 'databases' / account)
+            observation = NativeVoiceObservation.prepare(account, username, message_id, server_id, create_time)
+            check_cancelled()
+            already_completed = bool(observation.native_text)
+            if already_completed:
+                result = dict(text=observation.native_text, model='wechat-native', generation=observation.generation)
+            else:
+                import uiautomation as auto
+                from .wechat_qt_ui import WeChatQtUI
+
+                with auto.UIAutomationInitializerInThread():
+                    check_cancelled()
+                    hwnd = self._prepare_send_window()
+                    if not self.win32gui.GetClassName(hwnd).lower().startswith('qt'):
+                        raise WeChatBridgeError("原生转写目前仅适配 Windows 微信 4.x 中文界面",
+                            code="WECHAT_NATIVE_VOICE_UNSUPPORTED", status_code=501)
+                    identity = self._verify_native_voice_process(hwnd, observation)
+                    ui = WeChatQtUI(hwnd, auto, 20)
+
+                    def before_trigger():
+                        check_cancelled()
+                        observation.revalidate()
+                        self._verify_native_voice_process(hwnd, observation, identity)
+                        check_cancelled()
+
+                    ui.trigger_voice_transcription(session, observation.username,
+                        date_label=observation.date_label, minute_label=observation.minute_label,
+                        duration_ms=observation.duration_ms, is_sender=observation.is_sender, window_api=self.win32gui,
+                        process_api=self.win32process, before_trigger=before_trigger)
+                result = observation.wait_result(timeout_s=20)
+            logger.info("Native voice result confirmed: account=%s message_id=%s generation=%s existing=%s duration_ms=%.1f",
+                account, message_id, result['generation'], already_completed, (time.monotonic() - started) * 1000)
+            return dict(result, status='success', already_completed=already_completed,
+                account=observation.account, username=observation.username, message_id=observation.message_id,
+                server_id=observation.server_id, create_time=observation.create_time)
+        except NativeVoiceError as exc:
+            logger.exception("Native voice observation failed: stage=%s", ui.stage if ui else 'prepare')
+            raise WeChatBridgeError(exc.message, code='WECHAT_NATIVE_VOICE_' + exc.code.upper(),
+                status_code=504 if exc.code.endswith('timeout') else 409) from exc
+        except (SnapshotRefreshError, SnapshotRegistryError) as exc:
+            raise WeChatBridgeError(f"原生转写账号当前不可用：{exc}",
+                code="WECHAT_NATIVE_VOICE_ACCOUNT_UNAVAILABLE", status_code=409) from exc
+        except WeChatBridgeError:
+            raise
+        except Exception as exc:
+            attempted = ui is not None and ui.voice_trigger_attempted
+            stage = ui.stage if ui is not None else 'prepare'
+            logger.exception("Native voice operation failed: stage=%s triggered=%s", stage, attempted)
+            raise WeChatBridgeError(f"微信原生转写失败（阶段：{stage}），请查看日志"
+                + ("；已尝试触发，请在微信核对，不会自动重试" if attempted else ""),
+                code="WECHAT_NATIVE_VOICE_UNCONFIRMED" if attempted else "WECHAT_NATIVE_VOICE_FAILED",
+                status_code=504 if attempted else 502) from exc
+        finally:
+            if lease is not None:
+                lease.release()
+
+    async def send_image(self, session_title: str, image_path: str, *,
+                         account: str | None = None, username: str | None = None) -> ImageSendReceipt:
+        """Submit once and confirm exact local evidence when an account is supplied."""
         session = str(session_title or "").strip()
         if not session:
             raise WeChatSessionNotFoundError("会话名称不能为空")
-        path, image_format, image_size, fingerprint = self._validate_image_path(image_path)
+        if (account is None) != (username is None):
+            raise WeChatBridgeError("图片确认需要同时指定账号和会话", code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=400)
+        path, fingerprint = await asyncio.to_thread(self._validate_image_path, image_path)
+        image_key = (session, fingerprint)
+        if image_key in self._images_in_flight:
+            raise WeChatRateLimitExceededError("同一图片仍在发送或核对中，请勿重复提交")
         self.rate_limiter.check_and_record(session, fingerprint, message_kind="image")
-        t_start = time.perf_counter()
+        self._images_in_flight.add(image_key)
+        submitted = False
+        started = time.monotonic()
         try:
             async with self._get_lock():
+                confirmation = None
                 try:
+                    if account is not None:
+                        from .image_send_confirmation import ImageSendConfirmation
+                        try:
+                            confirmation = await self._await_operation(ImageSendConfirmation.prepare, account, username, path)
+                            await self._await_operation(confirmation.capture)
+                            logger.info("Image send preparation completed before window activation: duration_ms=%.1f",
+                                        (time.monotonic() - started) * 1000)
+                        except Exception as exc:
+                            logger.exception("Image confirmation baseline failed before submission")
+                            raise WeChatBridgeError(f"发送前无法准备图片确认：{exc}",
+                                code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
+                    foreground_started = time.monotonic()
                     hwnd = self._prepare_send_window()
                     if not self.win32gui.GetClassName(hwnd).lower().startswith("qt"):
-                        raise WeChatBridgeError(
-                            "图片发送目前仅适配 Windows 微信 4.x Qt 客户端",
-                            code="WECHAT_IMAGE_SEND_UNSUPPORTED", status_code=501,
-                        )
+                        raise WeChatBridgeError("图片发送目前仅适配 Windows 微信 4.x Qt 客户端",
+                                                code="WECHAT_IMAGE_SEND_UNSUPPORTED", status_code=501)
                 except Exception:
                     self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
                     raise
-                self._send_qt_image(hwnd, session, str(path), fingerprint, account, username)
-        except asyncio.CancelledError:
-            # The only async wait is lock acquisition, before any UI submission.
-            self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
-            raise
-        return ImageSendReceipt(
-            success=True, session_title=session, image_name=path.name,
-            image_format=image_format, image_size_bytes=image_size,
-            duration_ms=round((time.perf_counter() - t_start) * 1000.0, 2),
-            timestamp=time.time(),
-        )
+                def before_submit():
+                    if confirmation is not None:
+                        try:
+                            confirmation.revalidate()
+                        except Exception as exc:
+                            raise WeChatBridgeError(f"发送前无法固定图片确认基线：{exc}",
+                                code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
 
-    def _send_qt_image(self, hwnd: int, session: str, image_path: str, fingerprint: str,
-                       account: str, username: str) -> None:
+                self._send_qt_image(hwnd, session, str(path), fingerprint, before_submit=before_submit)
+                submitted = True
+                logger.info("Image send foreground submission completed: duration_ms=%.1f",
+                            (time.monotonic() - foreground_started) * 1000)
+                self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
+                if confirmation is None:
+                    raise WeChatBridgeError(
+                        "微信图片草稿已清空并出现新图片，但当前接口未提供可验证的发送方向和图片内容；请在微信核对结果，避免重复发送",
+                        code="WECHAT_SEND_UNCONFIRMED", status_code=504,
+                    )
+                try:
+                    record = await self._await_operation(confirmation.confirm, timeout_s=15)
+                    # Source validation also proves it was not replaced while confirming.
+                    confirmed_path, confirmed_fingerprint = await asyncio.to_thread(self._validate_image_path, str(path))
+                    if confirmed_fingerprint != fingerprint:
+                        raise ValueError("待发送图片在确认期间发生变化")
+                    with Image.open(confirmed_path) as image:
+                        image_format = image.format
+                    receipt = ImageSendReceipt(True, session, path.name, image_format,
+                        path.stat().st_size, (time.monotonic() - started) * 1000, time.time(),
+                        record.server_id, record.match_kind, record.generation)
+                except Exception as exc:
+                    self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
+                    logger.exception("Image was submitted but exact local confirmation failed")
+                    raise WeChatBridgeError(f"图片已提交，但无法确认对应的本地出站记录：{exc}；请在微信核对，避免重复发送",
+                        code="WECHAT_SEND_UNCONFIRMED", status_code=504) from exc
+                self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
+                logger.info("Image local outgoing record confirmed: server_id=%s generation=%s match=%s duration_ms=%.1f",
+                            record.server_id, record.generation, record.match_kind, receipt.duration_ms)
+                return receipt
+        except asyncio.CancelledError:
+            if submitted:
+                self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
+            else:
+                self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
+            raise
+        finally:
+            self._images_in_flight.discard(image_key)
+
+    def _send_qt_image(self, hwnd: int, session: str, image_path: str, fingerprint: str, *, before_submit: Callable[[], None]) -> None:
+        def verify_source() -> None:
+            try:
+                with Path(image_path).open("rb") as source:
+                    current = hashlib.file_digest(source, "sha256").hexdigest()
+            except (OSError, ValueError) as exc:
+                raise WeChatBridgeError("待发送图片已变动或无法读取，未点击发送；请重新选择并核对微信草稿",
+                                        code="WECHAT_IMAGE_SOURCE_CHANGED", status_code=409) from exc
+            if current != fingerprint:
+                raise WeChatBridgeError("待发送图片内容已变更，未点击发送；请重新选择并核对微信草稿",
+                                        code="WECHAT_IMAGE_SOURCE_CHANGED", status_code=409)
+
         ui = None
         try:
             import uiautomation as auto
             from .wechat_qt_ui import WeChatQtUI
-            from .wechat_image_receipt import ImageSendObserver
 
-            receipt = ImageSendObserver(account, username)
             with auto.UIAutomationInitializerInThread():
                 ui = WeChatQtUI(hwnd, auto, self.send_timeout_s)
                 ui.send_image(session, image_path, window_api=self.win32gui, process_api=self.win32process,
-                              receipt=receipt)
+                              verify_source=verify_source, before_submit=before_submit)
         except Exception as exc:
             attempted = ui is not None and ui.submission_attempted
             if attempted:
@@ -958,6 +1162,7 @@ class WeChatBridge:
                 code="WECHAT_SEND_UNCONFIRMED" if attempted else "WECHAT_UIA_ERROR",
                 status_code=504 if attempted else 502,
             ) from exc
+        logger.info("WeChat image submission observed: hwnd=%s; waiting for exact local evidence", hwnd)
 
     @staticmethod
     def _validate_file_path(file_path: str) -> tuple[Path, int, str]:

@@ -67,7 +67,7 @@
             <div class="records-state__inner">
               <span class="records-state__icon" aria-hidden="true"><i class="fa-solid fa-arrow-rotate-right fa-spin"></i></span>
               <div class="records-state__title">正在加载收藏</div>
-              <div class="records-state__text">正在读取实时收藏库</div>
+              <div class="records-state__text">正在读取已解密收藏库</div>
             </div>
           </div>
           <div v-else-if="error" class="records-state records-state--error">

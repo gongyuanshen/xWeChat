@@ -421,14 +421,7 @@
   color: var(--app-text-primary);
 }
 
-.wechat-voice-transcript__action--wechat {
-  border-color: rgba(7, 193, 96, 0.28);
-}
 
-.wechat-voice-transcript__action--wechat:hover {
-  border-color: rgba(7, 193, 96, 0.48);
-  color: var(--app-text-primary);
-}
 
 .wechat-voice-transcript__icon {
   width: 15px;
@@ -436,9 +429,6 @@
   flex: none;
 }
 
-.wechat-voice-transcript__icon--wechat {
-  object-fit: contain;
-}
 
 .wechat-voice-transcript__status {
   display: inline-flex;
@@ -1565,35 +1555,4 @@
   100% {
     opacity: 0.6;
   }
-}
-
-/* 「上下文定位」横幅（从第一条消息开始阅读 / 按日期定位 / 搜索结果）。
- * 模板用了硬编码的 emerald 工具类，聊天页没挂 .theme-scope，深色下要单独兜。 */
-html[data-theme='dark'] .chat-context-banner {
-  background-color: rgba(62, 181, 117, 0.14);
-  border-color: rgba(62, 181, 117, 0.30);
-}
-
-html[data-theme='dark'] .chat-context-banner-title {
-  color: #8edcaf;
-}
-
-html[data-theme='dark'] .chat-context-banner-btn {
-  background-color: rgba(62, 181, 117, 0.16);
-  border-color: rgba(62, 181, 117, 0.34);
-  color: #b6e6c9;
-}
-
-html[data-theme='dark'] .chat-context-banner-btn:hover {
-  background-color: rgba(62, 181, 117, 0.26);
-}
-
-html[data-theme='dark'] .chat-context-banner-btn2 {
-  background-color: var(--app-neutral-btn-bg, #2f2f2f);
-  border-color: var(--app-border, #373737);
-  color: var(--app-text-secondary, #c7c7c7);
-}
-
-html[data-theme='dark'] .chat-context-banner-btn2:hover {
-  background-color: var(--app-neutral-btn-hover, #3a3a3a);
 }

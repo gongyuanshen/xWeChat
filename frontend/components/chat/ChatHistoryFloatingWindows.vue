@@ -335,7 +335,7 @@ export default defineComponent({
     return {
       ...props.state,
       // 合并转发浮窗只提供播放和已有转写，不在浮窗内发起新的转写任务。
-      messageState: { ...props.state, transcribeVoice: undefined },
+      messageState: { ...props.state, transcribeVoiceLocally: undefined, transcribeVoiceNatively: undefined },
       recordTextSegments,
       openRecordUrl,
       copyRecordUrl,

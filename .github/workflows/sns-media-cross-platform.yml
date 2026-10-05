@@ -7,7 +7,6 @@ on:
       - ".github/workflows/sns-media-cross-platform.yml"
       - "desktop/package.json"
       - "desktop/package-lock.json"
-      - "desktop/scripts/smoke-windows-package.cjs"
       - "desktop/scripts/sns-wasm-smoke.cjs"
       - "desktop/src/main.cjs"
       - "desktop/tests/**"
@@ -15,7 +14,6 @@ on:
       - "frontend/pages/sns.vue"
       - "frontend/tests/sns-media-source.test.mjs"
       - "pyproject.toml"
-      - "src/wechat_decrypt_tool/backend_entry.py"
       - "src/wechat_decrypt_tool/logging_config.py"
       - "src/wechat_decrypt_tool/native/weflow_wasm/**"
       - "src/wechat_decrypt_tool/request_logging.py"
@@ -103,5 +101,4 @@ jobs:
         run: >-
           node --test
           tests/sns-wasm-runtime.test.cjs
-          tests/package-config.test.cjs
-          tests/native-core-runtime.test.cjs
+          tests/development-config.test.cjs

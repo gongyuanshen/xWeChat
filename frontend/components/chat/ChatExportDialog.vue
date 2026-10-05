@@ -211,6 +211,12 @@
               <span>下载远程缩略图（需联网；关闭可显著加快导出）</span>
             </label>
             <label class="chat-export-type-option chat-export-transcription-option"
+              :class="{ 'chat-export-type-option--selected': exportExtractImageKeys && !privacyMode }">
+              <input v-model="exportExtractImageKeys" type="checkbox"
+                :disabled="privacyMode || !exportMessageTypes.some(type => ['image', 'link', 'chatHistory'].includes(type))" />
+              <span>导出前获取图片密钥（可能读取微信进程内存，不注入）</span>
+            </label>
+            <label class="chat-export-type-option chat-export-transcription-option"
               :class="{ 'chat-export-type-option--selected': exportTranscribeVoice && !privacyMode && exportMessageTypes.includes('voice') }">
               <input v-model="exportTranscribeVoice" type="checkbox"
                 :disabled="privacyMode || !exportMessageTypes.includes('voice')" />

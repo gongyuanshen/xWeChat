@@ -2,12 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter
 
-from ..img_helper import IMG_HELPER
-from ..platform_support import is_windows, runtime_capabilities
-from .wechat_detection import check_wechat_status
+from ..platform_support import runtime_capabilities
 
 router = APIRouter()
 
@@ -45,34 +42,3 @@ async def pick_directory(title: str = "请选择目录", initial_dir: str = ""):
 
     return {"path": folder_path}
 
-
-@router.get("/api/system/img_helper/status", summary="获取大图下载辅助插件状态")
-async def get_img_helper_status():
-    return {"supported": is_windows(), "enabled": IMG_HELPER.is_enabled if is_windows() else False}
-
-
-class ImgHelperToggleRequest(BaseModel):
-    enabled: bool
-
-
-@router.post("/api/system/img_helper/toggle", summary="开启/关闭大图下载辅助插件")
-async def toggle_img_helper(req: ImgHelperToggleRequest):
-    if not req.enabled:
-        IMG_HELPER.disable()
-        return {"status": "success", "supported": is_windows(), "enabled": False}
-
-    if not is_windows():
-        raise HTTPException(status_code=400, detail="自动下载大图 Hook 仅支持 Windows。")
-
-    # Attempt to enable
-    status_res = await check_wechat_status()
-    wx_status = status_res.get("wx_status", {})
-    if not wx_status.get("is_running") or not wx_status.get("pid"):
-        raise HTTPException(status_code=400, detail="未检测到微信正在运行，请先打开微信再尝试！")
-
-    pid = wx_status["pid"]
-    ok, err = IMG_HELPER.enable(pid)
-    if not ok:
-        raise HTTPException(status_code=500, detail=f"开启失败: {err}")
-
-    return {"status": "success", "supported": True, "enabled": True}

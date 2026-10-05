@@ -30,7 +30,7 @@ async def verify(root, output):
         if account != root.name: raise ValueError('只允许指定账号的只读快照')
         return root
     try:
-        with patch('sqlite3.connect',readonly), patch('wechat_decrypt_tool.chat_helpers._resolve_account_dir',resolve), patch('wechat_decrypt_tool.account_source_policy.account_prefers_decrypted_snapshot',return_value=True):
+        with patch('sqlite3.connect',readonly), patch('wechat_decrypt_tool.chat_helpers._resolve_account_dir',resolve):
             tools = ChatTools()
             for group in (True,False):
                 selected = [u for u in candidates if u.endswith('@chatroom') == group and not u.startswith(('gh_','filehelper')) and u != root.name][:15]

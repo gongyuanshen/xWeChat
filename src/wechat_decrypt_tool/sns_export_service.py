@@ -24,18 +24,13 @@ import httpx
 
 from .chat_helpers import _load_contact_rows, _pick_display_name, _resolve_account_dir
 from .account_identity import resolve_account_self_username
+from .snapshot_registry import start_snapshot_thread, resolve_account_database_dir
 from .logging_config import get_logger
+from .archive_checksums import write_zip_checksums
 from .media_helpers import _detect_image_media_type, _read_and_maybe_decrypt_media, _resolve_account_wxid_dir
-from .export_integrity import (
-    IntegrityZipWriter,
-    export_css,
-    prepare_html_zip_assets,
-    protect_html_document_with_external_assets,
-    write_active_html_zip_integrity,
-    write_zip_integrity_sidecars,
-)
-from .native_core_export import encrypt_export_file_and_remove_source, erase_export_content_key
-from .native_core_telemetry import record_product_event
+from .independent_html import export_css, prepare_html_zip_assets, protect_html_document_with_external_assets
+from .export_crypto import encrypt_export_file_and_remove_source, erase_export_content_key
+
 from .xlsx_export import build_xlsx_workbook
 
 # Reuse wxemoji mapping and static asset copying from chat export.
@@ -47,17 +42,7 @@ from .chat_export_service import (  # pylint: disable=protected-access
 )
 
 # Reuse SNS timeline/local cache helpers.
-from .routers.sns import (  # pylint: disable=protected-access
-    _extract_mp_biz_from_url,
-    _extract_sns_video_key,
-    _get_biz_to_official_index,
-    _image_size_from_bytes,
-    _parse_timeline_xml,
-    _resolve_sns_cached_video_path,
-    _to_unsigned_i64_str,
-    list_sns_timeline,  # 保留兼容导入；导出主路已不再按联系人分页调用
-    sync_sns_realtime_timeline_latest,
-)
+from .routers.sns import _extract_mp_biz_from_url, _extract_sns_video_key, _get_biz_to_official_index, _image_size_from_bytes, _parse_timeline_xml, _resolve_sns_cached_video_path, _to_unsigned_i64_str, list_sns_timeline
 
 # SNS remote download+decrypt helpers (shared with API endpoints).
 from .sns_media import (  # pylint: disable=protected-access
@@ -324,7 +309,7 @@ def _sns_export_extension(export_format: str) -> str:
 
 def _account_display_name(account_dir: Path) -> str:
     username = str(resolve_account_self_username(account_dir) or "").strip()
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     if username and contact_db_path.exists():
         rows = _load_contact_rows(contact_db_path, [username])
         display = _clean_name(_pick_display_name(rows.get(username), username))
@@ -334,7 +319,7 @@ def _account_display_name(account_dir: Path) -> str:
 
 
 def _load_avatar_fingerprints(account_dir: Path, usernames: list[str]) -> dict[str, str]:
-    path = account_dir / "head_image.db"
+    path = resolve_account_database_dir(account_dir) / "head_image.db"
     names = list(dict.fromkeys(str(value or "").strip() for value in usernames if str(value or "").strip()))
     if not path.exists() or not names:
         return {}
@@ -989,7 +974,7 @@ def _format_moment_type_label(post: dict[str, Any]) -> str:
 
 def _load_sns_users(account_dir: Path, *, usernames: Optional[list[str]] = None) -> list[dict[str, Any]]:
     """Return [{username, displayName, postCount}] sorted by postCount desc."""
-    sns_db_path = account_dir / "sns.db"
+    sns_db_path = resolve_account_database_dir(account_dir) / "sns.db"
     if not sns_db_path.exists():
         raise FileNotFoundError("sns.db not found for this account.")
 
@@ -1019,7 +1004,7 @@ def _load_sns_users(account_dir: Path, *, usernames: Optional[list[str]] = None)
     if wanted:
         names = [u for u in names if u in wanted]
 
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     contact_rows = _load_contact_rows(contact_db_path, names) if contact_db_path.exists() else {}
 
     items: list[dict[str, Any]] = []
@@ -1051,7 +1036,7 @@ def _load_sns_export_snapshot(
     这样可以保证同一轮导出中的正文、评论和点赞来自同一份快照，
     也避免了按联系人反复分页打开数据库。
     """
-    sns_db_path = account_dir / "sns.db"
+    sns_db_path = resolve_account_database_dir(account_dir) / "sns.db"
     if not sns_db_path.exists():
         # 兼容旧插件/测试代理的无文件数据源；正常产品路径始终走下方单次快照扫描。
         legacy_users = _load_sns_users(account_dir, usernames=usernames)
@@ -1112,7 +1097,7 @@ def _load_sns_export_snapshot(
         for row in rows
         if str(row["user_name"] or "").strip()
     }
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     contact_rows = _load_contact_rows(contact_db_path, list(all_usernames)) if contact_db_path.exists() else {}
     biz_index = _get_biz_to_official_index(contact_db_path) if contact_db_path.exists() else {}
     official_usernames: set[str] = set()
@@ -1239,6 +1224,7 @@ class ExportJob:
     freshness: dict[str, Any] = field(default_factory=dict)
     incremental: dict[str, int] = field(default_factory=dict)
     zip_path: Optional[Path] = None
+    temporary_zip: Optional[Path] = field(default=None, repr=False)
     folder_path: Optional[Path] = None
     staging_dir: Optional[Path] = field(default=None, repr=False)
     staged_files: dict[str, Path] = field(default_factory=dict, repr=False)
@@ -1246,6 +1232,7 @@ class ExportJob:
     options: dict[str, Any] = field(default_factory=dict)
     progress: ExportProgress = field(default_factory=ExportProgress)
     cancel_requested: bool = False
+    commit_started: bool = False
     content_key: Optional[bytearray] = field(default=None, repr=False)
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -1310,7 +1297,7 @@ class SnsExportManager:
     def cancel_job(self, export_id: str) -> bool:
         with self._lock:
             job = self._jobs.get(export_id)
-            if not job:
+            if not job or job.commit_started or job.status in {"done", "error", "cancelled"}:
                 return False
             job.cancel_requested = True
             if job.status in {"queued"}:
@@ -1620,13 +1607,17 @@ class SnsExportManager:
         with self._lock:
             self._jobs[export_id] = job
 
-        t = threading.Thread(
-            target=self._run_job_safe,
-            args=(job, account_dir),
-            name=f"sns-export-{export_id}",
-            daemon=True,
-        )
-        t.start()
+        try:
+            start_snapshot_thread(account_dir, self._run_job_safe, args=(job, account_dir),
+                                  name=f"sns-export-{export_id}")
+        except Exception as exc:
+            erase_export_content_key(job.content_key)
+            job.content_key = None
+            with self._lock:
+                job.status = "error"
+                job.error = str(exc)
+                job.finished_at = time.time()
+            raise
         return job
 
     def _should_cancel(self, job: ExportJob) -> bool:
@@ -1634,41 +1625,35 @@ class SnsExportManager:
             return bool(job.cancel_requested)
 
     def _run_job_safe(self, job: ExportJob, account_dir: Path) -> None:
-        tmp_zip: Optional[Path] = None
         outcome: str | None = None
         try:
-            tmp_zip = self._run_job(job, account_dir)
+            self._run_job(job, account_dir)
             if job.status == "done":
                 outcome = "export_completed"
-        except _JobCancelled:
-            logger.info("sns export cancelled: %s", job.export_id)
-            with self._lock:
-                job.status = "cancelled"
-                job.finished_at = time.time()
-            if tmp_zip is not None:
-                try:
-                    tmp_zip.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            self.commit_staged_files(job.export_id)
         except Exception as e:
-            logger.exception("sns export job failed: %s: %s", job.export_id, e)
-            with self._lock:
-                job.status = "error"
-                job.error = str(e)
-                job.finished_at = time.time()
-            outcome = "export_failed"
-            if tmp_zip is not None:
-                try:
-                    tmp_zip.unlink(missing_ok=True)
-                except Exception:
-                    pass
+            cancelled = isinstance(e, _JobCancelled)
+            error = "" if cancelled else str(e)
+            if cancelled:
+                logger.info("sns export cancelled: %s", job.export_id)
+            else:
+                logger.exception("sns export job failed: %s: %s", job.export_id, e)
+            try:
+                if job.temporary_zip is not None:
+                    job.temporary_zip.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                logger.exception("sns export temporary archive cleanup failed: %s", job.temporary_zip)
+                error = f"{error or 'Export cancelled'}; temporary archive cleanup failed: {cleanup_error}"
+                cancelled = False
             self.commit_staged_files(job.export_id)
+            with self._lock:
+                job.status = "cancelled" if cancelled else "error"
+                job.error = error
+                job.finished_at = time.time()
+            if not cancelled:
+                outcome = "export_failed"
         finally:
             erase_export_content_key(job.content_key)
             job.content_key = None
-            if outcome is not None:
-                record_product_event(outcome)
 
     def _run_job(self, job: ExportJob, account_dir: Path) -> Path:
         with self._lock:
@@ -1700,30 +1685,7 @@ class SnsExportManager:
             phase_name = name
             phase_started = now
 
-        # 每个导出任务在工作线程内先同步最新数据；实时源不可用时
-        # 继续导出本地历史快照，并把降级原因暴露给界面。
-        try:
-            sync_result = sync_sns_realtime_timeline_latest(
-                account=account_dir.name,
-                max_scan=2000,
-                force=1,
-            )
-            sync_status = str((sync_result or {}).get("status") or "").lower()
-            job.freshness = {
-                "status": sync_status or "unknown",
-                "synced": sync_status in {"ok", "noop"},
-                "details": _json_safe(sync_result or {}),
-            }
-            if sync_status not in {"ok", "noop"}:
-                job.warning = "实时同步未完成，已继续导出本地历史快照。"
-        except Exception as exc:  # 导出必须可在无 native broker 的环境中降级运行
-            logger.warning("sns realtime sync before export failed: export=%s error=%s", job.export_id, exc)
-            job.warning = "实时同步失败，已继续导出本地历史快照。"
-            job.freshness = {
-                "status": "warning",
-                "synced": False,
-                "error": str(exc),
-            }
+        job.freshness = {"status": "snapshot", "source": "decrypted", "synced": False}
         set_phase("reading")
 
         opts = dict(job.options or {})
@@ -1766,6 +1728,7 @@ class SnsExportManager:
 
         final_zip = (exports_root / base_name).resolve()
         tmp_zip = (exports_root / f".{base_name}.{job.export_id}.part").resolve()
+        job.temporary_zip = tmp_zip
         try:
             tmp_zip.unlink(missing_ok=True)
         except Exception:
@@ -1827,7 +1790,7 @@ class SnsExportManager:
         wxid_dir = _resolve_account_wxid_dir(account_dir)
 
         avatar_conn: Optional[sqlite3.Connection] = None
-        head_image_db_path = account_dir / "head_image.db"
+        head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
         if head_image_db_path.exists():
             try:
                 avatar_conn = sqlite3.connect(str(head_image_db_path))
@@ -1928,15 +1891,12 @@ class SnsExportManager:
                 return ""
             ext = _mime_to_ext(mt)
             arc = f"media/{str(subdir or 'images').strip().strip('/')}/{cache_key}{ext}".replace("\\", "/")
-            try:
-                if arc not in written:
-                    zf.writestr(arc, payload, compress_type=zipfile.ZIP_STORED)
-                    written.add(arc)
-                    with self._lock:
-                        job.progress.media_copied += 1
-                return arc
-            except Exception:
-                return ""
+            if arc not in written:
+                zf.writestr(arc, payload, compress_type=zipfile.ZIP_STORED)
+                written.add(arc)
+                with self._lock:
+                    job.progress.media_copied += 1
+            return arc
 
         async def prefetch_avatar_payloads(usernames: list[str]) -> None:
             missing: list[str] = []
@@ -2117,10 +2077,7 @@ class SnsExportManager:
                     return
                 prefetched_path = getattr(prefetched, "cache_path", None)
                 if prefetched_path:
-                    try:
-                        payload = Path(str(prefetched_path)).read_bytes()
-                    except Exception:
-                        payload = b""
+                    payload = Path(str(prefetched_path)).read_bytes()
                 else:
                     payload = bytes(getattr(prefetched, "payload", b"") or b"")
                 mt = str(getattr(prefetched, "media_type", "") or "")
@@ -2174,14 +2131,10 @@ class SnsExportManager:
                     raw_url=fixed or raw_url,
                 )
                 if local_path is not None:
-                    try:
-                        payload2, mt2 = _read_and_maybe_decrypt_media(local_path, account_dir)
-                        if payload2 and str(mt2 or "").startswith("image/"):
-                            payload = payload2
-                            mt = str(mt2 or "")
-                    except Exception:
-                        payload = b""
-                        mt = ""
+                    payload2, mt2 = _read_and_maybe_decrypt_media(local_path, account_dir)
+                    if payload2 and str(mt2 or "").startswith("image/"):
+                        payload = payload2
+                        mt = str(mt2 or "")
 
             if not source_is_original:
                 load_prefetched()
@@ -2243,23 +2196,16 @@ class SnsExportManager:
 
             # Prefer local cached video when possible (fast, offline-friendly).
             if use_cache and wxid_dir and str(post_id or "").strip() and str(media_id or "").strip():
-                try:
-                    local = _resolve_sns_cached_video_path(wxid_dir, str(post_id), str(media_id))
-                except Exception:
-                    local = None
+                local = _resolve_sns_cached_video_path(wxid_dir, str(post_id), str(media_id))
                 if local:
                     arc = f"media/videos/{cache_key}.mp4"
                     if arc not in written:
-                        try:
-                            zf.write(str(local), arcname=arc, compress_type=zipfile.ZIP_STORED)
-                            written.add(arc)
-                            with self._lock:
-                                job.progress.media_copied += 1
-                        except Exception:
-                            arc = ""
-                    if arc:
-                        media_written[cache_key] = arc
-                        return arc
+                        zf.write(str(local), arcname=arc, compress_type=zipfile.ZIP_STORED)
+                        written.add(arc)
+                        with self._lock:
+                            job.progress.media_copied += 1
+                    media_written[cache_key] = arc
+                    return arc
 
             prefetched_path = prefetched_media.get(task_id)
             path = Path(str(prefetched_path)) if isinstance(prefetched_path, (str, Path)) else None
@@ -2282,16 +2228,10 @@ class SnsExportManager:
 
             arc = f"media/videos/{cache_key}.mp4"
             if arc not in written:
-                try:
-                    zf.write(str(path), arcname=arc, compress_type=zipfile.ZIP_STORED)
-                    written.add(arc)
-                    with self._lock:
-                        job.progress.media_copied += 1
-                except Exception:
-                    with self._lock:
-                        job.progress.media_missing += 1
-                    media_written[cache_key] = ""
-                    return ""
+                zf.write(str(path), arcname=arc, compress_type=zipfile.ZIP_STORED)
+                written.add(arc)
+                with self._lock:
+                    job.progress.media_copied += 1
 
             media_written[cache_key] = arc
             return arc
@@ -2903,7 +2843,7 @@ class SnsExportManager:
 
         try:
             with zipfile.ZipFile(str(tmp_zip), mode="w", compression=zipfile.ZIP_DEFLATED) as raw_zf:
-                zf = IntegrityZipWriter(raw_zf)
+                zf = (raw_zf)
                 html_assets: Optional[dict[str, str]] = None
                 if export_format == "html":
                     css_payload = export_css("sns")
@@ -2912,11 +2852,12 @@ class SnsExportManager:
                         zf.writestr(html_assets["cssPath"], html_assets["cssPayload"])
                         written.add(html_assets["cssPath"])
                     else:
-                        html_assets = prepare_html_zip_assets(job.export_id, css_payload)
+                        html_assets = prepare_html_zip_assets(css_payload)
                         zf.writestr(html_assets["cssPath"], html_assets["cssPayload"])
-                        zf.writestr(html_assets["jsPath"], html_assets["jsPayload"])
                         written.add(html_assets["cssPath"])
-                        written.add(html_assets["jsPath"])
+                        if html_assets["jsPath"]:
+                            zf.writestr(html_assets["jsPath"], html_assets["jsPayload"])
+                            written.add(html_assets["jsPath"])
 
                     repo_root = Path(__file__).resolve().parents[2]
                     wxemoji_src: Optional[Path] = None
@@ -3507,14 +3448,9 @@ class SnsExportManager:
                 )
                 written.add("manifest.json")
 
-                try:
-                    zf.writestr("export_report.json", json.dumps(report, ensure_ascii=False, indent=2))
-                except Exception:
-                    pass
-                if export_format == "html" and output_mode == "zip":
-                    write_active_html_zip_integrity(zf, job.export_id, html_assets or {})
-                elif export_format != "html" and output_mode == "zip":
-                    write_zip_integrity_sidecars(zf, job.export_id)
+                zf.writestr("export_report.json", json.dumps(report, ensure_ascii=False, indent=2))
+                if (output_mode == "zip"):
+                    write_zip_checksums(raw_zf, job.export_id, check_cancel=should_cancel)
         finally:
             try:
                 if avatar_conn is not None:
@@ -3531,6 +3467,12 @@ class SnsExportManager:
             except Exception:
                 pass
 
+        # Freeze the cancellation decision before publishing any final files.
+        # Requests arriving after this boundary must not claim cancellation.
+        with self._lock:
+            if job.cancel_requested:
+                raise _JobCancelled()
+            job.commit_started = True
         if job.content_key is not None:
             final_out = final_zip.with_name(final_zip.name + ".wec")
             if final_out.exists():
@@ -3544,11 +3486,8 @@ class SnsExportManager:
                 content_key=job.content_key,
             )
         else:
-            try:
-                os.replace(str(tmp_zip), str(final_zip))
-                final_out = final_zip
-            except Exception:
-                final_out = tmp_zip
+            os.replace(str(tmp_zip), str(final_zip))
+            final_out = final_zip
 
         if output_mode == "folder":
             try:

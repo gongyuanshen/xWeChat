@@ -142,8 +142,7 @@ async def run(settings_path, output, preflight=False):
 
     single = [item for item in sample_messages(PEER) if item['sender_id'] == PEER]
     group = [item for item in sample_messages(GROUP) if item['sender_id'] != SELF]
-    with patch.object(insights, 'source_for_account', lambda account: 'snapshot'), \
-         patch.object(insight_live, 'self_username', lambda account: SELF), \
+    with patch.object(insight_live, 'self_username', lambda account: SELF), \
          patch.object(insight_label_stream, '_responses', observe_responses):
         try:
             for args in [('single_first', PEER, single[:1], []),

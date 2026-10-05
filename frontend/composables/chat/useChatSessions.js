@@ -11,7 +11,7 @@ const SESSION_LIST_WIDTH_MIN = 220
 const SESSION_LIST_WIDTH_MAX = 520
 const DEFAULT_CHAT_SOURCE = 'auto'
 
-export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled, api }) => {
+export const useChatSessions = ({ chatAccounts, selectedAccount, api }) => {
   const showSearchAccountSwitcher = false
 
   const contacts = ref([])
@@ -219,19 +219,22 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
     contactsError.value = errorMessage
   }
 
-  const requestSessionsForSelectedAccount = async (source = DEFAULT_CHAT_SOURCE) => {
+  const requestSessionsForSelectedAccount = async (source = DEFAULT_CHAT_SOURCE, { force = false, signal } = {}) => {
     const account = String(selectedAccount.value || '').trim()
     if (!account) return null
 
     const desiredSource = String(source || DEFAULT_CHAT_SOURCE).trim() || DEFAULT_CHAT_SOURCE
     const requestKey = `${account}\u0000${desiredSource}`
-    if (sessionsRequestPromise && sessionsRequestKey === requestKey) {
+    if (!force && sessionsRequestPromise && sessionsRequestKey === requestKey) {
       return sessionsRequestPromise
     }
 
     abortSessionsRequest()
     const requestSeq = ++sessionsRequestSeq
     const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const abort = () => controller?.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     sessionsRequestController = controller
     sessionsRequestKey = requestKey
 
@@ -249,6 +252,7 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
     try {
       return await requestPromise
     } finally {
+      signal?.removeEventListener('abort', abort)
       if (requestSeq === sessionsRequestSeq && sessionsRequestPromise === requestPromise) {
         sessionsRequestController = null
         sessionsRequestPromise = null
@@ -269,16 +273,18 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
       action: 'loadSessionsForSelectedAccount'
     })
     trace.log('loadSessions:start', {
-      source: DEFAULT_CHAT_SOURCE,
-      realtimeEnabled: !!realtimeEnabled?.value
+      source: DEFAULT_CHAT_SOURCE
     })
 
+    let requestSeq
     try {
       trace.log('loadSessions:request:start', {
         source: DEFAULT_CHAT_SOURCE
       })
-      const sessionsResp = await requestSessionsForSelectedAccount(DEFAULT_CHAT_SOURCE)
-      if (requestAccount !== String(selectedAccount.value || '').trim()) return contacts.value
+      const request = requestSessionsForSelectedAccount(DEFAULT_CHAT_SOURCE)
+      requestSeq = sessionsRequestSeq
+      const sessionsResp = await request
+      if (requestSeq !== sessionsRequestSeq || requestAccount !== String(selectedAccount.value || '').trim()) return contacts.value
       trace.log('loadSessions:request:end', {
         source: sessionsResp?.source || DEFAULT_CHAT_SOURCE,
         rawCount: Array.isArray(sessionsResp?.sessions) ? sessionsResp.sessions.length : 0
@@ -291,7 +297,7 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
       })
       return contacts.value
     } catch (error) {
-      if (isAbortError(error)) return contacts.value
+      if (requestSeq !== sessionsRequestSeq || requestAccount !== String(selectedAccount.value || '').trim() || isAbortError(error)) return contacts.value
       trace.log('loadSessions:request:error', {
         source: DEFAULT_CHAT_SOURCE,
         message: error?.message || ''
@@ -301,10 +307,10 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
     }
   }
 
-  const refreshSessionsForSelectedAccount = async ({ sourceOverride } = {}) => {
+  const refreshSessionsForSelectedAccount = async ({ sourceOverride, force = false, throwOnError = false, signal } = {}) => {
     if (!process.client || typeof window === 'undefined') return
     if (!selectedAccount.value) return
-    if (isLoadingContacts.value) return
+    if (isLoadingContacts.value && !force) return
 
     const requestAccount = String(selectedAccount.value || '').trim()
     const previousUsername = selectedContact.value?.username || ''
@@ -321,29 +327,34 @@ export const useChatSessions = ({ chatAccounts, selectedAccount, realtimeEnabled
     })
 
     let sessionsResp = null
+    let requestSeq
     try {
       trace.log('refreshSessions:request:start', {
         source: desiredSource || DEFAULT_CHAT_SOURCE
       })
-      sessionsResp = await requestSessionsForSelectedAccount(desiredSource || DEFAULT_CHAT_SOURCE)
-      if (requestAccount !== String(selectedAccount.value || '').trim()) return
+      const request = requestSessionsForSelectedAccount(desiredSource || DEFAULT_CHAT_SOURCE, { force, signal })
+      requestSeq = sessionsRequestSeq
+      sessionsResp = await request
+      if (signal?.aborted || requestSeq !== sessionsRequestSeq || requestAccount !== String(selectedAccount.value || '').trim()) return
       trace.log('refreshSessions:request:end', {
         source: sessionsResp?.source || desiredSource || DEFAULT_CHAT_SOURCE,
         rawCount: Array.isArray(sessionsResp?.sessions) ? sessionsResp.sessions.length : 0
       })
     } catch (error) {
-      if (isAbortError(error)) return
+      if (signal?.aborted || requestSeq !== sessionsRequestSeq || requestAccount !== String(selectedAccount.value || '').trim() || isAbortError(error)) return
       trace.log('refreshSessions:request:error', {
         source: desiredSource || DEFAULT_CHAT_SOURCE,
         message: error?.message || ''
       })
       contactsError.value = error?.message || '刷新会话失败'
+      if (throwOnError) throw error
       return
     }
 
     const sessions = Array.isArray(sessionsResp?.sessions) ? sessionsResp.sessions : []
     const nextContacts = mapSessions(sessions)
     contacts.value = nextContacts
+    contactsError.value = ''
 
     if (previousUsername) {
       const matched = nextContacts.find((contact) => contact.username === previousUsername)

@@ -1,3 +1,5 @@
+from ..data_source import normalize_data_source
+from ..snapshot_registry import resolve_account_database_dir
 import base64
 import csv
 import html
@@ -9,12 +11,13 @@ import uuid
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr
 
-from ..account_source_policy import account_prefers_decrypted_snapshot
+
+from ..archive_checksums import file_checksums, write_file_checksums
 from ..logging_config import get_logger
 
 try:
@@ -37,33 +40,16 @@ from ..chat_helpers import (
     _should_keep_session,
 )
 from ..path_fix import PathFixRoute
-from ..source_fallback import build_source_fallback_meta
-from ..export_integrity import (
-    export_css,
-    load_wce_integrity_native,
-    native_file_integrity_sidecar_paths,
-    remove_file_export_artifacts,
-    seal_bytes_artifact,
-    seal_protected_html_bytes,
-    write_file_integrity_sidecars,
-    write_protected_html_file,
-)
-from ..native_core_export import (
+
+from ..independent_html import export_css, protect_html_document
+from ..archive_checksums import remove_file_export_artifacts
+from ..export_crypto import (
     decode_export_content_key,
     encrypt_export_file_and_remove_source,
     erase_export_content_key,
 )
 from ..xlsx_export import build_xlsx_workbook
-from ..wcdb_realtime import (
-    WCDB_REALTIME,
-    WCDBRealtimeError,
-    exec_query as _wcdb_exec_query,
-    get_avatar_urls as _wcdb_get_avatar_urls,
-    get_contact as _wcdb_get_contact,
-    get_contacts_compact as _wcdb_get_contacts_compact,
-    get_display_names as _wcdb_get_display_names,
-    get_sessions as _wcdb_get_sessions,
-)
+
 
 router = APIRouter(route_class=PathFixRoute)
 logger = get_logger(__name__)
@@ -296,7 +282,7 @@ class ContactTypeFilter(BaseModel):
 
 class ContactExportRequest(BaseModel):
     account: Optional[str] = Field(None, description="账号目录名（可选，默认使用第一个）")
-    source: Optional[str] = Field("auto", description="数据源：auto/realtime 直接读取 WCDB；decrypted 使用旧本地库")
+    source: Optional[str] = Field("auto", description="数据源：auto/decrypted 使用已解密快照")
     output_dir: str = Field(..., description="导出目录绝对路径")
     format: str = Field("json", description="导出格式：html/json/txt/excel（兼容 csv）")
     include_avatar_link: bool = Field(True, description="是否导出 avatarLink 字段")
@@ -356,68 +342,15 @@ def _timestamp_date_text(value: Any) -> str:
 
 
 def _normalize_contacts_source(value: Optional[str]) -> str:
-    v = str(value or "").strip().lower()
-    if not v:
-        return "auto"
-    if v in {"auto", "default", "wechat"}:
-        return "auto"
-    if v in {"realtime", "real-time", "wcdb"}:
-        return "realtime"
-    if v in {"decrypted", "local", "sqlite", "snapshot", "output"}:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"wechat", "snapshot", "output"}:
         return "decrypted"
-    raise HTTPException(status_code=400, detail="Invalid source, use 'auto', 'realtime' or 'decrypted'.")
+    return normalize_data_source(value)
 
 
-def _resolve_contacts_source_for_account(source_norm: str, account_dir: Path) -> str:
-    # 新模式：auto 一律走 direct WCDB。旧本地 contact.db/session.db 只在显式 decrypted 时使用。
-    if source_norm == "auto" and account_prefers_decrypted_snapshot(account_dir):
-        return "decrypted"
-    if source_norm == "auto":
-        return "realtime"
-    return source_norm
-
-
-def _run_contacts_read_with_fallback(
-    *,
-    account_dir: Path,
-    source: Optional[str],
-    read: Callable[[str], Any],
-) -> tuple[Any, str, dict[str, Any]]:
-    source_requested = _normalize_contacts_source(source)
-    source_active = _resolve_contacts_source_for_account(source_requested, account_dir)
-    fallback_reason = ""
-
-    try:
-        result = read(source_active)
-    except HTTPException as exc:
-        if source_active != "realtime" or not (account_dir / "contact.db").is_file():
-            raise
-        fallback_reason = _normalize_text(getattr(exc, "detail", "") or str(exc))
-        logger.warning(
-            "[contacts] 实时读取失败，回退本地数据库 account=%s error=%s",
-            account_dir.name, fallback_reason,
-        )
-        source_active = "decrypted"
-        result = read(source_active)
-
-    retry_after_seconds = 0
-    if fallback_reason:
-        try:
-            failure = WCDB_REALTIME.get_recent_failure(account_dir.name)
-            retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-        except Exception:
-            retry_after_seconds = 0
-
-    return (
-        result,
-        source_active,
-        build_source_fallback_meta(
-            requested_source=source_requested,
-            active_source=source_active,
-            reason=fallback_reason,
-            retry_after_seconds=retry_after_seconds,
-        ),
-    )
+def _run_contacts_read(*, source: Optional[str], read: Callable[[str], Any]) -> tuple[Any, str]:
+    source_active = _normalize_contacts_source(source)
+    return read(source_active), source_active
 
 
 def _pick_case_insensitive_value(item: dict[str, Any], *keys: str) -> Any:
@@ -710,22 +643,16 @@ def _parse_contact_custom_info(value: Any) -> list[dict[str, Any]]:
 def _load_enterprise_contact_info(
     contact_db_path: Path,
     usernames: list[str],
-    *,
-    rt_conn: Any = None,
 ) -> dict[str, dict[str, Any]]:
     targets = sorted({u for u in usernames if _is_enterprise_openim_username(u)})
-    if not targets or (rt_conn is None and not contact_db_path.exists()):
+    if not targets or ((not contact_db_path.exists())):
         return {}
     conn = None
     try:
-        if rt_conn is None:
-            conn = sqlite3.connect(str(contact_db_path))
-            conn.row_factory = sqlite3.Row
+        conn = sqlite3.connect(str(contact_db_path))
+        conn.row_factory = sqlite3.Row
 
         def query(sql: str) -> list[dict[str, Any]]:
-            if rt_conn is not None:
-                with rt_conn.lock:
-                    return _wcdb_exec_query(rt_conn.handle, kind="contact", path=None, sql=sql)
             return [dict(row) for row in conn.execute(sql).fetchall()]
 
         quoted = ",".join(_sql_literal(u) for u in targets)
@@ -1140,7 +1067,7 @@ def _get_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
     except Exception:
-        return set()
+        raise
 
     out: set[str] = set()
     for row in rows:
@@ -1201,11 +1128,13 @@ def _load_contact_rows_map(contact_db_path: Path, *, include_stranger: bool = Fa
             columns = _get_table_columns(conn, table)
             sql = _build_contact_select_sql(table, columns)
             if not sql:
+                if (table == "contact" or columns):
+                    raise sqlite3.OperationalError(f"Required username column is missing from {table}.")
                 return []
             try:
                 return conn.execute(sql).fetchall()
             except Exception:
-                return []
+                raise
             return []
 
         table_names = ("contact", "stranger") if include_stranger else ("contact",)
@@ -1242,6 +1171,8 @@ def _load_contact_rows_map(contact_db_path: Path, *, include_stranger: bool = Fa
                     "add_time_text": _normalize_text(extra_info.get("add_time_text")),
                 }
         return out
+    except sqlite3.DatabaseError as exc:
+        raise sqlite3.DatabaseError(f"Cannot read contact database {contact_db_path}: {exc}") from exc
     finally:
         conn.close()
 
@@ -1634,138 +1565,6 @@ def _sql_literal(value: str) -> str:
     return "'" + str(value or "").replace("'", "''") + "'"
 
 
-def _query_realtime_contact_rows(handle: int) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    # 通讯录分类口径来自 contact 表。stranger/session 里的历史私聊很多，
-    # 不能兜底算作“好友”，否则好友数会膨胀到所有历史会话数量。
-    for table in ("contact",):
-        table_rows = _wcdb_exec_query(
-            handle,
-            kind="contact",
-            path=None,
-            sql=f"SELECT * FROM {table}",
-        )
-        for row in table_rows or []:
-            if not isinstance(row, dict):
-                continue
-            username = _normalize_text(
-                _pick_case_insensitive_value(row, "username", "user_name", "userName", "UserName")
-            )
-            if not username or username in seen:
-                continue
-            seen.add(username)
-            rows.append(row)
-    return rows
-
-
-def _query_realtime_enterprise_group_usernames(handle: int) -> set[str]:
-    out: set[str] = set()
-    try:
-        rows = _wcdb_exec_query(
-            handle,
-            kind="contact",
-            path=None,
-            sql=(
-                "SELECT username_ FROM chat_room_info_detail "
-                "WHERE (chat_room_status_ & 131072) != 0"
-            ),
-        )
-    except Exception:
-        return out
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        username = _normalize_text(
-            _pick_case_insensitive_value(row, "username_", "username", "user_name")
-        )
-        if username.endswith("@chatroom"):
-            out.add(username)
-    return out
-
-
-def _query_realtime_official_account_type_map(handle: int) -> dict[str, int]:
-    out: dict[str, int] = {}
-    try:
-        rows = _wcdb_exec_query(
-            handle,
-            kind="contact",
-            path=None,
-            sql="SELECT username, type FROM biz_info",
-        )
-    except Exception:
-        return out
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        username = _normalize_text(_pick_case_insensitive_value(row, "username", "user_name", "userName"))
-        account_type = _to_optional_int(_pick_case_insensitive_value(row, "type", "biz_type", "bizType"))
-        if username and account_type is not None:
-            out[username] = account_type
-    return out
-
-
-def _query_realtime_contact_row(handle: int, username: str) -> Optional[dict[str, Any]]:
-    u = _normalize_text(username)
-    if not u:
-        return None
-
-    quoted = _sql_literal(u)
-    for table in ("contact", "stranger"):
-        try:
-            rows = _wcdb_exec_query(
-                handle,
-                kind="contact",
-                path=None,
-                sql=f"SELECT * FROM {table} WHERE username={quoted} LIMIT 1",
-            )
-        except Exception:
-            continue
-        if rows:
-            first = rows[0]
-            if isinstance(first, dict):
-                full_row = dict(first)
-                try:
-                    compact = _wcdb_get_contact(handle, u)
-                    if isinstance(compact, dict):
-                        for key, value in compact.items():
-                            if value not in (None, "") and not full_row.get(key):
-                                full_row[key] = value
-                except Exception:
-                    pass
-                return full_row
-    try:
-        row = _wcdb_get_contact(handle, u)
-        if isinstance(row, dict) and row:
-            return row
-    except Exception:
-        pass
-    return None
-
-
-def _query_realtime_group_announcement(handle: int, username: str) -> str:
-    u = _normalize_text(username)
-    if not u.endswith("@chatroom"):
-        return ""
-    try:
-        rows = _wcdb_exec_query(
-            handle,
-            kind="contact",
-            path=None,
-            sql=(
-                "SELECT announcement_ FROM chat_room_info_detail "
-                f"WHERE username_={_sql_literal(u)} LIMIT 1"
-            ),
-        )
-    except Exception:
-        return ""
-    return _normalize_text(
-        _pick_case_insensitive_value(rows[0], "announcement_", "announcement")
-        if rows and isinstance(rows[0], dict)
-        else ""
-    )
-
-
 def _query_decrypted_group_announcement(contact_db_path: Path, username: str) -> str:
     u = _normalize_text(username)
     if not u.endswith("@chatroom") or not contact_db_path.exists():
@@ -1785,126 +1584,13 @@ def _query_decrypted_group_announcement(contact_db_path: Path, username: str) ->
             conn.close()
 
 
-def _query_realtime_common_chatrooms(handle: int, username: str) -> list[dict[str, Any]]:
-    u = _normalize_text(username)
-    if not u or u.endswith("@chatroom"):
-        return []
-
-    quoted = _sql_literal(u)
-    try:
-        rows = _wcdb_exec_query(
-            handle,
-            kind="contact",
-            path=None,
-            sql=f"""
-            SELECT cr.username AS username, cr.id AS roomId
-            FROM chatroom_member cm
-            JOIN name2id nm ON nm.rowid = cm.member_id
-            JOIN chat_room cr ON cr.id = cm.room_id
-            WHERE nm.username = {quoted}
-            ORDER BY cr.username
-            """,
-        )
-    except Exception:
-        return []
-
-    out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        room_username = _normalize_text(_pick_case_insensitive_value(row, "username", "room_username", "roomUsername"))
-        if not room_username or room_username in seen:
-            continue
-        seen.add(room_username)
-        out.append({
-            "username": room_username,
-            "roomId": _to_int(_pick_case_insensitive_value(row, "roomId", "room_id", "id")),
-        })
-    return out
-
-
-def _get_contact_profile_realtime(
-    *,
-    account_dir: Path,
-    base_url: str,
-    username: str,
-) -> tuple[dict[str, Any], bool]:
-    try:
-        rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-    except WCDBRealtimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Realtime contact profile unavailable: {e}")
-
-    row: Optional[dict[str, Any]] = None
-    display_name_fallback = ""
-    avatar_link_fallback = ""
-    common_chatrooms: list[dict[str, Any]] = []
-    common_chatroom_names: dict[str, str] = {}
-    common_chatroom_avatar_links: dict[str, str] = {}
-    announcement = ""
-    try:
-        with rt_conn.lock:
-            row = _query_realtime_contact_row(rt_conn.handle, username)
-            announcement = _query_realtime_group_announcement(rt_conn.handle, username)
-            common_chatrooms = _query_realtime_common_chatrooms(rt_conn.handle, username)
-            room_usernames = [
-                _normalize_text(item.get("username"))
-                for item in common_chatrooms
-                if _normalize_text(item.get("username"))
-            ]
-            if room_usernames:
-                try:
-                    common_chatroom_names = _wcdb_get_display_names(rt_conn.handle, room_usernames)
-                except Exception:
-                    common_chatroom_names = {}
-                try:
-                    common_chatroom_avatar_links = _wcdb_get_avatar_urls(rt_conn.handle, room_usernames)
-                except Exception:
-                    common_chatroom_avatar_links = {}
-            if row is None:
-                try:
-                    display_name_fallback = _normalize_text(_wcdb_get_display_names(rt_conn.handle, [username]).get(username))
-                except Exception:
-                    display_name_fallback = ""
-                try:
-                    avatar_link_fallback = _normalize_text(_wcdb_get_avatar_urls(rt_conn.handle, [username]).get(username))
-                except Exception:
-                    avatar_link_fallback = ""
-    except WCDBRealtimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Realtime contact profile lookup failed: {e}")
-
-    contact = _contact_item_from_profile_row(
-        account_dir=account_dir,
-        base_url=base_url,
-        username=username,
-        row=row,
-        display_name_fallback=display_name_fallback,
-        avatar_link_fallback=avatar_link_fallback,
-    )
-    enterprise_info_by_username = _load_enterprise_contact_info(account_dir / "contact.db", [username], rt_conn=rt_conn)
-    _attach_enterprise_contact_info(contact, enterprise_info_by_username.get(username))
-    for room in common_chatrooms:
-        room_username = _normalize_text(room.get("username"))
-        room["displayName"] = _normalize_text(common_chatroom_names.get(room_username)) or room_username
-        room["avatar"] = base_url + _build_avatar_url(account_dir.name, room_username)
-        room["avatarLink"] = _normalize_text(common_chatroom_avatar_links.get(room_username))
-    contact["commonChatroomCount"] = len(common_chatrooms)
-    contact["commonChatrooms"] = common_chatrooms[:20]
-    contact["announcement"] = announcement
-    return (contact, row is not None)
-
-
 def _get_contact_profile_decrypted(
     *,
     account_dir: Path,
     base_url: str,
     username: str,
 ) -> tuple[dict[str, Any], bool]:
-    contact_rows = _load_contact_rows_map(account_dir / "contact.db", include_stranger=True)
+    contact_rows = _load_contact_rows_map(resolve_account_database_dir(account_dir) / "contact.db", include_stranger=True)
     row = contact_rows.get(username)
     contact = _contact_item_from_profile_row(
         account_dir=account_dir,
@@ -1912,246 +1598,13 @@ def _get_contact_profile_decrypted(
         username=username,
         row=row,
     )
-    enterprise_info = _load_enterprise_contact_info(account_dir / "contact.db", [username]).get(username)
+    enterprise_info = _load_enterprise_contact_info(resolve_account_database_dir(account_dir) / "contact.db", [username]).get(username)
     _attach_enterprise_contact_info(contact, enterprise_info)
-    contact["announcement"] = _query_decrypted_group_announcement(account_dir / "contact.db", username)
+    contact["announcement"] = _query_decrypted_group_announcement(resolve_account_database_dir(account_dir) / "contact.db", username)
     return (
         contact,
         row is not None,
     )
-
-
-def _collect_contacts_for_account_realtime(
-    *,
-    account_dir: Path,
-    base_url: str,
-    keyword: Optional[str],
-    include_friends: bool,
-    include_groups: bool,
-    include_officials: bool,
-    include_enterprise_friends: Optional[bool] = None,
-    include_enterprise_groups: Optional[bool] = None,
-    include_official_subscriptions: Optional[bool] = None,
-    include_official_services: Optional[bool] = None,
-    include_former_friends: bool = False,
-    include_blocked: bool = False,
-) -> list[dict[str, Any]]:
-    official_subscriptions, official_services = _resolve_official_filter(
-        include_officials,
-        include_official_subscriptions,
-        include_official_services,
-    )
-    enterprise_friends, enterprise_groups = _resolve_enterprise_filter(
-        include_friends,
-        include_groups,
-        include_enterprise_friends,
-        include_enterprise_groups,
-    )
-    if not any([
-        include_friends,
-        include_groups,
-        enterprise_friends,
-        enterprise_groups,
-        official_subscriptions,
-        official_services,
-        include_former_friends,
-        include_blocked,
-    ]):
-        return []
-
-    try:
-        rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-    except WCDBRealtimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Realtime contacts unavailable: {e}")
-
-    try:
-        with rt_conn.lock:
-            raw_sessions = _wcdb_get_sessions(rt_conn.handle)
-    except WCDBRealtimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Realtime session lookup failed: {e}")
-
-    session_ts_map: dict[str, int] = {}
-    session_usernames: list[str] = []
-    for item in raw_sessions or []:
-        if not isinstance(item, dict):
-            continue
-        username = _normalize_text(
-            _pick_case_insensitive_value(item, "username", "user_name", "UserName")
-        )
-        if not username or username in session_ts_map:
-            continue
-        if not _is_valid_contact_username(username):
-            continue
-        sort_ts = _to_int(
-            _pick_case_insensitive_value(item, "sort_timestamp", "sortTimestamp", "last_timestamp", "lastTimestamp")
-        )
-        session_ts_map[username] = sort_ts
-        session_usernames.append(username)
-
-    contact_rows: list[dict[str, Any]] = []
-    official_account_type_map: dict[str, int] = {}
-    enterprise_group_usernames: set[str] = set()
-    contact_query_method = "sql"
-    try:
-        with rt_conn.lock:
-            # 全表查询成功但零行是有效结果；只有查询失败才尝试旧版备用接口。
-            try:
-                contact_rows = _query_realtime_contact_rows(rt_conn.handle)
-            except Exception as exc:
-                logger.warning(
-                    "[contacts] 实时全表查询失败，尝试备用接口 account=%s error=%s",
-                    account_dir.name, exc,
-                )
-                contact_query_method = "compact"
-                contact_rows = _wcdb_get_contacts_compact(rt_conn.handle, [])
-            official_account_type_map = _query_realtime_official_account_type_map(rt_conn.handle)
-            enterprise_group_usernames = _query_realtime_enterprise_group_usernames(rt_conn.handle)
-    except Exception as exc:
-        logger.warning("[contacts] 实时联系人查询失败 account=%s error=%s", account_dir.name, exc)
-        raise HTTPException(status_code=400, detail=f"Realtime contact lookup failed: {exc}") from exc
-    logger.info(
-        "[contacts] 实时联系人查询完成 account=%s method=%s rows=%d sessions=%d",
-        account_dir.name, contact_query_method, len(contact_rows), len(session_usernames),
-    )
-
-    contact_rows_by_username: dict[str, dict[str, Any]] = {}
-    for row in contact_rows:
-        if not isinstance(row, dict):
-            continue
-        username = _normalize_text(
-            _pick_case_insensitive_value(row, "username", "user_name", "userName", "UserName")
-        )
-        if username and username not in contact_rows_by_username:
-            contact_rows_by_username[username] = row
-
-    usernames = list(dict.fromkeys([*contact_rows_by_username, *session_usernames]))
-    display_name_usernames = [
-        username
-        for username in usernames
-        if _pick_display_name(contact_rows_by_username.get(username), username) == username
-    ]
-    avatar_url_usernames = [
-        username
-        for username in usernames
-        if not _pick_avatar_url(contact_rows_by_username.get(username))
-    ]
-    display_names: dict[str, str] = {}
-    avatar_links: dict[str, str] = {}
-    if display_name_usernames or avatar_url_usernames:
-        with rt_conn.lock:
-            if display_name_usernames:
-                try:
-                    display_names = _wcdb_get_display_names(rt_conn.handle, display_name_usernames)
-                except Exception:
-                    display_names = {}
-            if avatar_url_usernames:
-                try:
-                    avatar_links = _wcdb_get_avatar_urls(rt_conn.handle, avatar_url_usernames)
-                except Exception:
-                    avatar_links = {}
-
-    contacts: list[dict[str, Any]] = []
-    seen_contacts: set[str] = set()
-    row_usernames: set[str] = set()
-
-    for row in contact_rows:
-        username = _normalize_text(
-            _pick_case_insensitive_value(row, "username", "user_name", "userName", "UserName")
-        )
-        if not username or username in row_usernames:
-            continue
-        row_usernames.add(username)
-        if not _is_valid_contact_username(username):
-            continue
-        contact_type = _infer_contact_type(username, row)
-        if contact_type is None:
-            continue
-        if contact_type == "friend" and _is_allowed_enterprise_openim_by_local_type(
-            username,
-            _to_int(_pick_case_insensitive_value(row, "local_type", "localType", "WCDB_CT_local_type")),
-        ):
-            contact_type = "enterprise_friend"
-        elif contact_type == "group" and username in enterprise_group_usernames:
-            contact_type = "enterprise_group"
-        item = _contact_item_from_profile_row(
-            account_dir=account_dir,
-            base_url=base_url,
-            username=username,
-            row=row,
-            display_name_fallback=_normalize_text(display_names.get(username)),
-            avatar_link_fallback=_normalize_text(avatar_links.get(username)),
-        )
-        item["type"] = contact_type
-        item["_sortTs"] = _to_int(session_ts_map.get(username, 0))
-        _attach_official_account_kind(item, official_account_type_map)
-        if not _matches_keyword(item, keyword or ""):
-            continue
-        if not _contact_type_selected(
-            item,
-            include_friends=bool(include_friends),
-            include_groups=bool(include_groups),
-            include_enterprise_friends=enterprise_friends,
-            include_enterprise_groups=enterprise_groups,
-            include_official_subscriptions=official_subscriptions,
-            include_official_services=official_services,
-            include_former_friends=bool(include_former_friends),
-            include_blocked=bool(include_blocked),
-        ):
-            continue
-        seen_contacts.add(username)
-        contacts.append(item)
-
-    for username in session_usernames:
-        if username in row_usernames or username in seen_contacts:
-            continue
-        # 只用 session 兜底群聊。私聊/公众号若不在通讯录表，不应计入通讯录分类。
-        if "@chatroom" not in username:
-            continue
-        item = _contact_item_from_session(
-            account_dir=account_dir,
-            base_url=base_url,
-            username=username,
-            display_name=str(display_names.get(username) or username),
-            avatar_link=str(avatar_links.get(username) or ""),
-            sort_ts=int(session_ts_map.get(username, 0) or 0),
-        )
-        if "@chatroom" in username:
-            item["type"] = "enterprise_group" if username in enterprise_group_usernames else "group"
-        _attach_official_account_kind(item, official_account_type_map)
-        if not _matches_keyword(item, keyword or ""):
-            continue
-        if not _contact_type_selected(
-            item,
-            include_friends=bool(include_friends),
-            include_groups=bool(include_groups),
-            include_enterprise_friends=enterprise_friends,
-            include_enterprise_groups=enterprise_groups,
-            include_official_subscriptions=official_subscriptions,
-            include_official_services=official_services,
-            include_former_friends=bool(include_former_friends),
-            include_blocked=bool(include_blocked),
-        ):
-            continue
-        seen_contacts.add(username)
-        contacts.append(item)
-
-    contacts.sort(
-        key=lambda x: (
-            -_to_int(x.get("_sortTs", 0)),
-            _normalize_text(x.get("displayName", "")).lower(),
-            _normalize_text(x.get("username", "")).lower(),
-        )
-    )
-    for item in contacts:
-        item.pop("_sortTs", None)
-        name_for_pinyin = _normalize_text(item.get("displayName")) or _normalize_text(item.get("username"))
-        item["pinyinKey"] = _build_contact_pinyin_key(name_for_pinyin)
-        item["pinyinInitial"] = _build_contact_pinyin_initial(name_for_pinyin)
-    return contacts
 
 
 def _collect_contacts_for_account(
@@ -2193,25 +1646,10 @@ def _collect_contacts_for_account(
     ]):
         return []
 
-    source_norm = _resolve_contacts_source_for_account(_normalize_contacts_source(source), account_dir)
-    if source_norm == "realtime":
-        return _collect_contacts_for_account_realtime(
-            account_dir=account_dir,
-            base_url=base_url,
-            keyword=keyword,
-            include_friends=include_friends,
-            include_groups=include_groups,
-            include_officials=include_officials,
-            include_enterprise_friends=include_enterprise_friends,
-            include_enterprise_groups=include_enterprise_groups,
-            include_official_subscriptions=include_official_subscriptions,
-            include_official_services=include_official_services,
-            include_former_friends=include_former_friends,
-            include_blocked=include_blocked,
-        )
+    source_norm = _normalize_contacts_source(source)
 
-    contact_db_path = account_dir / "contact.db"
-    session_db_path = account_dir / "session.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
     contact_rows = _load_contact_rows_map(contact_db_path, include_stranger=True)
     official_account_type_map = _load_official_account_type_map(contact_db_path)
     session_ts_map = _load_session_sort_timestamps(session_db_path)
@@ -2561,7 +1999,7 @@ def _write_html_export(
     source: str,
     contacts: list[dict[str, Any]],
     include_avatar_link: bool,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     identity_fields = [("username", "用户名"), ("displayName", "显示名称")]
     detail_fields = [
         ("remark", "备注"),
@@ -2618,7 +2056,9 @@ def _write_html_export(
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>联系人导出</title><style>{export_css("contacts")}</style></head><body><div class="records-page"><main class="records-frame"><header class="masthead"><div><h1>联系人</h1><span class="count">共<strong>{len(contacts)}</strong>个联系人</span></div><div class="export-meta">账号 {html.escape(account)} · 数据源 {html.escape(source)}</div></header><div class="section-bar"><strong>全部联系人</strong><span>已显示 {len(contacts)} 个</span></div>{content}</main></div></body></html>
 '''
-    return write_protected_html_file(output_path, document, export_id)
+    document = protect_html_document(document, stylesheet_tag="", runtime_tag="")
+    output_path.write_text(document, encoding="utf-8", newline="\n")
+    return write_file_checksums(output_path, export_id), None
 
 
 def _write_excel_export(
@@ -2648,20 +2088,14 @@ def get_chat_contact_profile(
         raise HTTPException(status_code=400, detail="username is required.")
 
     def read_profile(source_active: str) -> tuple[dict[str, Any], bool]:
-        if source_active == "realtime":
-            return _get_contact_profile_realtime(
-                account_dir=account_dir,
-                base_url=base_url,
-                username=normalized_username,
-            )
         return _get_contact_profile_decrypted(
             account_dir=account_dir,
             base_url=base_url,
             username=normalized_username,
         )
 
-    (contact, found), source_norm, source_meta = _run_contacts_read_with_fallback(
-        account_dir=account_dir,
+    (contact, found), source_norm = _run_contacts_read(
+        
         source=source,
         read=read_profile,
     )
@@ -2670,7 +2104,6 @@ def get_chat_contact_profile(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **source_meta,
         "found": bool(found),
         "contact": contact,
     }
@@ -2708,17 +2141,8 @@ def get_chat_group_members(
     """
 
     def read_members(source_active: str) -> list[dict[str, Any]]:
-        if source_active == "realtime":
-            try:
-                rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-                with rt_conn.lock:
-                    return _wcdb_exec_query(rt_conn.handle, kind="contact", path=None, sql=sql)
-            except WCDBRealtimeError as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=f"Realtime group member lookup failed: {exc}") from exc
 
-        contact_db_path = account_dir / "contact.db"
+        contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
         if not contact_db_path.is_file():
             raise HTTPException(status_code=400, detail="Decrypted contact database unavailable.")
         conn = sqlite3.connect(str(contact_db_path))
@@ -2730,8 +2154,8 @@ def get_chat_group_members(
         finally:
             conn.close()
 
-    rows, _, _ = _run_contacts_read_with_fallback(
-        account_dir=account_dir,
+    rows, _ = _run_contacts_read(
+        
         source=source,
         read=read_members,
     )
@@ -2773,8 +2197,8 @@ def list_chat_contacts(
     account_dir = _resolve_account_dir(account)
     base_url = str(request.base_url).rstrip("/")
 
-    all_contacts, source_norm, source_meta = _run_contacts_read_with_fallback(
-        account_dir=account_dir,
+    all_contacts, source_norm = _run_contacts_read(
+        
         source=source,
         read=lambda source_active: _collect_contacts_for_account(
             account_dir=account_dir,
@@ -2809,7 +2233,6 @@ def list_chat_contacts(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **source_meta,
         "total": len(contacts),
         "counts": _build_counts(all_contacts),
         "contacts": contacts,
@@ -2818,7 +2241,6 @@ def list_chat_contacts(
 
 @router.post("/api/chat/contacts/export", summary="导出联系人")
 def export_chat_contacts(request: Request, req: ContactExportRequest):
-    load_wce_integrity_native()
     account_dir = _resolve_account_dir(req.account)
 
     output_dir_raw = _normalize_text(req.output_dir)
@@ -2836,8 +2258,8 @@ def export_chat_contacts(request: Request, req: ContactExportRequest):
         raise HTTPException(status_code=400, detail=f"Failed to prepare output_dir: {e}")
 
     base_url = str(request.base_url).rstrip("/")
-    contacts, source_norm, source_meta = _run_contacts_read_with_fallback(
-        account_dir=account_dir,
+    contacts, source_norm = _run_contacts_read(
+        
         source=req.source,
         read=lambda source_active: _collect_contacts_for_account(
             account_dir=account_dir,
@@ -2929,10 +2351,8 @@ def export_chat_contacts(request: Request, req: ContactExportRequest):
                 include_avatar_link=bool(req.include_avatar_link),
             )
         if fmt != "html":
-            integrity_manifest_path, integrity_signature_path = write_file_integrity_sidecars(output_path, export_id)
-        native_integrity_manifest_path, native_integrity_signature_path = (
-            native_file_integrity_sidecar_paths(output_path)
-        )
+            integrity_manifest_path = write_file_checksums(output_path, export_id)
+            integrity_signature_path = None
         if content_key is not None:
             encrypted_path = requested_output_path.with_name(requested_output_path.name + ".wec")
             if encrypted_path.exists():
@@ -2947,12 +2367,12 @@ def export_chat_contacts(request: Request, req: ContactExportRequest):
                 content_key=content_key,
                 overwrite=False,
             )
-            remove_file_export_artifacts(plaintext_output_path, export_id)
+            remove_file_export_artifacts(plaintext_output_path)
             output_path = encrypted_path
     except Exception as e:
         if encrypted_requested:
             try:
-                remove_file_export_artifacts(plaintext_output_path, export_id)
+                remove_file_export_artifacts(plaintext_output_path)
             finally:
                 if encrypted_output_path is not None:
                     encrypted_output_path.unlink(missing_ok=True)
@@ -2964,36 +2384,26 @@ def export_chat_contacts(request: Request, req: ContactExportRequest):
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **source_meta,
         "format": fmt,
         "outputPath": str(output_path),
         "integrityManifestPath": "" if encrypted_requested else str(integrity_manifest_path),
-        "integritySignaturePath": "" if encrypted_requested else str(integrity_signature_path),
-        "nativeIntegrityManifestPath": (
-            str(native_integrity_manifest_path)
-            if (not encrypted_requested) and native_integrity_manifest_path.is_file()
-            else ""
-        ),
-        "nativeIntegritySignaturePath": (
-            str(native_integrity_signature_path)
-            if (not encrypted_requested) and native_integrity_signature_path.is_file()
-            else ""
-        ),
+        "integritySignaturePath": "",
+        "integrityFormat": "WEC1" if encrypted_requested else "xwechat-sha256",
         "authoritativeSealFormat": (
             "WEC1"
             if encrypted_requested
-            else ("WES1" if native_integrity_signature_path.is_file() else "legacy")
+            else ""
         ),
         "count": len(export_contacts),
     }
 
 
-@router.get("/api/chat/contacts/export/style", summary="获取原生联系人导出样式")
+@router.get("/api/chat/contacts/export/style", summary="获取联系人导出样式")
 def get_chat_contacts_export_style():
     return Response(content=export_css("contacts"), media_type="text/css; charset=utf-8")
 
 
-@router.post("/api/chat/contacts/export/seal", summary="签名浏览器端联系人导出文件")
+@router.post("/api/chat/contacts/export/seal", summary="生成浏览器联系人导出的校验信息")
 def seal_chat_contacts_browser_export(req: ContactBrowserExportSealRequest):
     try:
         payload = base64.b64decode(req.content_base64, validate=True)
@@ -3002,12 +2412,17 @@ def seal_chat_contacts_browser_export(req: ContactBrowserExportSealRequest):
     if len(payload) > 64 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Export payload is too large.")
     file_name = Path(req.file_name).name
-    sealed = (
-        seal_protected_html_bytes(file_name, payload, uuid.uuid4().hex)
-        if file_name.lower().endswith((".html", ".htm"))
-        else seal_bytes_artifact(file_name, payload, uuid.uuid4().hex)
-    )
+    try:
+        if file_name.lower().endswith((".html", ".htm")):
+            payload = protect_html_document(
+                payload.decode("utf-8"), stylesheet_tag="", runtime_tag="",
+            ).encode("utf-8")
+        manifest = file_checksums(file_name, payload, uuid.uuid4().hex)
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {
-        "status": "success",
-        **sealed,
+        "status": "success", "integrityFormat": "xwechat-sha256",
+        "checksumsFileName": file_name + ".checksums.json",
+        "checksums": json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+        "protectedContentBase64": base64.b64encode(payload).decode("ascii"),
     }

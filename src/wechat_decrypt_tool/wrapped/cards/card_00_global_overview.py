@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import hashlib
 import json
@@ -580,7 +581,7 @@ def _compute_peak_day_details(
             break
 
         if top_username:
-            contact_rows = _load_contact_rows(account_dir / "contact.db", [top_username])
+            contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", [top_username])
             row = contact_rows.get(top_username)
             display = _pick_display_name(row, top_username)
             out["topContact"] = {
@@ -878,7 +879,7 @@ def compute_global_overview_stats(
                 pass
 
     # Resolve all sessions (usernames) so we can map msg_xxx/chat_xxx tables back to usernames.
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -1144,7 +1145,7 @@ def build_card_00_global_overview(
     stats = compute_global_overview_stats(account_dir=account_dir, year=year, sender_username=sender)
 
     # Resolve display names for top sessions (best-effort).
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     top_usernames: list[str] = []
     if stats.top_contact:
         top_usernames.append(stats.top_contact[0])

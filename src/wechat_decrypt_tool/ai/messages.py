@@ -1,6 +1,10 @@
 from __future__ import annotations
+from ..snapshot_registry import resolve_account_database_dir
 from .diagnostics import event as diagnostic_event, failures
 import logging
+from functools import wraps
+from contextvars import copy_context
+from ..snapshot_registry import snapshot_read_scope
 
 import hashlib
 import heapq
@@ -21,10 +25,10 @@ def message_identity(server_id, anchor, timestamp, local_type=0):
     return f'system:{identity}' if int(local_type or 0) == 10000 else identity
 
 
-def read_messages(account, username, start, end, count=None, require_realtime=False, checkpoint=None, page_offset=None, page_size=50, max_batch_bytes=None, message_weight=None):
+def read_messages(account, username, start, end, count=None, checkpoint=None, page_offset=None, page_size=50, max_batch_bytes=None, message_weight=None):
     """在固定时间窗口读取，复用导出分页器，避免聊天 UI 的 offset 在新增消息时漂移。"""
     pages = iter_message_pages(account, username, start, end, count=count,
-        require_realtime=require_realtime, checkpoint=checkpoint, page_offset=page_offset, page_size=page_size,
+        checkpoint=checkpoint, page_offset=page_offset, page_size=page_size,
         max_batch_chars=float('inf'), max_batch_bytes=max_batch_bytes, message_weight=message_weight)
     try:
         return next(pages)
@@ -32,7 +36,32 @@ def read_messages(account, username, start, end, count=None, require_realtime=Fa
         pages.close()
 
 
-def iter_message_pages(account, username, start, end, count=None, require_realtime=False, checkpoint=None, page_offset=0, page_size=100, on_progress=None, max_batch_chars=128000, cursor=None, emit_cursor=False, max_batch_bytes=None, message_weight=None, count_key=None, descending=False, message_kind=None, sender_id=None):
+def _pin_message_snapshot(function):
+    @wraps(function)
+    def pinned(account, *args, **kwargs):
+        # Validation in the iterator runs before account lookup. Its first
+        # database read pins the generation, then every advance reuses it.
+        context = copy_context()
+        scope = snapshot_read_scope(independent=True)
+        context.run(scope.__enter__)
+        iterator = context.run(function, account, *args, **kwargs)
+        end = object()
+        try:
+            while True:
+                page = context.run(next, iterator, end)
+                if page is end:
+                    return
+                yield page
+        finally:
+            try:
+                context.run(iterator.close)
+            finally:
+                context.run(scope.__exit__, None, None, None)
+    return pinned
+
+
+@_pin_message_snapshot
+def iter_message_pages(account, username, start, end, count=None, checkpoint=None, page_offset=0, page_size=100, on_progress=None, max_batch_chars=128000, cursor=None, emit_cursor=False, max_batch_bytes=None, message_weight=None, count_key=None, descending=False, message_kind=None, sender_id=None):
     """同一会话只打开一次消息流；新断点从最后提交的时间读取并按身份去重。
 
     迭代和关闭必须在同一线程进行，以保证 SQLite 连接及底层游标的生命周期。
@@ -58,27 +87,12 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
         raise ValueError("每页消息数量必须大于零")
     from ..chat_helpers import (_resolve_account_dir, _resource_lookup_chat_id, _load_contact_rows,
                                 _pick_display_name, _load_group_nickname_map_from_contact_db)
-    from ..account_source_policy import account_prefers_decrypted_snapshot
     from ..chat_export_service import _iter_rows_for_conversation, _parse_message_for_export
     from ..routers.chat import _extract_at_usernames_from_source
-    from ..wcdb_realtime import WCDB_REALTIME
     account_dir = _resolve_account_dir(account)
-    names = _load_contact_rows(account_dir / "contact.db", [username])
+    names = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", [username])
     name = _pick_display_name(names.get(username), username)
-    source, connection, warning = "decrypted", None, ""
-    if account_prefers_decrypted_snapshot(account_dir):
-        if require_realtime:
-            raise ValueError("当前账号是导入快照，实时关注提醒不可用")
-    else:
-        try:
-            connection = WCDB_REALTIME.ensure_connected(account_dir)
-            source = "realtime"
-        except Exception as error:
-            diagnostic_event('messages.source.fallback', level=logging.WARNING, error=error, account=account, username=username, data_source='decrypted')
-            if require_realtime:
-                raise ValueError("实时消息源不可用，请检查微信、数据库密钥及实时连接") from None
-            warning = "实时源不可用，本次读取已解密快照"
-    resource = account_dir / "message_resource.db"
+    resource = resolve_account_database_dir(account_dir) / "message_resource.db"
     resource_conn = sqlite3.connect(f"file:{resource.as_posix()}?mode=ro", uri=True) if resource.exists() else None
     output = deque(maxlen=count) if count else []
     rows = None
@@ -96,8 +110,8 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
         if len(sender_names) + len(missing) > 1000:
             sender_names.clear()
             missing = list(dict.fromkeys(u for u in usernames if u))
-        contacts = _load_contact_rows(account_dir / 'contact.db', missing)
-        cards = _load_group_nickname_map_from_contact_db(account_dir / 'contact.db', username, missing)
+        contacts = _load_contact_rows(resolve_account_database_dir(account_dir) / 'contact.db', missing)
+        cards = _load_group_nickname_map_from_contact_db(resolve_account_database_dir(account_dir) / 'contact.db', username, missing)
         for sender in missing:
             contact_name = _pick_display_name(contacts.get(sender), sender)
             display = cards.get(sender) or contact_name
@@ -111,7 +125,7 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
             message['sender_aliases'] = aliases
     last_progress = time.monotonic()
     page_started = time.monotonic()
-    diagnostic_event('messages.page.started', account=account, username=username, offset=page_offset, start=start, end=end, data_source=source)
+    diagnostic_event('messages.page.started', account=account, username=username, offset=page_offset, start=start, end=end, data_source="decrypted")
 
     def progress(completed, force=False):
         nonlocal last_progress
@@ -133,10 +147,10 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
                 display_sender(msg)
         committed_offset += len(messages)
         diagnostic_event('messages.page.finished', account=account, username=username, count=len(messages), has_more=has_more,
-                         data_source=source, duration_ms=(time.monotonic()-page_started)*1000,
+                         data_source="decrypted", duration_ms=(time.monotonic()-page_started)*1000,
                          material_budget=byte_limit, bytes=output_bytes if byte_limit is not None else None,
                          reason_code='oversized_message' if byte_limit is not None and output_bytes > byte_limit else 'page_ready')
-        return {"username": username, "name": name, "messages": messages, "source": source, "warning": warning,
+        return {"username": username, "name": name, "messages": messages, "source": "decrypted", "warning": "",
                 **({'has_more': has_more, 'next_offset': committed_offset if has_more else None} if page_offset is not None else {}),
                 **({'cursor': saved_cursor} if track_cursor else {})}
 
@@ -144,7 +158,7 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
         chat_id = _resource_lookup_chat_id(resource_conn, username) if resource_conn else None
         def read_rows(window_start, window_end):
             return _iter_rows_for_conversation(account_dir=account_dir, conv_username=username,
-                start_time=window_start, end_time=window_end, source=source, rt_conn=connection, checkpoint=checkpoint,
+                start_time=window_start, end_time=window_end, source="decrypted", checkpoint=checkpoint,
                 **({'descending': True} if descending else {}))
 
         if count:
@@ -231,7 +245,7 @@ def iter_message_pages(account, username, start, end, count=None, require_realti
                     progress(page_seen - 1, force=True)
                     yield result(True)
                     page_started = time.monotonic()
-                    diagnostic_event('messages.page.started', account=account, username=username, offset=page_seen-1, data_source=source)
+                    diagnostic_event('messages.page.started', account=account, username=username, offset=page_seen-1, data_source="decrypted")
                     output = deque(maxlen=count) if count else []
                     output_chars = 0
                     output_bytes = 2

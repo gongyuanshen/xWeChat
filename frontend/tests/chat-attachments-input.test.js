@@ -5,6 +5,7 @@ import MessageInputWorkspace from '../components/chat/MessageInputWorkspace.vue'
 
 const image = { kind: 'image', path: 'C:\\照片\\图.png', name: '图.png', sizeBytes: 512, previewDataUrl: 'data:image/png;base64,aW1hZ2U=' }
 const file = { kind: 'file', path: 'C:\\资料\\报告.pdf', name: '报告.pdf', sizeBytes: 2048 }
+const first = { kind: 'file', path: 'C:\\资料\\首项.txt', name: '首项.txt', sizeBytes: 1 }
 const last = { kind: 'file', path: 'C:\\资料\\末项.txt', name: '末项.txt', sizeBytes: 0 }
 const picked = (...attachments) => ({ canceled: false, attachments })
 const deferred = () => {
@@ -20,7 +21,8 @@ describe('混合附件列表与顺序发送', () => {
     vi.stubGlobal('useState', () => ref({ selected: {}, drafts: {}, pinned: {} }))
     state = reactive({ selectedAccount: 'account', selectedContact: { username: 'peer', name: '甲' }, refreshSelectedMessages: vi.fn() })
     api = {
-      sendChatImage: vi.fn().mockResolvedValue({ success: true }),
+      sendChatImage: vi.fn().mockResolvedValue({ success: true, session: '甲', image_name: image.name,
+        image_format: 'PNG', image_size_bytes: 512, duration_ms: 10, timestamp: 1 }),
       sendChatFile: vi.fn().mockResolvedValue({ success: true }),
       sendChatMessage: vi.fn().mockResolvedValue({ success: true })
     }
@@ -78,22 +80,66 @@ describe('混合附件列表与顺序发送', () => {
     expect(names()).toEqual(['报告.pdf', '报告.pdf'])
   })
 
-  it('文件入口混选后逐项分流，成功后等待冷却才发送下一项，文字不混发', async () => {
+  it('混合附件按列表次序分别调用图片和文件接口，成功项逐一移除', async () => {
     window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(image, file, last))
     await pick('file')
-    await wrapper.get('textarea').setValue('保留文字')
+    expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeUndefined()
     await send()
-    expect(api.sendChatImage).toHaveBeenCalledExactlyOnceWith({ account: 'account', username: 'peer', display_name: '甲', image_path: image.path })
-    expect(api.sendChatFile).not.toHaveBeenCalled()
     expect(names()).toEqual(['报告.pdf', '末项.txt'])
-    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
-    await wrapper.get('textarea').trigger('keydown.enter.exact')
+    expect(api.sendChatImage).toHaveBeenCalledExactlyOnceWith({
+      account: 'account', username: 'peer', display_name: '甲', image_path: image.path
+    })
+    expect(api.sendChatFile).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(999)
     expect(api.sendChatFile).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(1)
     await flushPromises()
-    expect(api.sendChatFile).toHaveBeenCalledExactlyOnceWith({ account: 'account', username: 'peer', display_name: '甲', file_path: file.path })
+    expect(api.sendChatFile).toHaveBeenCalledExactlyOnceWith({
+      account: 'account', username: 'peer', display_name: '甲', file_path: file.path
+    })
+    expect(names()).toEqual(['末项.txt'])
     await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(2)
+    expect(api.sendChatFile).toHaveBeenLastCalledWith({
+      account: 'account', username: 'peer', display_name: '甲', file_path: last.path
+    })
+    expect(names()).toEqual([])
+  })
+
+  it('图片结果未知时保留该图片及后续附件，已成功文件不重发', async () => {
+    window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(first, image, last))
+    await pick('file')
+    api.sendChatImage.mockRejectedValueOnce({ code: 'WECHAT_SEND_UNCONFIRMED', message: '图片回执待核对' })
+    await send()
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushPromises()
+    expect(names()).toEqual(['图.png', '末项.txt'])
+    expect(wrapper.get('.chat-input-image-pending').text()).toContain('图片回执待核对')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
+    expect(api.sendChatImage).toHaveBeenCalledOnce()
+    await wrapper.get('.chat-input-image-confirm').trigger('click')
+    expect(names()).toEqual(['末项.txt'])
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
+    await send()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(2)
+    expect(api.sendChatImage).toHaveBeenCalledOnce()
+    expect(names()).toEqual([])
+  })
+
+  it('文件逐项发送并等待冷却，文字不混发', async () => {
+    await pick('file')
+    await wrapper.get('textarea').setValue('保留文字')
+    await send()
+    expect(api.sendChatFile).toHaveBeenCalledExactlyOnceWith({ account: 'account', username: 'peer', display_name: '甲', file_path: file.path })
+    expect(api.sendChatImage).not.toHaveBeenCalled()
+    expect(names()).toEqual(['末项.txt'])
+    await wrapper.get('.chat-input-btn-send-attachments').trigger('click')
+    await wrapper.get('textarea').trigger('keydown.enter.exact')
+    await vi.advanceTimersByTimeAsync(999)
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(1)
     await flushPromises()
     expect(api.sendChatFile).toHaveBeenLastCalledWith({ account: 'account', username: 'peer', display_name: '甲', file_path: last.path })
     expect(api.sendChatFile).toHaveBeenCalledTimes(2)
@@ -103,27 +149,28 @@ describe('混合附件列表与顺序发送', () => {
   })
 
   it('第二项明确失败时保留第二项及后续项，继续发送不会重发已成功项', async () => {
-    await pick('image')
+    window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(first, file, last))
     await pick('file')
-    api.sendChatFile.mockRejectedValueOnce({ code: 'WECHAT_FILE_NOT_FOUND', message: '文件不存在' })
+    api.sendChatFile.mockResolvedValueOnce({ success: true }).mockRejectedValueOnce({ code: 'WECHAT_FILE_NOT_FOUND', message: '文件不存在' })
     await send()
     await vi.advanceTimersByTimeAsync(1000)
     await flushPromises()
     expect(names()).toEqual(['报告.pdf', '末项.txt'])
     expect(wrapper.get('[role="alert"]').text()).toContain('文件不存在')
     await vi.advanceTimersByTimeAsync(5000)
-    expect(api.sendChatFile).toHaveBeenCalledOnce()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(2)
     await send()
     await vi.advanceTimersByTimeAsync(1000)
     await flushPromises()
-    expect(api.sendChatImage).toHaveBeenCalledOnce()
-    expect(api.sendChatFile).toHaveBeenCalledTimes(3)
+    expect(api.sendChatImage).not.toHaveBeenCalled()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(4)
     expect(names()).toEqual([])
   })
 
   it.each([new Error('响应丢失'), { code: 'WECHAT_SEND_UNCONFIRMED', message: '未确认' }, { receipt: {} }])('不确定项必须人工核对，不自动发送后续项或重试', async (failure) => {
-    await pick('image')
+    window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(first, file, last))
     await pick('file')
+    api.sendChatFile.mockResolvedValueOnce({ success: true })
     if (failure.receipt) api.sendChatFile.mockResolvedValueOnce(failure.receipt)
     else api.sendChatFile.mockRejectedValueOnce(failure)
     await send()
@@ -134,13 +181,13 @@ describe('混合附件列表与顺序发送', () => {
     expect(wrapper.get('.chat-input-btn-send-attachments').attributes('disabled')).toBeDefined()
     expect(wrapper.findAll('.chat-input-attachment-remove')[0].attributes('disabled')).toBeDefined()
     await vi.advanceTimersByTimeAsync(10000)
-    expect(api.sendChatFile).toHaveBeenCalledOnce()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(2)
     await wrapper.get('.chat-input-file-confirm').trigger('click')
     expect(names()).toEqual(['末项.txt'])
-    expect(api.sendChatFile).toHaveBeenCalledOnce()
-    await send()
     expect(api.sendChatFile).toHaveBeenCalledTimes(2)
-    expect(api.sendChatImage).toHaveBeenCalledOnce()
+    await send()
+    expect(api.sendChatFile).toHaveBeenCalledTimes(3)
+    expect(api.sendChatImage).not.toHaveBeenCalled()
   })
 
   it('核对未发送只解锁当前项，不自动恢复整批发送', async () => {
@@ -155,7 +202,7 @@ describe('混合附件列表与顺序发送', () => {
   })
 
   it.each(['contact', 'account', 'roundtrip'])('冷却中切换 %s 后终止批次；切回也必须重新点击', async (kind) => {
-    await pick('image')
+    window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(first, file, last))
     await pick('file')
     await send()
     if (kind === 'account') state.selectedAccount = 'other-account'
@@ -163,27 +210,27 @@ describe('混合附件列表与顺序发送', () => {
     if (kind === 'roundtrip') state.selectedContact = { username: 'peer', name: '甲' }
     await vi.advanceTimersByTimeAsync(1000)
     await flushPromises()
-    expect(api.sendChatFile).not.toHaveBeenCalled()
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
     expect(names()).toEqual(['报告.pdf', '末项.txt'])
     expect(wrapper.get('[role="alert"]').text()).toContain('会话')
     state.selectedAccount = 'account'
     state.selectedContact = { username: 'peer', name: '甲' }
     await flushPromises()
-    expect(api.sendChatFile).not.toHaveBeenCalled()
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
   })
 
   it('请求期间切换会话只完成已提交项，不发送下一项也不刷新新会话', async () => {
-    await pick('image')
+    window.wechatDesktop.chooseFile.mockResolvedValueOnce(picked(first, file, last))
     await pick('file')
     const pending = deferred()
-    api.sendChatImage.mockReturnValueOnce(pending.promise)
+    api.sendChatFile.mockReturnValueOnce(pending.promise)
     await send()
     state.selectedContact = { username: 'other', name: '乙' }
     pending.resolve({ success: true })
     await flushPromises()
     await vi.advanceTimersByTimeAsync(1000)
     expect(names()).toEqual(['报告.pdf', '末项.txt'])
-    expect(api.sendChatFile).not.toHaveBeenCalled()
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
     expect(state.refreshSelectedMessages).not.toHaveBeenCalled()
     expect(wrapper.get('.chat-input-btn-file').attributes('disabled')).toBeDefined()
   })
@@ -202,11 +249,10 @@ describe('混合附件列表与顺序发送', () => {
   })
 
   it('组件卸载后不会继续发送队列', async () => {
-    await pick('image')
     await pick('file')
     await send()
     wrapper.unmount()
     await vi.advanceTimersByTimeAsync(1000)
-    expect(api.sendChatFile).not.toHaveBeenCalled()
+    expect(api.sendChatFile).toHaveBeenCalledOnce()
   })
 })

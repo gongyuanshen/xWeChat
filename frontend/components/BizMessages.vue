@@ -171,7 +171,6 @@ const api = useApi()
 
 import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
-import { useChatRealtimeStore } from '~/stores/chatRealtime'
 
 const accounts = ref([])
 const loadingAccounts = ref(false)
@@ -181,9 +180,7 @@ const selectedBizAccount = ref(null)
 const exportDialogOpen = ref(false)
 
 const chatAccountsStore = useChatAccountsStore()
-const realtimeStore = useChatRealtimeStore()
 const { selectedAccount: selectedDbAccount } = storeToRefs(chatAccountsStore)
-const { enabled: realtimeEnabled, changeSeq } = storeToRefs(realtimeStore)
 
 const messages = ref([])
 const loadingMessages = ref(false)
@@ -194,8 +191,6 @@ const DEFAULT_BIZ_SOURCE = 'auto'
 const hasMore = ref(true)
 
 const messageListRef = ref(null)
-let realtimeRefreshFuture = null
-let realtimeRefreshQueued = false
 
 // 默认占位图
 // const defaultAvatar = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCIgdmlld0JveD0iMCAwIDQwIDQwIj48cmVjdCB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIGZpbGw9IiNlNWU3ZWIiLz48L3N2Zz4='
@@ -304,69 +299,6 @@ const loadMessages = async () => {
   }
 }
 
-const refreshSelectedMessagesInBackground = async () => {
-  const username = String(selectedBizAccount.value?.username || '').trim()
-  if (!username) return
-  const requestedLimit = Math.min(500, Math.max(limit, messages.value.length || 0))
-  const params = {
-    account: getCurrentAccountParam(),
-    username,
-    offset: 0,
-    limit: requestedLimit,
-    source: DEFAULT_BIZ_SOURCE,
-  }
-  const res = username === 'gh_3dfda90e39d6'
-    ? await api.listBizPayRecords(params)
-    : await api.listBizMessages(params)
-  if (String(selectedBizAccount.value?.username || '').trim() !== username) return
-
-  const next = Array.isArray(res?.data) ? res.data : []
-  const byKey = new Map()
-  for (const message of [...next, ...messages.value]) {
-    const key = `${message?.local_id || 0}:${message?.create_time || 0}`
-    if (!byKey.has(key)) byKey.set(key, message)
-  }
-  const merged = [...byKey.values()].sort((left, right) => {
-    return Number(right?.create_time || 0) - Number(left?.create_time || 0)
-      || Number(right?.local_id || 0) - Number(left?.local_id || 0)
-  })
-  const previousSignature = messages.value.map(message => `${message?.local_id || 0}:${message?.create_time || 0}`).join('|')
-  const nextSignature = merged.map(message => `${message?.local_id || 0}:${message?.create_time || 0}`).join('|')
-  if (nextSignature !== previousSignature) messages.value = merged
-  if (typeof res?.hasMore === 'boolean' && messages.value.length <= requestedLimit) {
-    hasMore.value = res.hasMore
-  }
-}
-
-const syncAllBizRealtime = async () => {
-  // 服务号页面现在默认直接读取 WCDB realtime（source=auto），不再依赖先同步到本地 output 库。
-  // 因此收到 db_storage 变化后直接刷新服务号列表和当前服务号消息，避免 sync_all 没有插入本地库时漏刷。
-  try {
-    await fetchAccounts({ preserveSelection: true, silent: true })
-    if (selectedBizAccount.value?.username) {
-      await refreshSelectedMessagesInBackground()
-    }
-  } catch (err) {
-    console.error('实时刷新服务号失败:', err)
-  }
-}
-
-const queueRealtimeBizRefresh = () => {
-  if (!realtimeEnabled.value) return
-  if (realtimeRefreshFuture) {
-    realtimeRefreshQueued = true
-    return
-  }
-
-  realtimeRefreshFuture = syncAllBizRealtime().finally(() => {
-    realtimeRefreshFuture = null
-    if (realtimeRefreshQueued) {
-      realtimeRefreshQueued = false
-      queueRealtimeBizRefresh()
-    }
-  })
-}
-
 // 向上滚动加载逻辑
 // 因为容器设置了 flex-col-reverse，所以 scrollTop 越靠近负值(或0取决于浏览器)越是到了历史消息端
 // 但比较通用兼容的做法是监听 scroll，距离顶部或底部小于阈值时触发
@@ -381,7 +313,6 @@ const handleScroll = (e) => {
 
 watch(selectedDbAccount, async (next, prev) => {
   if (String(next || '').trim() === String(prev || '').trim()) return
-  await realtimeStore.enable({ silent: true, scope: 'all' })
   selectedBizAccount.value = null
   resetMessagesState()
   searchQuery.value = ''
@@ -393,21 +324,13 @@ watch(selectedDbAccount, async (next, prev) => {
   await fetchAccounts({ preserveSelection: false })
 })
 
-watch(changeSeq, (next, prev) => {
-  if (!realtimeEnabled.value) return
-  if (next === prev) return
-  queueRealtimeBizRefresh()
-})
-
 onMounted(async () => {
   await chatAccountsStore.ensureLoaded()
-  await realtimeStore.enable({ silent: true, scope: 'all' })
   await fetchAccounts({ preserveSelection: false })
 })
 
 onUnmounted(() => {
   exportDialogOpen.value = false
-  void realtimeStore.disable({ silent: true })
 })
 </script>
 

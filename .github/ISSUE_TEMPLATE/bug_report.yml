@@ -14,22 +14,12 @@ body:
 
         上传前请删除数据库密钥、聊天内容及其他敏感信息；不要上传微信数据库。
 
-  - type: dropdown
-    id: distribution
-    attributes:
-      label: 运行方式
-      options:
-        - GitHub Release 安装包
-        - 源码运行
-    validations:
-      required: true
-
   - type: input
     id: version
     attributes:
-      label: 安装包版本或源码提交 Hash
-      description: 安装包填写版本号（例如 2.2.1）；源码运行填写 `git rev-parse HEAD` 输出的完整 40 位 Hash。
-      placeholder: 2.2.1 或 3bd0106b6cd1265fd003170cc58d41d1b58b13ce
+      label: 源码提交 Hash
+      description: 当前暂停安装包及免安装版发行，请填写源码运行时 `git rev-parse HEAD` 输出的完整 40 位 Hash。
+      placeholder: 3bd0106b6cd1265fd003170cc58d41d1b58b13ce
     validations:
       required: true
 
@@ -55,7 +45,7 @@ body:
     attributes:
       label: 出错功能
       options:
-        - 安装或启动
+        - 依赖配置或启动
         - 微信与账号检测
         - 密钥获取或数据库解密
         - 聊天记录

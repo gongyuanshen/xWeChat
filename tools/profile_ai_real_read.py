@@ -11,9 +11,6 @@ import time
 
 
 async def main(args):
-    from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-    configure_native_core_entrypoint()
-    from wechat_decrypt_tool import chat_realtime_reader
     cutoff = args.cutoff or int(time.time())
     records = []
     profiler = cProfile.Profile()
@@ -23,10 +20,6 @@ async def main(args):
         profiler.enable()
         try:
             for username in args.username:
-                if args.cold_schema:
-                    # 对照组只关闭跨会话目录复用，底层仍读取同一份真实数据。
-                    with chat_realtime_reader._reader_cache_lock:
-                        chat_realtime_reader._message_schema_cache.clear()
                 count = 0
                 identities = []
                 for page in iter_message_pages(args.account, username, cutoff - 3600, cutoff - 1):
@@ -42,21 +35,18 @@ async def main(args):
     pstats.Stats(profiler, stream=text).strip_dirs().sort_stats('cumulative').print_stats(45)
     args.output.write_text(text.getvalue(), encoding='utf-8')
     args.output.with_suffix('.json').write_text(json.dumps({'cutoff': cutoff,
-        'schema_reuse': not args.cold_schema, 'records': records}, indent=2), encoding='utf-8')
+        'records': records}, indent=2), encoding='utf-8')
     print(text.getvalue())
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--username', action='append', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--cutoff', type=int)
-    parser.add_argument('--cold-schema', action='store_true')
     args = parser.parse_args()
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(args.data_dir.resolve())
     os.environ['WECHAT_TOOL_OUTPUT_DIR'] = str(args.data_dir.resolve() / 'output')
-    os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
     asyncio.run(main(args))

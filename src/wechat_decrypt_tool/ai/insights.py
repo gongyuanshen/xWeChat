@@ -21,6 +21,9 @@ from .model_execution import model_policy
 from .model_selection import SelectedModel, selected_model
 from .providers import ProviderFailure, analysis_messages, audit_task_id, public_profile
 from .service import get_ai_service
+from ..app_paths import get_output_dir
+from ..account_workers import account_to_thread
+from ..snapshot_registry import account_work, create_account_task
 
 TRAIT_KEYS = ('energy', 'humor', 'calm', 'initiative', 'care', 'closeness')
 SCHEMA_VERSION = 1
@@ -73,10 +76,6 @@ class InsightCancelled(Exception):
     pass
 
 
-def source_for_account(account):
-    from ..account_source_policy import account_prefers_decrypted_snapshot
-    from ..chat_helpers import _resolve_account_dir
-    return 'snapshot' if account_prefers_decrypted_snapshot(_resolve_account_dir(account)) else 'realtime'
 
 
 def insight_profile(profile):
@@ -188,27 +187,28 @@ class InsightService:
                     thinking_budget=choice['thinking_budget'])
             profile = insight_profile(profile)
             model = public_profile(profile)
-        source = source_for_account(data['account'])
-        loop = asyncio.get_running_loop()
-        with self.ai.account_lifecycle_lock, self.store.lock:
-            if self.stopping:
-                raise ValueError('分析服务正在停止')
-            self.ai.deleted_accounts.discard(data['account'])
-            self.store.revoked_accounts.discard(data['account'])
-            task = self.store.put('insight_task', data | {
-                'id': uuid.uuid4().hex, 'selected_model': choice, 'model': model,
-                'schema_version': SCHEMA_VERSION, 'status': 'queued', 'stage': '等待读取',
-                'analysis_scope': scope,
-                'read_scope': scope,
-                'context_budget': context_budget(profile) if profile is not None else None,
-                'created': time.time(), 'data_source': source, 'cancel_requested': False,
-                'progress': dict(read=0, analyzed=0, reused=0, batches=0),
-                'coverage': dict(total=0, text=0, skipped=0, target_text=0, participants=0),
-                'portrait': None, 'references': [], 'error': None,
-            }, account=data['account'])
-            self.jobs[task['id']] = loop.create_task(self.execute(task['id'], copy.deepcopy(profile)))
-        self._event(task)
-        return task
+        with account_work(get_output_dir() / 'databases' / data['account']):
+            source = 'snapshot'
+            with self.ai.account_lifecycle_lock, self.store.lock:
+                if self.stopping:
+                    raise ValueError('分析服务正在停止')
+                self.ai.deleted_accounts.discard(data['account'])
+                self.store.revoked_accounts.discard(data['account'])
+                task = self.store.put('insight_task', data | {
+                    'id': uuid.uuid4().hex, 'selected_model': choice, 'model': model,
+                    'schema_version': SCHEMA_VERSION, 'status': 'queued', 'stage': '等待读取',
+                    'analysis_scope': scope,
+                    'read_scope': scope,
+                    'context_budget': context_budget(profile) if profile is not None else None,
+                    'created': time.time(), 'data_source': source, 'cancel_requested': False,
+                    'progress': dict(read=0, analyzed=0, reused=0, batches=0),
+                    'coverage': dict(total=0, text=0, skipped=0, target_text=0, participants=0),
+                    'portrait': None, 'references': [], 'error': None,
+                }, account=data['account'])
+                self.jobs[task['id']] = create_account_task(get_output_dir() / 'databases' / data['account'],
+                        self.execute, task['id'], copy.deepcopy(profile))
+            self._event(task)
+            return task
 
     def _event(self, task):
         self.store.event(task['account'], 'insight', {'task_id': task['id'], **{
@@ -240,7 +240,7 @@ class InsightService:
         group = task['username'].endswith('@chatroom')
         target_id = task['member_username'] if group else task['username']
         pages = self.reader(task['account'], task['username'], task['start'], task['end'] - 1,
-            require_realtime=task['data_source'] == 'realtime', page_size=100,
+            page_size=100,
             checkpoint=lambda: self._check(task['id']),
             **({'sender_id': target_id} if target_id else {}))
         try:
@@ -475,7 +475,7 @@ class InsightService:
         try:
             task = self._check(id)
             self._update(id, status='running', stage='读取所选聊天范围')
-            reading = asyncio.create_task(asyncio.to_thread(self._read_material, task))
+            reading = asyncio.create_task(account_to_thread(get_output_dir() / 'databases' / task['account'], self._read_material, task))
             coverage = await asyncio.shield(reading)
             self._check(id)
             if task['engine'] == 'laya':
@@ -664,7 +664,7 @@ class InsightService:
                                 self._check(id)
                                 fine = predict_message(runtime, item, context, portraits.get(item['sender_id']), private_chat=not group)
                                 return answers, fine
-                            operation = asyncio.create_task(asyncio.to_thread(predict))
+                            operation = asyncio.create_task(account_to_thread(get_output_dir() / 'databases' / task['account'], predict))
                             try:
                                 answers, fine = await asyncio.shield(operation)
                             finally:
@@ -731,13 +731,12 @@ class InsightService:
     async def members(self, account, username):
         if not username.endswith('@chatroom'):
             raise ValueError('只有群聊可以选择成员')
-        source = source_for_account(account)
         def read():
             members = {}
-            pages = self.reader(account, username, 0, int(time.time()) - 1, require_realtime=source == 'realtime', page_size=100)
+            pages = self.reader(account, username, 0, int(time.time()) - 1, page_size=100)
             try:
                 for page in pages:
-                    expected = 'decrypted' if source == 'snapshot' else 'realtime'
+                    expected = 'decrypted'
                     if page['source'] != expected or page.get('warning'):
                         raise ValueError('群成员数据来源发生变化')
                     for msg in page['messages']:
@@ -746,7 +745,7 @@ class InsightService:
             finally:
                 pages.close()
             return sorted(members.values(), key=lambda m: (m['displayName'], m['username']))
-        return await asyncio.to_thread(read)
+        return await account_to_thread(get_output_dir() / 'databases' / account, read)
 
     def start(self):
         self.stopping = False

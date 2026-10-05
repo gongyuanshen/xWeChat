@@ -25,28 +25,6 @@ def normalize_key_store_path(path_value: Optional[str]) -> str:
             return raw
 
 
-def _stored_db_storage_path(item: Any) -> str:
-    if not isinstance(item, dict):
-        return ""
-    direct = normalize_key_store_path(item.get("db_key_source_db_storage_path"))
-    if direct:
-        return direct
-    wxid_dir = normalize_key_store_path(item.get("db_key_source_wxid_dir"))
-    return normalize_key_store_path(Path(wxid_dir) / "db_storage") if wxid_dir else ""
-
-
-def _purge_native_raw_key_cache_roots(roots: Iterable[str]) -> None:
-    try:
-        from .native_core_raw_key_cache import remove_cache_for_root
-    except Exception:
-        return
-    for root in roots:
-        try:
-            remove_cache_for_root(Path(root))
-        except Exception:
-            pass
-
-
 def _normalize_account_aliases(*values: Optional[str], aliases: Optional[Iterable[str]] = None) -> list[str]:
     out: list[str] = []
     seen: set[str] = set()
@@ -126,14 +104,20 @@ def _atomic_write_json(path: Path, payload: Any) -> None:
     tmp.replace(path)
 
 
-def load_account_keys_store() -> dict[str, Any]:
+def load_account_keys_store(*, strict: bool = False) -> dict[str, Any]:
     with _KEY_STORE_LOCK:
         if not _KEY_STORE_PATH.exists():
             return {}
         try:
             data = json.loads(_KEY_STORE_PATH.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
+            if not isinstance(data, dict):
+                if strict:
+                    raise ValueError("Account key store must contain a JSON object")
+                return {}
+            return data
         except Exception:
+            if strict:
+                raise
             return {}
 
 
@@ -169,19 +153,14 @@ def upsert_account_keys_in_store(
         has_image_key_update = image_xor_key is not None or image_aes_key is not None
         updated_at = datetime.datetime.now().isoformat(timespec="seconds")
         primary_item: dict[str, Any] = {}
-        stale_cache_roots: set[str] = set()
         for target_account in target_accounts:
             existing = store.get(target_account, {})
             item = dict(existing) if isinstance(existing, dict) else {}
 
             if db_key is not None:
-                previous_root = _stored_db_storage_path(item)
                 item["db_key"] = str(db_key)
                 item["db_key_source_wxid_dir"] = normalize_key_store_path(db_key_source_wxid_dir)
                 item["db_key_source_db_storage_path"] = normalize_key_store_path(db_key_source_db_storage_path)
-                next_root = _stored_db_storage_path(item)
-                if previous_root and previous_root != next_root:
-                    stale_cache_roots.add(previous_root)
 
             preserve_verified = image_key_verified is None and _same_complete_image_key_pair(
                 item,
@@ -215,23 +194,12 @@ def upsert_account_keys_in_store(
             if target_account == account:
                 primary_item = dict(item)
 
-        write_succeeded = False
         try:
             _atomic_write_json(_KEY_STORE_PATH, store)
-            write_succeeded = True
         except Exception:
             if raise_on_write_error:
                 raise
 
-        if write_succeeded and stale_cache_roots:
-            referenced_roots = {
-                root
-                for item in store.values()
-                if (root := _stored_db_storage_path(item))
-            }
-            _purge_native_raw_key_cache_roots(
-                stale_cache_roots - referenced_roots
-            )
 
         return primary_item
 
@@ -247,18 +215,8 @@ def remove_account_keys_from_store(account: str) -> bool:
             return False
 
         try:
-            removed = store.pop(account, None)
+            store.pop(account, None)
             _atomic_write_json(_KEY_STORE_PATH, store)
-            source_root = _stored_db_storage_path(removed)
-            root_still_used = bool(
-                source_root
-                and any(
-                    _stored_db_storage_path(item) == source_root
-                    for item in store.values()
-                )
-            )
-            if source_root and not root_still_used:
-                _purge_native_raw_key_cache_roots([source_root])
             return True
         except Exception:
             return False
@@ -273,7 +231,7 @@ def remove_account_family_keys_from_store(account: str) -> list[str]:
         return []
 
     with _KEY_STORE_LOCK:
-        store = load_account_keys_store()
+        store = load_account_keys_store(strict=True)
         remove_names: list[str] = []
         target_roots: set[str] = set()
 
@@ -297,18 +255,18 @@ def remove_account_family_keys_from_store(account: str) -> list[str]:
         if not remove_names:
             return []
 
-        removed_items = [store.pop(name, None) for name in remove_names]
-        _atomic_write_json(_KEY_STORE_PATH, store)
+        for name in remove_names:
+            store.pop(name, None)
 
-        removed_roots = {
-            root
-            for item in removed_items
-            if (root := _stored_db_storage_path(item))
-        }
-        referenced_roots = {
-            root
-            for item in store.values()
-            if (root := _stored_db_storage_path(item))
-        }
-        _purge_native_raw_key_cache_roots(removed_roots - referenced_roots)
+        _atomic_write_json(_KEY_STORE_PATH, store)
         return remove_names
+
+
+def _stored_db_storage_path(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    direct = normalize_key_store_path(item.get("db_key_source_db_storage_path"))
+    if direct:
+        return direct
+    wxid_dir = normalize_key_store_path(item.get("db_key_source_wxid_dir"))
+    return normalize_key_store_path(Path(wxid_dir) / "db_storage") if wxid_dir else ""

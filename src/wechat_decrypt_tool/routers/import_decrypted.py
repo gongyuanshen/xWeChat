@@ -9,6 +9,9 @@ import sqlite3
 import asyncio
 import stat
 import tempfile
+import threading
+from contextvars import copy_context
+from functools import partial
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -17,6 +20,11 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ..snapshot_registry import (
+    legacy_database_write, begin_legacy_database_write,
+)
+from ..archive_checksums import ArchiveChecksumError, CHECKSUMS_PATH, read_zip_checksums
+from ..legacy_archive_signature import read_zip_legacy_signature
 from ..app_paths import get_data_dir, get_output_databases_dir
 from ..logging_config import get_logger
 from ..path_fix import PathFixRoute
@@ -27,7 +35,9 @@ logger = get_logger(__name__)
 
 router = APIRouter(route_class=PathFixRoute)
 
-_IMPORT_CANCEL_EVENTS: dict[str, asyncio.Event] = {}
+_IMPORT_CANCEL_EVENTS: dict[str, threading.Event] = {}
+_IMPORT_COMMIT_LOCK = threading.Lock()
+_IMPORT_COMMITTED: set[threading.Event] = set()
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -131,7 +141,7 @@ def _read_contact_profile(db_dir: Path, username: str) -> dict:
     if not _is_valid_sqlite(contact_db):
         return {}
     try:
-        conn = sqlite3.connect(str(contact_db))
+        conn = sqlite3.connect(contact_db.absolute().as_uri() + "?mode=ro&immutable=1", uri=True)
         conn.row_factory = sqlite3.Row
         try:
             row = conn.execute("""
@@ -178,7 +188,14 @@ def _load_or_infer_account_info(account_dir: Path, db_dir: Path) -> tuple[dict, 
 
 def _validate_import_structure(import_path: Path) -> dict:
     account_dir = _pick_import_account_dir(import_path)
+    _require_plain_path(account_dir)
+    if os.path.lexists(account_dir / "_snapshot_current.json"):
+        raise HTTPException(
+            status_code=400,
+            detail="此目录通过指针选择独立快照，根目录数据库不是当前数据。请明确选择已验证代次中的账号数据库目录导入。",
+        )
     db_dir = _pick_database_dir(account_dir)
+    _require_plain_path(db_dir)
     resource_dir = _pick_resource_dir(account_dir)
     for db_name in ["contact.db", "session.db"]:
         if not _is_valid_sqlite(db_dir / db_name):
@@ -188,16 +205,15 @@ def _validate_import_structure(import_path: Path) -> dict:
 
 
 def _safe_zip_parts(name: str) -> tuple[str, ...]:
-    normalized = str(name or "").replace("\\", "/")
-    path = PurePosixPath(normalized)
-    if (
-        not normalized
-        or "\x00" in normalized
-        or path.is_absolute()
-        or any(part in {"", ".", ".."} or ":" in part for part in path.parts)
-    ):
+    raw = str(name or "")
+    parts = raw.rstrip("/").split("/")
+    if (not raw or raw.startswith("/") or "\\" in raw
+            or any(not part or part in {".", ".."} or part.endswith((" ", "."))
+                   or any(ord(char) < 32 or char in '<>:"|?*' for char in part)
+                   or part.split(".", 1)[0].upper() in _WINDOWS_RESERVED_NAMES
+                   for part in parts)):
         raise HTTPException(status_code=400, detail=f"Archive contains an unsafe path: {name}")
-    return tuple(path.parts)
+    return tuple(parts)
 
 
 def _archive_file_map(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
@@ -221,6 +237,25 @@ def _archive_file_map(archive: zipfile.ZipFile) -> dict[str, zipfile.ZipInfo]:
     return result
 
 
+def _archive_integrity_entries(
+    archive: zipfile.ZipFile, files: dict[str, zipfile.ZipInfo],
+) -> dict[str, dict] | None:
+    if {name.casefold() for name in files}.intersection({
+        "_integrity/manifest.wce", "_integrity/signature.wce",
+        "_integrity/manifest.json", "_integrity/signature.wes",
+    }):
+        try:
+            return read_zip_legacy_signature(archive)
+        except ArchiveChecksumError as exc:
+            raise HTTPException(status_code=400, detail=f"旧归档签名验证失败: {exc}") from exc
+    if CHECKSUMS_PATH in files:
+        try:
+            return read_zip_checksums(archive)
+        except ArchiveChecksumError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return None
+
+
 def _read_archive_json(archive: zipfile.ZipFile, files: dict[str, zipfile.ZipInfo], name: str) -> dict:
     item = files.get(name)
     if item is None:
@@ -240,6 +275,7 @@ def _validate_import_archive(import_path: Path) -> dict:
 
     with archive:
         files = _archive_file_map(archive)
+        _archive_integrity_entries(archive, files)
         database_parents: dict[str, set[str]] = {}
         for name in files:
             parts = PurePosixPath(name)
@@ -286,7 +322,7 @@ def _validate_import_archive(import_path: Path) -> dict:
 
         db_count = sum(1 for name in files if name.startswith(db_prefix + "/") and name.lower().endswith(".db"))
         resource_prefix = f"{account_prefix}/resource/"
-        integrity_present = "_integrity/manifest.wce" in files
+        integrity_present = "_integrity/manifest.wce" in files or CHECKSUMS_PATH in files
         return {
             "username": username,
             "nick": nick,
@@ -315,6 +351,47 @@ def _validate_import_source(import_path: Path) -> dict:
     if import_path.is_dir():
         return _validate_import_structure(import_path)
     raise HTTPException(status_code=400, detail="Import path does not exist")
+
+
+def _copy_verified_database(source: Path, destination: Path, check_cancel) -> None:
+    before = source.lstat()
+    if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & 0x400:
+        raise RuntimeError(f"Database source is an unsupported link: {source}")
+    for suffix in ("-wal", "-journal"):
+        sidecar = source.with_name(source.name + suffix)
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise RuntimeError(f"Database source contains unmerged transaction data: {sidecar}")
+    with source.open("rb") as src, destination.open("xb") as target:
+        while True:
+            check_cancel()
+            data = src.read(1024 * 1024)
+            if not data:
+                break
+            target.write(data)
+    after = source.stat()
+    if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+        raise RuntimeError(f"Database source changed during import: {source}")
+    for suffix in ("-wal", "-journal"):
+        sidecar = source.with_name(source.name + suffix)
+        if sidecar.exists() and sidecar.stat().st_size:
+            raise RuntimeError(f"Database source acquired unmerged transaction data: {sidecar}")
+    connection = sqlite3.connect(destination.as_uri() + "?mode=ro&immutable=1", uri=True)
+    try:
+        connection.set_progress_handler(lambda: int(_cancelled(check_cancel)), 10000)
+        result = [row[0] for row in connection.execute("PRAGMA integrity_check")]
+        if result != ["ok"]:
+            raise RuntimeError(f"Database integrity check failed: {source.name}: {result}")
+    except sqlite3.DatabaseError as exc:
+        check_cancel()
+        raise RuntimeError(f"Database integrity check failed: {source.name}: {exc}") from exc
+    finally:
+        connection.close()
+
+
+def _cancelled(check_cancel) -> bool:
+    check_cancel()
+    return False
 
 
 def _count_db_files(db_dir: Path) -> int:
@@ -364,35 +441,12 @@ def _build_target_state(info: dict) -> dict:
     return {"target_dir": str(target_dir), "target_exists": target_dir.exists(), "target_nonempty": _is_dir_nonempty(target_dir), "existing_db_count": len(db_files), "existing_db_files": db_files[:50], "incoming_db_count": incoming_db_count, "target_has_resource": resource_dir.exists(), "will_replace_resource": bool(resource_dir.exists() and (info.get("resource_dir") or archive_source)), "source_overlaps_target": False if archive_source else any(_paths_overlap(x, target_dir) for x in paths if str(x))}
 
 
-def _archive_manifest_hashes(archive: zipfile.ZipFile, files: dict[str, zipfile.ZipInfo]) -> dict[str, str]:
-    item = files.get("_integrity/manifest.wce")
-    if item is None:
-        return {}
-    try:
-        manifest = json.loads(archive.read(item).decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError(f"归档完整性清单无法解析: {exc}") from exc
-    entries = manifest.get("f") if isinstance(manifest, dict) else None
-    if not isinstance(entries, list):
-        raise RuntimeError("归档完整性清单缺少文件列表")
-    result: dict[str, str] = {}
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = "/".join(_safe_zip_parts(str(entry.get("path") or "")))
-        digest = str(entry.get("sha256") or "").strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{64}", digest):
-            raise RuntimeError(f"归档完整性清单包含无效哈希: {name}")
-        if name in result:
-            raise RuntimeError(f"归档完整性清单包含重复文件: {name}")
-        result[name] = digest
-    return result
-
-
 def _extract_import_archive(import_path: Path, destination: Path, check_cancel) -> None:
     with zipfile.ZipFile(import_path, "r") as archive:
         files = _archive_file_map(archive)
-        expected_hashes = _archive_manifest_hashes(archive, files)
+        checksums = _archive_integrity_entries(archive, files)
+        expected_hashes = ({name: item["sha256"] for name, item in checksums.items()}
+                           if checksums is not None else {})
         if expected_hashes:
             unsigned = sorted(name for name in files if not name.startswith("_integrity/") and name not in expected_hashes)
             if unsigned:
@@ -403,6 +457,7 @@ def _extract_import_archive(import_path: Path, destination: Path, check_cancel) 
             target = destination.joinpath(*PurePosixPath(name).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256()
+            written_size = 0
             with archive.open(item, "r") as source, target.open("wb") as output:
                 while True:
                     check_cancel()
@@ -411,6 +466,9 @@ def _extract_import_archive(import_path: Path, destination: Path, check_cancel) 
                         break
                     output.write(chunk)
                     digest.update(chunk)
+                    written_size += len(chunk)
+            if checksums is not None and name in checksums and written_size != checksums[name]["size"]:
+                raise RuntimeError(f"归档文件长度校验失败: {name}")
             expected = expected_hashes.get(name)
             if expected and digest.hexdigest() != expected:
                 raise RuntimeError(f"归档文件校验失败: {name}")
@@ -421,24 +479,43 @@ def _extract_import_archive(import_path: Path, destination: Path, check_cancel) 
             raise RuntimeError(f"归档完整性清单中的文件缺失: {missing[0]}")
 
 
-def _copy_supplemental_account_entries(info: dict, destination: Path) -> None:
-    account_source = Path(str(info.get("account_dir") or ""))
-    db_source = Path(str(info.get("db_dir") or ""))
-    resource_source = Path(str(info.get("resource_dir") or "")) if info.get("resource_dir") else None
-    if not account_source.is_dir():
+def _copy_portable_entry(source: Path, target: Path, check_cancel) -> None:
+    check_cancel()
+    before = source.lstat()
+    if stat.S_ISLNK(before.st_mode) or getattr(before, "st_file_attributes", 0) & 0x400:
+        raise RuntimeError(f"Import source contains an unsupported link: {source}")
+    if stat.S_ISDIR(before.st_mode):
+        target.mkdir()
+        for child in sorted(source.iterdir()):
+            _copy_portable_entry(child, target / child.name, check_cancel)
         return
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimeError(f"Import source is not a regular file: {source}")
+    with source.open("rb") as src, target.open("xb") as output:
+        while True:
+            check_cancel()
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            output.write(chunk)
+    after = source.stat()
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise RuntimeError(f"Import source changed during copy: {source}")
 
-    excluded_names = {"account.json", "_source.json"}
-    for item in account_source.iterdir():
-        if item.name in excluded_names or item == db_source or (resource_source is not None and item == resource_source):
+
+def _copy_supplemental_account_entries(info: dict, destination: Path, check_cancel=lambda: None) -> None:
+    account_source = Path(info["account_dir"])
+    db_source = Path(info["db_dir"])
+    resource_source = Path(info["resource_dir"]) if info.get("resource_dir") else None
+    excluded_names = {"account.json", "_source.json", "_snapshot_current.json", "_snapshot_cache", "_account_delete_plan.json"}
+    excluded_names.update({"_media_keys.json", "_sns_realtime_sync_state.json", "media_path_index.db"})
+    for item in sorted(account_source.iterdir()):
+        if (item.name in excluded_names or item == db_source or item == resource_source
+                or (item.name.startswith(".account-delete-") and item.suffix == ".json")):
             continue
         if item.is_file() and item.suffix.lower() == ".db":
             continue
-        target = destination / item.name
-        if item.is_dir():
-            shutil.copytree(item, target, dirs_exist_ok=True, symlinks=False)
-        elif item.is_file():
-            shutil.copy2(item, target)
+        _copy_portable_entry(item, destination / item.name, check_cancel)
 
 
 def _next_backup_dir(account_output_dir: Path) -> Path:
@@ -447,6 +524,7 @@ def _next_backup_dir(account_output_dir: Path) -> Path:
     # directories under databases as selectable accounts, so a sibling
     # `wxid_xxx.backup-*` would surface stale data in the UI.
     backup_root = account_output_dir.parent.parent / "account_backups" / account_output_dir.name
+    _require_plain_path(backup_root)
     backup_root.mkdir(parents=True, exist_ok=True)
     base = backup_root / stamp
     candidate = base
@@ -461,7 +539,7 @@ def _backup_existing_account_dir(account_output_dir: Path) -> Optional[Path]:
     if not account_output_dir.exists():
         return None
     backup_dir = _next_backup_dir(account_output_dir)
-    shutil.move(str(account_output_dir), str(backup_dir))
+    os.replace(account_output_dir, backup_dir)
     return backup_dir
 
 
@@ -473,7 +551,7 @@ def _rollback_account_backup(account_output_dir: Path, backup_dir: Optional[Path
             account_output_dir.unlink()
         else:
             shutil.rmtree(account_output_dir)
-    shutil.move(str(backup_dir), str(account_output_dir))
+    os.replace(backup_dir, account_output_dir)
     try:
         backup_dir.parent.rmdir()
         backup_dir.parent.parent.rmdir()
@@ -490,14 +568,32 @@ def _remove_path(path: Optional[Path]) -> None:
         shutil.rmtree(path)
 
 
-def _install_staged_account(staging_dir: Path, account_output_dir: Path) -> Optional[Path]:
-    backup_dir = _backup_existing_account_dir(account_output_dir)
-    try:
-        shutil.move(str(staging_dir), str(account_output_dir))
-    except Exception:
-        _rollback_account_backup(account_output_dir, backup_dir)
-        raise
-    return backup_dir
+def _install_staged_account(staging_dir: Path, account_output_dir: Path,
+                            cancel_event: Optional[threading.Event] = None) -> Optional[Path]:
+    _require_plain_path(staging_dir)
+    _require_plain_path(account_output_dir)
+    with _IMPORT_COMMIT_LOCK, legacy_database_write(account_output_dir):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ImportCancelled("用户已取消导入")
+        backup_dir = _backup_existing_account_dir(account_output_dir)
+        try:
+            os.replace(staging_dir, account_output_dir)
+        except Exception:
+            _rollback_account_backup(account_output_dir, backup_dir)
+            raise
+        if cancel_event is not None:
+            _IMPORT_COMMITTED.add(cancel_event)
+        return backup_dir
+
+
+def _require_plain_path(path: Path) -> None:
+    for candidate in (*reversed(path.parents), path):
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise RuntimeError(f"Import paths cannot contain links: {candidate}")
 
 
 @router.post("/api/import_decrypted/preview", summary="预览待导入的账号信息")
@@ -512,10 +608,13 @@ async def preview_import(request: ImportRequest):
 
 @router.post("/api/import_decrypted/cancel", summary="取消正在执行的导入任务")
 async def cancel_import_decrypted(job_id: str = Query(..., description="导入任务 ID")):
-    cancel_event = _IMPORT_CANCEL_EVENTS.get(str(job_id or ""))
-    if cancel_event:
-        cancel_event.set()
-        return {"status": "cancel_requested"}
+    with _IMPORT_COMMIT_LOCK:
+        cancel_event = _IMPORT_CANCEL_EVENTS.get(str(job_id or ""))
+        if cancel_event:
+            if cancel_event in _IMPORT_COMMITTED:
+                return {"status": "already_completed"}
+            cancel_event.set()
+            return {"status": "cancel_requested"}
     return {"status": "not_found"}
 
 @router.get("/api/import_decrypted", summary="执行导入已解密的数据库和资源目录 (SSE)")
@@ -529,21 +628,50 @@ async def import_decrypted_directory(
     backup_dir: Optional[Path] = None
     backup_restored = False
     archive_temp_dir: Optional[tempfile.TemporaryDirectory] = None
+    write_lease = None
     job_key = str(job_id or "").strip()
-    cancel_event: Optional[asyncio.Event] = None
+    cancel_event = threading.Event()
     if job_key:
-        cancel_event = _IMPORT_CANCEL_EVENTS.setdefault(job_key, asyncio.Event())
-        cancel_event.clear()
+        if job_key in _IMPORT_CANCEL_EVENTS:
+            raise HTTPException(status_code=409, detail="An import with this job ID is already running")
+        _IMPORT_CANCEL_EVENTS[job_key] = cancel_event
     
     def _sse(data: dict):
         return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     def _check_cancel():
-        if cancel_event is not None and cancel_event.is_set():
+        if cancel_event.is_set():
             raise ImportCancelled("用户已取消导入")
 
+    async def _run_worker(function, *args, **kwargs):
+        # A cancelled asyncio waiter does not stop its OS thread. Keep waiting,
+        # including repeated cancellation, before releasing paths or write leases.
+        task = asyncio.get_running_loop().run_in_executor(
+            None, copy_context().run, partial(function, *args, **kwargs)
+        )
+        cancelled = None
+        while True:
+            try:
+                result = await asyncio.shield(task)
+                break
+            except asyncio.CancelledError as exc:
+                cancel_event.set()
+                if task.done():
+                    # The executor has finished; propagate cancellation instead
+                    # of repeatedly awaiting an already-completed future.
+                    raise
+                cancelled = exc
+            except Exception:
+                if cancelled is not None:
+                    logger.exception("Import worker stopped after request cancellation")
+                    raise cancelled
+                raise
+        if cancelled is not None:
+            raise cancelled
+        return result
+
     async def generate_progress():
-        nonlocal account_output_dir, staging_output_dir, backup_dir, backup_restored, archive_temp_dir
+        nonlocal account_output_dir, staging_output_dir, backup_dir, backup_restored, archive_temp_dir, write_lease
         try:
             if not import_path_obj.exists():
                 yield _sse({"type": "error", "message": "导入路径不存在"})
@@ -557,10 +685,10 @@ async def import_decrypted_directory(
                     yield _sse({"type": "error", "message": "导入文件必须是 ZIP 账号归档"})
                     return
                 temp_root = get_data_dir() / "import-tmp"
-                await asyncio.to_thread(temp_root.mkdir, parents=True, exist_ok=True)
+                await _run_worker(temp_root.mkdir, parents=True, exist_ok=True)
                 archive_temp_dir = tempfile.TemporaryDirectory(prefix="account-archive-", dir=temp_root)
                 yield _sse({"type": "progress", "percent": 7, "message": "正在校验并解压账号归档..."})
-                await asyncio.to_thread(
+                await _run_worker(
                     _extract_import_archive,
                     import_path_obj,
                     Path(archive_temp_dir.name),
@@ -570,7 +698,7 @@ async def import_decrypted_directory(
 
             # 1. 验证并获取账号信息
             try:
-                info = await asyncio.to_thread(_validate_import_structure, import_source)
+                info = await _run_worker(_validate_import_structure, import_source)
                 if archive_source:
                     info["source_format"] = "wechat_data_analysis_archive"
                     info["archive_path"] = str(import_path_obj)
@@ -592,10 +720,11 @@ async def import_decrypted_directory(
             
             # 2. 先写入同盘临时目录，全部成功后再替换正式账号目录。
             output_base = get_output_databases_dir()
-            await asyncio.to_thread(output_base.mkdir, parents=True, exist_ok=True)
+            await _run_worker(output_base.mkdir, parents=True, exist_ok=True)
             account_output_dir = output_base / account_name
+            write_lease = begin_legacy_database_write(account_output_dir, exclusive=True)
             staging_output_dir = Path(
-                await asyncio.to_thread(
+                await _run_worker(
                     tempfile.mkdtemp,
                     prefix=f".{account_name}.import-",
                     dir=output_base,
@@ -606,22 +735,18 @@ async def import_decrypted_directory(
 
             # 3. 导入 databases 目录下的 .db 文件
             db_src_dir = Path(info["db_dir"])
-            db_files = [f for f in db_src_dir.iterdir() if f.is_file() and f.suffix == ".db"]
+            db_files = sorted(f for f in db_src_dir.iterdir() if f.is_file() and f.suffix.lower() == ".db")
             imported_files = []
             
             for i, item in enumerate(db_files):
                 _check_cancel()
                 target = staging_output_dir / item.name
                 def _do_import_db(src, dst):
-                    if dst.exists():
-                        dst.unlink()
-                    try:
-                        os.link(src, dst)
-                    except Exception:
-                        shutil.copy2(src, dst)
+                    _check_cancel()
+                    _copy_verified_database(src, dst, _check_cancel)
                 
                 try:
-                    await asyncio.to_thread(_do_import_db, item, target)
+                    await _run_worker(_do_import_db, item, target)
                     imported_files.append(item.name)
                 except Exception as e:
                     logger.error(f"导入数据库失败: {item.name}, error: {e}")
@@ -636,126 +761,15 @@ async def import_decrypted_directory(
                 yield _sse({"type": "progress", "percent": 30, "message": "正在导入资源文件 (这可能需要一些时间)..."})
                 resource_dst = staging_output_dir / "resource"
                 
-                def _reset_resource_dst(dst: Path) -> None:
-                    if dst.exists():
-                        if dst.is_symlink() or dst.is_file():
-                            dst.unlink()
-                        else:
-                            shutil.rmtree(dst)
+                await _run_worker(_copy_portable_entry, resource_src, resource_dst, _check_cancel)
+                yield _sse({"type": "progress", "percent": 48, "message": "资源文件复制完成。"})
 
-                def _try_link_resource(src: Path, dst: Path) -> bool:
-                    try:
-                        os.symlink(src, dst, target_is_directory=True)
-                        return True
-                    except Exception:
-                        return False
-
-                def _collect_resource_files(src: Path) -> list[tuple[Path, Path]]:
-                    files: list[tuple[Path, Path]] = []
-                    for root, _, names in os.walk(src):
-                        root_path = Path(root)
-                        for name in names:
-                            file_path = root_path / name
-                            try:
-                                if file_path.is_file():
-                                    files.append((file_path, file_path.relative_to(src)))
-                            except Exception:
-                                continue
-                    return files
-
-                def _copy_resource_batch(batch: list[tuple[Path, Path]], dst_root: Path) -> int:
-                    copied = 0
-                    for src_file, rel_path in batch:
-                        dst_file = dst_root / rel_path
-                        dst_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(src_file, dst_file)
-                        copied += 1
-                    return copied
-
-                try:
-                    prefer_copy_resource = info.get("source_format") in {"wxdump", "wechat_data_analysis_archive"}
-                    await asyncio.to_thread(_reset_resource_dst, resource_dst)
-
-                    if not prefer_copy_resource:
-                        linked = await asyncio.to_thread(_try_link_resource, resource_src, resource_dst)
-                        if linked:
-                            yield _sse({"type": "progress", "percent": 48, "message": "资源目录已通过快捷链接导入。"})
-                        else:
-                            prefer_copy_resource = True
-
-                    if prefer_copy_resource:
-                        yield _sse({"type": "progress", "percent": 31, "message": "正在扫描资源文件数量..."})
-                        resource_files = await asyncio.to_thread(_collect_resource_files, resource_src)
-                        total_resources = len(resource_files)
-                        if total_resources <= 0:
-                            await asyncio.to_thread(resource_dst.mkdir, parents=True, exist_ok=True)
-                            yield _sse({"type": "progress", "percent": 48, "message": "资源目录为空，已跳过资源复制。"})
-                        else:
-                            await asyncio.to_thread(resource_dst.mkdir, parents=True, exist_ok=True)
-                            batch_size = 300
-                            copied_resources = 0
-                            for batch_start in range(0, total_resources, batch_size):
-                                _check_cancel()
-                                batch = resource_files[batch_start:batch_start + batch_size]
-                                copied_resources += await asyncio.to_thread(_copy_resource_batch, batch, resource_dst)
-                                percent = 31 + int(min(copied_resources, total_resources) / total_resources * 17)
-                                yield _sse({
-                                    "type": "progress",
-                                    "percent": min(percent, 48),
-                                    "message": f"正在复制资源文件：{copied_resources}/{total_resources}"
-                                })
-                except Exception as e:
-                    logger.error(f"导入 resource 目录失败: {e}")
-                    raise RuntimeError(f"导入资源目录失败: {e}") from e
-                
                 # 5. 转换 .wxgf 资源 (新增加的流程)
                 yield _sse({"type": "progress", "percent": 50, "message": "正在搜索并转换 .wxgf 图片..."})
                 
-                if resource_dst.exists():
-                    # 搜索 wxgf 文件
-                    def _find_wxgf(root_dir):
-                        found = []
-                        for root, _, files in os.walk(root_dir):
-                            for f in files:
-                                if f.lower().endswith(".wxgf"):
-                                    found.append(Path(root) / f)
-                        return found
-                    
-                    wxgf_files = await asyncio.to_thread(_find_wxgf, resource_dst)
-                    
-                    if wxgf_files:
-                        total_wxgf = len(wxgf_files)
-                        converted_count = 0
-                        for i, wxgf_path in enumerate(wxgf_files):
-                            _check_cancel()
-                            def _convert_one(p):
-                                jpg_p = p.with_suffix(".wxgf.jpg")
-                                if not jpg_p.exists():
-                                    data = p.read_bytes()
-                                    if data.startswith(b"wxgf"):
-                                        converted = _wxgf_to_image_bytes(data)
-                                        if converted:
-                                            jpg_p.write_bytes(converted)
-                                            return True
-                                else:
-                                    return True # 已经存在视为成功
-                                return False
-
-                            try:
-                                success = await asyncio.to_thread(_convert_one, wxgf_path)
-                                if success:
-                                    converted_count += 1
-                            except Exception as e:
-                                logger.error(f"转换 wxgf 失败: {wxgf_path}, {e}")
-                            
-                            if i % max(1, total_wxgf // 20) == 0 or i == total_wxgf - 1:
-                                progress_val = 50 + int((i + 1) / total_wxgf * 30)
-                                yield _sse({"type": "progress", "percent": progress_val, "message": f"转换 wxgf 图片: {i+1}/{total_wxgf}"})
-                        
-                        logger.info(f"账号 {account_name} 转换完成: {converted_count}/{total_wxgf} 个 .wxgf 文件")
                 
             # 6. Copy metadata and all additional account resources (sns_resource, caches, media keys, ...).
-            await asyncio.to_thread(_copy_supplemental_account_entries, info, staging_output_dir)
+            await _run_worker(_copy_supplemental_account_entries, info, staging_output_dir, _check_cancel)
 
             # 7. Copy or generate account.json
             def _write_imported_account_json(dst: Path, info: dict) -> None:
@@ -775,7 +789,7 @@ async def import_decrypted_directory(
                 target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
             yield _sse({"type": "progress", "percent": 85, "message": "正在更新账号配置..."})
-            await asyncio.to_thread(_write_imported_account_json, staging_output_dir, info)
+            await _run_worker(_write_imported_account_json, staging_output_dir, info)
 
             # 8. 保存来源信息
             def _save_source_info(dst, path, info):
@@ -798,37 +812,13 @@ async def import_decrypted_directory(
                 )
 
             source_path = import_path_obj if archive_source else Path(info.get("account_dir") or import_path_obj)
-            await asyncio.to_thread(_save_source_info, staging_output_dir, source_path, info)
+            await _run_worker(_save_source_info, staging_output_dir, source_path, info)
 
-            # 9. 构建缓存
-            yield _sse({"type": "progress", "percent": 90, "message": "正在构建会话缓存 (这可能需要较长时间)..."})
-            try:
-                await asyncio.to_thread(
-                    build_session_last_message_table,
-                    staging_output_dir,
-                    rebuild=True,
-                    include_hidden=True,
-                    include_official=True,
-                )
-            except Exception as e:
-                logger.error(f"构建会话缓存失败: {e}")
-
+            # Independent imports preserve the verified databases byte for byte.
             _check_cancel()
-            if account_output_dir.exists():
-                yield _sse({"type": "progress", "percent": 96, "message": "正在备份旧账号数据并切换到新归档..."})
-            else:
-                yield _sse({"type": "progress", "percent": 96, "message": "正在启用导入的账号数据..."})
-
-            # A cached native handle is keyed by account name and may still be
-            # connected to this computer's live WeChat directory. Invalidate it
-            # before replacing the account snapshot.
-            try:
-                from ..wcdb_realtime import WCDB_REALTIME
-
-                await asyncio.to_thread(WCDB_REALTIME.disconnect, account_name)
-            except Exception:
-                logger.exception("导入前断开实时数据库失败: account=%s", account_name)
-            backup_dir = await asyncio.to_thread(_install_staged_account, staging_output_dir, account_output_dir)
+            yield _sse({"type": "progress", "percent": 96, "message": "正在启用已验证的账号数据..."})
+            with write_lease.scope():
+                backup_dir = await _run_worker(_install_staged_account, staging_output_dir, account_output_dir, cancel_event)
             staging_output_dir = None
 
             yield _sse({
@@ -842,7 +832,7 @@ async def import_decrypted_directory(
 
         except ImportCancelled:
             try:
-                await asyncio.to_thread(_remove_path, staging_output_dir)
+                await _run_worker(_remove_path, staging_output_dir)
             except Exception as rollback_error:
                 logger.error(f"取消导入后清理临时目录失败: {rollback_error}", exc_info=True)
             suffix = "，已恢复导入前备份" if backup_restored else ""
@@ -850,24 +840,37 @@ async def import_decrypted_directory(
         except Exception as e:
             logger.error(f"导入失败: {e}", exc_info=True)
             try:
-                await asyncio.to_thread(_remove_path, staging_output_dir)
+                await _run_worker(_remove_path, staging_output_dir)
             except Exception as rollback_error:
                 logger.error(f"导入失败后清理临时目录失败: {rollback_error}", exc_info=True)
             suffix = "，已恢复导入前备份" if backup_restored else ""
             yield _sse({"type": "error", "message": f"导入失败: {str(e)}{suffix}"})
         finally:
-            if staging_output_dir is not None:
-                try:
-                    await asyncio.to_thread(_remove_path, staging_output_dir)
-                except Exception:
-                    pass
-            if archive_temp_dir is not None:
-                try:
-                    await asyncio.to_thread(archive_temp_dir.cleanup)
-                except Exception:
-                    pass
-            if job_key:
-                _IMPORT_CANCEL_EVENTS.pop(job_key, None)
+            def _cleanup_import_paths():
+                errors = []
+                for path, cleanup in (
+                    (staging_output_dir, lambda: _remove_path(staging_output_dir)),
+                    (archive_temp_dir.name if archive_temp_dir else None,
+                     lambda: archive_temp_dir.cleanup() if archive_temp_dir else None),
+                ):
+                    if path is None:
+                        continue
+                    try:
+                        cleanup()
+                    except OSError as exc:
+                        logger.exception("Import cleanup failed: %s", path)
+                        errors.append(exc)
+                if errors:
+                    raise RuntimeError("Import temporary paths could not all be cleaned") from errors[0]
+            try:
+                await _run_worker(_cleanup_import_paths)
+            finally:
+                if write_lease is not None:
+                    write_lease.release()
+                if job_key:
+                    _IMPORT_CANCEL_EVENTS.pop(job_key, None)
+                with _IMPORT_COMMIT_LOCK:
+                    _IMPORT_COMMITTED.discard(cancel_event)
 
     headers = {
         "Content-Type": "text/event-stream",

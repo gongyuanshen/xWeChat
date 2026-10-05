@@ -2,10 +2,6 @@ const http = require("http");
 const net = require("net");
 const path = require("path");
 const { spawn, spawnSync } = require("child_process");
-const {
-  applySourceRuntimeEnvironment,
-  ensureSourceNativeCore,
-} = require("../src/source-native-core-bootstrap.cjs");
 
 const repoRoot = path.resolve(__dirname, "..", "..");
 const frontendDir = path.join(repoRoot, "frontend");
@@ -116,9 +112,6 @@ function spawnLogged(command, args, options, prefix) {
 }
 
 async function main() {
-  // Resolve the pinned public source runtime before starting any child process.
-  // Packaged apps use their sealed resources and never enter here.
-  const sourceNativeCore = ensureSourceNativeCore({ env: process.env });
   const frontendHost = String(process.env.NUXT_HOST || "127.0.0.1").trim() || "127.0.0.1";
   const requestedFrontendPort = parsePort(process.env.NUXT_PORT);
   const requestedBackendPort = parsePort(process.env.WECHAT_TOOL_PORT);
@@ -148,11 +141,6 @@ async function main() {
     ELECTRON_DISABLE_GPU: process.env.ELECTRON_ENABLE_GPU === "1" ? "0" : "1",
     WECHAT_TOOL_BACKEND_STARTUP_TIMEOUT_MS: process.env.WECHAT_TOOL_BACKEND_STARTUP_TIMEOUT_MS || "120000",
   };
-  if (sourceNativeCore.nativeDir) {
-    applySourceRuntimeEnvironment(sharedEnv, sourceNativeCore);
-    log(`[native-core] source=${sourceNativeCore.reason} profile=source-public`);
-  }
-
   // Track electron.exe itself instead of an intermediate command shell.
   const electronCommand = require("electron");
   const children = new Set();

@@ -4,12 +4,13 @@ import time
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, SecretStr
 
 from ..chat_export_service import CHAT_EXPORT_MANAGER, get_chat_export_targets_preview
+from ..account_workers import export_file_response
 from ..chat_incremental_export import ChatIncrementalError
-from ..native_core_export import decode_export_content_key, erase_export_content_key
+from ..export_crypto import decode_export_content_key, erase_export_content_key
 from ..path_fix import PathFixRoute
 from ..voice_transcription import VoiceTranscriptionError, get_voice_transcription_service
 
@@ -18,7 +19,7 @@ router = APIRouter(route_class=PathFixRoute)
 ExportFormat = Literal["json", "txt", "html", "excel"]
 ExportScope = Literal["selected", "all", "groups", "singles"]
 ExportOutputMode = Literal["zip", "folder"]
-ChatSource = Literal["auto", "decrypted", "realtime"]
+ChatSource = Literal["auto", "decrypted"]
 MediaKind = Literal["image", "emoji", "video", "video_thumb", "voice", "file"]
 MessageType = Literal[
     "text",
@@ -39,7 +40,7 @@ MessageType = Literal[
 
 class ChatExportCreateRequest(BaseModel):
     account: Optional[str] = Field(None, description="账号目录名（可选，默认使用第一个）")
-    source: ChatSource = Field("auto", description="数据源：auto/realtime=直接读取原始 WCDB；decrypted=兼容旧本地解密库")
+    source: ChatSource = Field("auto", description="数据源：auto/decrypted 使用已解密快照")
     scope: ExportScope = Field("selected", description="导出范围：selected=指定会话；all=全部；groups=仅群聊；singles=仅单聊")
     usernames: list[str] = Field(default_factory=list, description="会话 username 列表（scope=selected 时使用）")
     format: ExportFormat = Field("json", description="导出格式：html/json/txt/excel（zip 内每个会话一个文件；Excel 为 .xlsx）")
@@ -59,7 +60,7 @@ class ChatExportCreateRequest(BaseModel):
     output_dir: Optional[str] = Field(None, description="导出目录绝对路径（可选；不填时使用默认目录）")
     allow_process_key_extract: bool = Field(
         False,
-        description="预留字段：本项目不从微信进程提取媒体密钥，请使用 wx_key 获取并保存/批量解密",
+        description="显式允许导出前只读扫描微信内存获取并验证图片密钥；已有有效密钥不重复扫描",
     )
     download_remote_media: bool = Field(
         False,
@@ -79,7 +80,7 @@ class ChatExportCreateRequest(BaseModel):
         None,
         description="WEC1 的 32 字节 Base64 内容密钥；仅 encrypt=true 时使用",
     )
-    transcribe_voice: bool = Field(False, description="使用本地 Whisper 将语音消息转成中文并写入导出文件")
+    transcribe_voice: bool = Field(False, description="使用已配置的本地语音模型转写并写入导出文件；隐私模式不转写")
     output_mode: ExportOutputMode = Field("zip", description="输出方式：zip=全量压缩包；folder=可持续更新目录")
     folder_name: Optional[str] = Field(None, description="增量导出根目录名")
     baseline: Optional[dict[str, Any]] = Field(None, description="浏览器端读取的上轮聊天增量基线")
@@ -91,6 +92,7 @@ class ChatExportCreateRequest(BaseModel):
 
 @router.post("/api/chat/exports", summary="创建聊天记录导出任务（ZIP 全量或增量目录）")
 async def create_chat_export(req: ChatExportCreateRequest):
+    source = "decrypted"
     if req.baseline is not None:
         baseline_size = len(json.dumps(req.baseline, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
         if baseline_size > 128 * 1024 * 1024:
@@ -117,7 +119,7 @@ async def create_chat_export(req: ChatExportCreateRequest):
     try:
         job = CHAT_EXPORT_MANAGER.create_job(
             account=req.account,
-            source=req.source,
+            source=source,
             scope=req.scope,
             usernames=req.usernames,
             export_format=req.format,
@@ -172,6 +174,7 @@ async def preview_chat_export_targets(
     include_hidden: bool = True,
     include_official: bool = False,
 ):
+    source = "decrypted"
     base_url = str(request.base_url).rstrip("/")
     try:
         return get_chat_export_targets_preview(
@@ -200,7 +203,7 @@ async def download_chat_export(export_id: str):
         raise HTTPException(status_code=404, detail="Export not found.")
     if not job.zip_path or (not job.zip_path.exists()):
         raise HTTPException(status_code=409, detail="Export not ready.")
-    return FileResponse(
+    return export_file_response(
         str(job.zip_path),
         media_type="application/octet-stream" if job.zip_path.suffix.lower() == ".wec" else "application/zip",
         filename=job.zip_path.name,
@@ -225,7 +228,7 @@ async def download_chat_export_file(export_id: str, file_id: str):
     )
     if path is None:
         raise HTTPException(status_code=404, detail="Export file not found.")
-    return FileResponse(str(path), media_type="application/octet-stream", filename=path.name)
+    return export_file_response(path, media_type="application/octet-stream", filename=path.name)
 
 
 @router.post("/api/chat/exports/{export_id}/commit", summary="确认浏览器已完成聊天增量目录写入")

@@ -79,7 +79,7 @@ def sample_messages(username):
 
 
 def artificial_reader(account, username, start, end, *, checkpoint=None, page_size=100, sender_id=None, **kwargs):
-    if account != ACCOUNT or username not in SAMPLES or kwargs.get('require_realtime'):
+    if account != ACCOUNT or username not in SAMPLES:
         raise ValueError('Acceptance reader only permits the fixed synthetic snapshot')
     rows = [m for m in sample_messages(username) if start <= m['time'] <= end
             and (sender_id is None or m['sender_id'] == sender_id)]
@@ -230,30 +230,29 @@ async def run(settings_path, output, preflight=False, case_name=None):
     cases = [('single', PEER, ''), ('group', GROUP, ''), ('group_member', GROUP, ALEX)]
     if case_name:
         cases = [case for case in cases if case[0] == case_name]
-    with patch.object(insights, 'source_for_account', lambda account: 'snapshot'):
-        for name, username, member in cases:
-            began = time.monotonic()
-            print(json.dumps(dict(case=name, status='starting', model=profile['model']), ensure_ascii=False), flush=True)
-            task = service.create_task(dict(account=ACCOUNT, username=username, member_username=member,
-                start=START, end=END, selected_model=choice))
-            job = service.jobs[task['id']]
-            await job
-            task = service.get_task(task['id'], ACCOUNT)
-            labels = service.messages(task['id'], ACCOUNT, limit=100)['items']
-            calls = [r for r in store.list('usage', ACCOUNT) if r['task_id'] == task['id']]
-            allowed_usage = {'id', 'status', 'attempt', 'model', 'provider', 'usage', 'usage_known',
-                'duration_ms', 'finish_reason', 'error_code', 'error_type', 'http_status', 'validation_errors'}
-            checks = checks_for(task, labels, username, member)
-            case = dict(case=name, task_id=task['id'], status=task['status'], elapsed_seconds=round(time.monotonic() - began, 3),
-                coverage=task['coverage'], checks=checks, passed=all(checks.values()), error=task['error'],
-                context_budget=task['context_budget'],
-                usage=[{k: v for k, v in call.items() if k in allowed_usage} for call in calls],
-                model_outputs=model_outputs.get(task['id'], []),
-                portrait=task['portrait'], labels=labels)
-            report['cases'].append(case)
-            (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-            print(json.dumps(dict(case=name, status=task['status'], passed=case['passed'],
-                calls=len(calls), elapsed_seconds=case['elapsed_seconds'], error=task['error']), ensure_ascii=False), flush=True)
+    for name, username, member in cases:
+        began = time.monotonic()
+        print(json.dumps(dict(case=name, status='starting', model=profile['model']), ensure_ascii=False), flush=True)
+        task = service.create_task(dict(account=ACCOUNT, username=username, member_username=member,
+            start=START, end=END, selected_model=choice))
+        job = service.jobs[task['id']]
+        await job
+        task = service.get_task(task['id'], ACCOUNT)
+        labels = service.messages(task['id'], ACCOUNT, limit=100)['items']
+        calls = [r for r in store.list('usage', ACCOUNT) if r['task_id'] == task['id']]
+        allowed_usage = {'id', 'status', 'attempt', 'model', 'provider', 'usage', 'usage_known',
+            'duration_ms', 'finish_reason', 'error_code', 'error_type', 'http_status', 'validation_errors'}
+        checks = checks_for(task, labels, username, member)
+        case = dict(case=name, task_id=task['id'], status=task['status'], elapsed_seconds=round(time.monotonic() - began, 3),
+            coverage=task['coverage'], checks=checks, passed=all(checks.values()), error=task['error'],
+            context_budget=task['context_budget'],
+            usage=[{k: v for k, v in call.items() if k in allowed_usage} for call in calls],
+            model_outputs=model_outputs.get(task['id'], []),
+            portrait=task['portrait'], labels=labels)
+        report['cases'].append(case)
+        (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(json.dumps(dict(case=name, status=task['status'], passed=case['passed'],
+            calls=len(calls), elapsed_seconds=case['elapsed_seconds'], error=task['error']), ensure_ascii=False), flush=True)
     await service.stop()
     report['passed'] = all(case['passed'] for case in report['cases'])
     return report

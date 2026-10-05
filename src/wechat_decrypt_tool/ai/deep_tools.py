@@ -734,65 +734,8 @@ class ChatGateway:
                 'has_more':bool(result.get('has_more')), 'warning':result.get('warning', ''),
                 'freshness':result.get('freshness', {}), 'coverage':'search_only'})
             return {**{k: v for k, v in result.items() if k not in ('messages', 'originals')}, 'messages': self.save_messages(messages),
-                'live_recheck_tool': 'search_live_messages' if result.get('freshness', {}).get('realtime_read_hint') else None,
                 'next_conversation_offset': conversation_offset if result.get('has_more') else conversation_offset + 1 if conversation_offset + 1 < len(state['conversations']) else None}
 
-        @tool
-        async def search_live_messages(scope_handle: str, query: str, cursor_handle: str = '') -> dict:
-            """按关键词回查索引实时缺口；用返回的 cursor_handle 续查。命中不表示完整分析，普通问题证据足够即可回答。"""
-            async with self.lock:
-                state = self.scope(scope_handle)
-                run = self.guard()
-                if not query.strip():
-                    return {'messages': [], 'requires_query': True, 'next_tool': 'read_messages',
-                        'scope_handle': scope_handle, 'instruction': '没有具体关键词时直接读取范围原文，无需实时关键词搜索。'}
-                identity = hashlib.sha256(json.dumps([scope_handle, query]).encode()).hexdigest()[:24]
-                key = 'live:' + (cursor_handle or identity)
-                saved = self.get(key)
-                if saved and (saved['scope_handle'] != scope_handle or saved['query'] != query):
-                    raise ValueError('实时游标不能修改范围或关键词')
-                if cursor_handle and saved is None:
-                    raise ValueError('实时游标不属于当前任务版本')
-                if saved and saved.get('result'):
-                    return saved['result']
-                if not saved:
-                    prepared = await self.service.tools.live_search_segments(run['account'], state['conversations'], state['start'], state['end'])
-                    self.guard()
-                    segments = [{**s, 'start': max(s['start'], state['start']), 'end': min(s['end'], state['end'])}
-                        for s in prepared['segments'] if s['username'] in state['conversations']]
-                    saved = {'scope_handle': scope_handle, 'query': query, 'segments': segments, 'position': 0,
-                        'cursor': None, 'scanned': 0, 'warning': prepared.get('warning', '')}
-                current, matches = dict(saved), []
-                started = time.monotonic()
-                for _ in range(8):
-                    if current['position'] >= len(current['segments']):
-                        break
-                    segment = current['segments'][current['position']]
-                    page = await self.service.tools.live_search_page(run['account'], segment, current['cursor'], query, state['sender'], self.guard)
-                    self.guard()
-                    matches.extend(m for m in page.get('messages', []) if self.permits(state, m))
-                    current['scanned'] += page.get('scanned', 0)
-                    if page.get('has_more'):
-                        if not page.get('cursor') or page['cursor'] == current['cursor']:
-                            raise ValueError('实时游标未推进')
-                        current['cursor'] = page['cursor']
-                    else:
-                        current['position'] += 1
-                        current['cursor'] = None
-                    if matches or time.monotonic() - started > 1:
-                        break
-                more = current['position'] < len(current['segments'])
-                next_handle = hashlib.sha256(json.dumps([identity, current['position'], current['cursor'], current['scanned']], sort_keys=True).encode()).hexdigest()[:24] if more else None
-                result = {'messages': self.save_messages(matches), 'scanned': current['scanned'], 'has_more': more,
-                    'cursor_handle': next_handle, 'warning': current['warning'], 'coverage': 'search_only'}
-                pieces = [(key, 'deep_live_cursor', {**saved, 'result': result})]
-                pieces.append(('search-coverage:' + identity + ':' + str(current['scanned']), 'deep_search_coverage',
-                    {'scope_handle':scope_handle, 'query':query, 'sources':[m['source'] for m in matches],
-                     'scanned':current['scanned'], 'has_more':more, 'warning':current['warning'], 'coverage':'search_only'}))
-                if more:
-                    pieces.append(('live:' + next_handle, 'deep_live_cursor', current))
-                self.service.workspace.put_pieces(self.id, self.version, pieces)
-                return result
 
         @tool
         async def list_files(scope_handle: str) -> dict:
@@ -1063,7 +1006,7 @@ class ChatGateway:
             """读取全部分支事实后保存主模型整合结论与缺口；并不替代全量覆盖校验。"""
             return self.service.planned_work.close(self, plan_handle, synthesis, sources, gaps)
 
-        tools = [select_chat_scope, search_messages, search_live_messages, list_files, read_messages, commit_findings, read_context, count_messages, read_results, calculate_values, search_material, read_material, analyze_media]
+        tools = [select_chat_scope, search_messages, list_files, read_messages, commit_findings, read_context, count_messages, read_results, calculate_values, search_material, read_material, analyze_media]
         # 构建旧检查点图时只读配置，不执行当前版本 guard；工具执行时仍逐次校验。
         run = self.service.run(self.id)
         if run.get('subtask_plan_version') == REVISION:

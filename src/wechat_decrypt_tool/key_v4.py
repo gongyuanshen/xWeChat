@@ -3,6 +3,8 @@ import multiprocessing
 import struct
 import hmac
 import os
+import time
+import logging
 from ctypes import wintypes
 from multiprocessing import freeze_support
 import sys
@@ -40,7 +42,8 @@ SALT_SIZE = 16
 PROCESS_VM_READ = 0x0010
 PROCESS_QUERY_INFORMATION = 0x0400
 
-finish_flag = False
+logger = logging.getLogger(__name__)
+MEMORY_CHUNK_SIZE = 4 * 1024 * 1024
 
 
 def xor_raw_key(raw_key: bytes, internal_db_key: bytes | None) -> bytes:
@@ -83,7 +86,7 @@ else:
 def _require_windows_runtime():
     if os.name != 'nt':
         raise RuntimeError('V4 数据库密钥提取仅支持 Windows。')
-    if pymem is None or yara is None:
+    if yara is None:
         raise RuntimeError('V4 数据库密钥提取缺少 Windows 运行时依赖。')
 
 
@@ -102,39 +105,50 @@ class MEMORY_BASIC_INFORMATION(ctypes.Structure):
 
 # 打开目标进程
 def open_process(pid):
-    return ctypes.windll.kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
+    handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
+    if not handle:
+        raise OSError(ctypes.get_last_error(), f"OpenProcess failed for PID {pid}")
+    return handle
 
 
 # 读取目标进程内存
 def read_process_memory(process_handle, address, size):
     buffer = ctypes.create_string_buffer(size)
     bytes_read = ctypes.c_size_t(0)
-    success = ctypes.windll.kernel32.ReadProcessMemory(
+    success = ReadProcessMemory(
         process_handle,
         ctypes.c_void_p(address),
         buffer,
         size,
         ctypes.byref(bytes_read)
     )
-    if not success:
-        return None
-    return buffer.raw
+    if not success or bytes_read.value != size:
+        raise OSError(ctypes.get_last_error(), f"ReadProcessMemory failed at 0x{address:x}, size={size}, read={bytes_read.value}")
+    return buffer.raw[:bytes_read.value]
 
 
 # 获取所有内存区域
-def get_memory_regions(process_handle):
+def get_memory_regions(process_handle, *, deadline=None, cancel_event=None):
     regions = []
     mbi = MEMORY_BASIC_INFORMATION()
     address = 0
-    while ctypes.windll.kernel32.VirtualQueryEx(
-            process_handle,
-            ctypes.c_void_p(address),
-            ctypes.byref(mbi),
-            ctypes.sizeof(mbi)
-    ):
-        if mbi.State == MEM_COMMIT and mbi.Type == MEM_PRIVATE:
+    query = kernel32.VirtualQueryEx
+    query.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, ctypes.POINTER(MEMORY_BASIC_INFORMATION), ctypes.c_size_t]
+    query.restype = ctypes.c_size_t
+    while address < 0x7FFF_FFFF_FFFF:
+        _check_scan_budget(deadline, cancel_event)
+        if not query(process_handle, ctypes.c_void_p(address), ctypes.byref(mbi), ctypes.sizeof(mbi)):
+            error = ctypes.get_last_error()
+            if error == 87:  # ERROR_INVALID_PARAMETER marks the end of the address space.
+                break
+            raise OSError(error, f"VirtualQueryEx failed at 0x{address:x}")
+        if (mbi.State == MEM_COMMIT and mbi.Type == MEM_PRIVATE
+                and not mbi.Protect & 0x101 and mbi.Protect & 0xFF in (2, 4, 8, 32, 64, 128)):
             regions.append((mbi.BaseAddress, mbi.RegionSize))
-        address += mbi.RegionSize
+        next_address = int(mbi.BaseAddress or 0) + mbi.RegionSize
+        if next_address <= address:
+            raise RuntimeError(f"VirtualQueryEx returned a non-advancing region at 0x{address:x}")
+        address = next_address
     return regions
 
 
@@ -153,30 +167,10 @@ def read_num(data: bytes, offset, size):
     return struct.unpack_from(fmt, data, offset)[0]
 
 
-def read_bytes_from_pid(pid: int, addr: int, size: int):
-    """从进程内存中读取指定大小的字节"""
-    hprocess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
-    if not hprocess:
-        raise Exception(f"Failed to open process with PID {pid}")
-    buffer = b''
-    try:
-        buffer = ctypes.create_string_buffer(size)
-        bytes_read = ctypes.c_size_t(0)
-        success = ReadProcessMemory(hprocess, addr, buffer, size, ctypes.byref(bytes_read))
-        if not success:
-            CloseHandle(hprocess)
-            return b''
-        CloseHandle(hprocess)
-    except:
-        pass
-    return bytes(buffer)
-
-
 def is_ok(passphrase, buf, internal_db_key=None):
     """验证密钥是否正确"""
-    global finish_flag
-    if finish_flag:
-        return False
+    if len(passphrase) != KEY_SIZE or len(buf) < PAGE_SIZE:
+        raise ValueError('V4 key verification requires a 32-byte key and a complete 4096-byte page')
     # 获取文件开头的 salt
     salt = buf[:SALT_SIZE]
     # salt 异或 0x3a 得到 mac_salt，用于计算 HMAC
@@ -198,18 +192,11 @@ def is_ok(passphrase, buf, internal_db_key=None):
     # 校验 HMAC 是否一致
     hash_mac_start_offset = end - reserve + IV_SIZE
     hash_mac_end_offset = hash_mac_start_offset + len(hash_mac)
-    if hash_mac == buf[hash_mac_start_offset:hash_mac_end_offset]:
-        print(f"[+] Found valid key!")
-        finish_flag = True
-        return True
-    return False
+    return hmac.compare_digest(hash_mac, buf[hash_mac_start_offset:hash_mac_end_offset])
 
 
 def check_chunk(chunk, buf, internal_db_key=None):
     """检查单个密钥候选"""
-    global finish_flag
-    if finish_flag:
-        return False
     if is_ok(chunk, buf, internal_db_key):
         return chunk
     return False
@@ -233,98 +220,71 @@ def is_potential_key(key: bytes) -> bool:
     return True
 
 
-def get_key_inner(pid, process_infos):
-    """扫描可能为key的内存，返回密钥候选列表"""
-    _require_windows_runtime()
-    process_handle = open_process(pid)
-    rules_v4_key = r'''
-        rule GetKeyAddrStub
-        {
-            strings:
-                $a = { ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 2f 00 00 00 00 00 00 00 }
-            condition:
-                all of them
-        }
-        '''
-    rules = yara.compile(source=rules_v4_key)
-    pre_addresses = []
-    
-    for base_address, region_size in process_infos:
-        memory = read_process_memory(process_handle, base_address, region_size)
-        if not memory:
-            continue
-        
-        matches = rules.match(data=memory)
-        if matches:
-            for match in matches:
-                rule_name = match.rule
-                if rule_name == 'GetKeyAddrStub':
-                    for string in match.strings:
-                        for instance in string.instances:
-                            offset, content = instance.offset, instance.matched_data
-                            addr = read_num(memory, offset, 8)
-                            pre_addresses.append(addr)
-    
-    keys = []
-    key_set = set()
-    for pre_address in pre_addresses:
-        key = read_bytes_from_pid(pid, pre_address, 32)
-        if key not in key_set:
-            keys.append(key)
-            key_set.add(key)
-    
-    return keys
+def _check_scan_budget(deadline, cancel_event):
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError('Database key scan cancelled')
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError('Database key memory scan timed out')
 
 
-def get_key(pid, process_handle, buf, internal_db_key=None):
+def get_key(pid, process_handle, buf, internal_db_key=None, *, deadline=None, cancel_event=None):
     """获取密钥：扫描进程内存，寻找有效的密钥"""
-    process_infos = get_memory_regions(process_handle)
+    regions = get_memory_regions(process_handle, deadline=deadline, cancel_event=cancel_event)
+    rules = yara.compile(source=r'''rule GetKeyAddrStub {
+        strings: $a = { ?? ?? ?? ?? ?? ?? 00 00 00 00 00 00 00 00 00 00 20 00 00 00 00 00 00 00 2f 00 00 00 00 00 00 00 }
+        condition: $a
+    }''')
+    addresses = set()
+    keys = set()
+    for base, size in regions:
+        for offset in range(0, size, MEMORY_CHUNK_SIZE):
+            _check_scan_budget(deadline, cancel_event)
+            memory = read_process_memory(process_handle, base + offset, min(MEMORY_CHUNK_SIZE + 31, size - offset))
+            for match in rules.match(data=memory):
+                for matched_string in match.strings:
+                    for instance in matched_string.instances:
+                        address = read_num(memory, instance.offset, 8)
+                        if address in addresses:
+                            continue
+                        addresses.add(address)
+                        # A signature is only a candidate; reject dangling pointers with diagnostics.
+                        try:
+                            key = read_process_memory(process_handle, address, KEY_SIZE)
+                        except OSError as error:
+                            if error.errno not in (299, 487, 998):
+                                raise
+                            logger.warning('V4 candidate pointer unreadable: pid=%s address=0x%x error=%s', pid, address, error)
+                            continue
+                        if is_potential_key(key):
+                            keys.add(key)
+    logger.info('V4 memory candidates: pid=%s regions=%s pointers=%s candidates=%s', pid, len(regions), len(addresses), len(keys))
+    return verify_keys(list(keys), buf, internal_db_key, deadline=deadline, cancel_event=cancel_event)
 
-    def split_list(lst, n):
-        k, m = divmod(len(lst), n)
-        return (lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n))
 
-    keys = []
-    pool = multiprocessing.Pool(processes=multiprocessing.cpu_count() // 2)
-    results = pool.starmap(get_key_inner, ((pid, process_info_) for process_info_ in
-                                           split_list(process_infos, min(len(process_infos), 40))))
-    pool.close()
-    pool.join()
-    
-    raw_keys = []
-    for r in results:
-        if r:
-            raw_keys += r
-            
-    # 合并去重
-    unique_keys = list(set(raw_keys))
-    
-    # 引入初筛过滤器，瞬间过滤掉非密码学随机生成的普通文本候选
-    filtered_keys = [k for k in unique_keys if is_potential_key(k)]
-    
-    print(f"[*] Total raw candidates extracted: {len(unique_keys)}")
-    print(f"[*] Remaining candidates after entropy/ASCII filtering: {len(filtered_keys)}")
-    
-    # 验证筛选后的密钥候选
-    key = verify_keys(filtered_keys, buf, internal_db_key)
-    return key
-
-
-def verify_keys(keys, buf, internal_db_key=None):
+def verify_keys(keys, buf, internal_db_key=None, *, deadline=None, cancel_event=None):
     """验证密钥候选列表，返回有效的密钥"""
     total = len(keys)
     if total == 0:
         print("[-] No key candidates found")
         return None
 
-    worker_count = max(1, multiprocessing.cpu_count() // 2)
+    worker_count = min(total, 8, max(1, multiprocessing.cpu_count() // 2))
     print(f"[*] Testing {total} filtered key candidates with {worker_count} workers...")
 
     completed = 0
     last_percent = -1
     with multiprocessing.Pool(processes=worker_count) as pool:
         task_iter = ((key, buf, internal_db_key) for key in keys)
-        for r in pool.imap_unordered(verify_worker, task_iter, chunksize=16):
+        pending = pool.imap_unordered(verify_worker, task_iter, chunksize=16 if deadline is None else 1)
+        while completed < total:
+            _check_scan_budget(deadline, cancel_event)
+            if deadline is None:
+                r = next(pending)
+            else:
+                try:
+                    r = pending.next(timeout=min(0.1, max(0.001, deadline - time.monotonic())))
+                except multiprocessing.TimeoutError:
+                    continue
             completed += 1
             percent = int((completed / total) * 100)
             if percent != last_percent:
@@ -340,50 +300,24 @@ def verify_keys(keys, buf, internal_db_key=None):
     return None
 
 
-def recover_key(pid, db_file_path=None, internal_db_key=None):
+def recover_key(pid, db_file_path=None, internal_db_key=None, *, timeout_seconds=120.0, cancel_event=None):
     """
     主函数：从 WeChat 进程恢复密钥
     """
-    try:
-        _require_windows_runtime()
-    except RuntimeError as exc:
-        print(f"[-] {exc}")
-        return None
-
-    process_handle = open_process(pid)
-    if not process_handle:
-        print(f"[-] Failed to open process {pid}")
-        return None
-    
+    deadline = time.monotonic() + timeout_seconds
+    _check_scan_budget(deadline, cancel_event)
+    _require_windows_runtime()
     if not db_file_path:
-        print("[-] No database file specified")
-        CloseHandle(process_handle)
-        return None
-    
-    if not os.path.exists(db_file_path):
-        print(f"[-] Database file not found: {db_file_path}")
-        CloseHandle(process_handle)
-        return None
-    
+        raise ValueError('A database file is required for HMAC verification')
+    with open(db_file_path, 'rb') as source:
+        buf = source.read(PAGE_SIZE)
+    if len(buf) != PAGE_SIZE or buf.startswith(b'SQLite format 3\0'):
+        raise ValueError('Key recovery requires an encrypted 4096-byte database page')
+    process_handle = open_process(pid)
     try:
-        with open(db_file_path, 'rb') as f:
-            buf = f.read()
-        
-        if len(buf) < PAGE_SIZE:
-            print(f"[-] Database file too small: {len(buf)} bytes")
-            CloseHandle(process_handle)
-            return None
-        
-        print(f"[*] Scanning process memory for key candidates...")
-        key = get_key(pid, process_handle, buf, internal_db_key)
-        
+        return get_key(pid, process_handle, buf, internal_db_key, deadline=deadline, cancel_event=cancel_event)
+    finally:
         CloseHandle(process_handle)
-        return key
-    
-    except Exception as e:
-        print(f"[-] Error during key recovery: {e}")
-        CloseHandle(process_handle)
-        return None
 
 
 if __name__ == '__main__':

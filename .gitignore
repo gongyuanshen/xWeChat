@@ -86,12 +86,9 @@ pnpm-lock.yaml
 /desktop/dist-controlled-*/
 /desktop/dist-updater-test/
 /desktop/build/
-/desktop/resources/ui/*
-!/desktop/resources/ui/.gitkeep
-/desktop/resources/backend/*
-!/desktop/resources/backend/.gitkeep
-/desktop/resources/signing/*
-!/desktop/resources/signing/.gitkeep
+/desktop/resources/ui/
+/desktop/resources/backend/
+/desktop/resources/signing/
 /desktop/resources/icon.ico
 /desktop/.operation-auth-*/
 
@@ -157,6 +154,9 @@ pro-shots/
 
 # Local verification captures can contain private chats and model responses.
 /tmp/
+/.tmp/
+/@AutomationLog.txt
+/frontend/tmp/
 /.pytest_cache/
 /.pytest_tmp/
 /pytest_run_tmp/

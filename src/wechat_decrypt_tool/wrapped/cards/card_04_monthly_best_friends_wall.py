@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import math
 import sqlite3
@@ -317,7 +318,7 @@ def compute_monthly_best_friends_wall_stats(*, account_dir: Path, year: int) -> 
             seen.add(u)
             uniq_winner_usernames.append(u)
 
-    contact_rows = _load_contact_rows(account_dir / "contact.db", uniq_winner_usernames) if uniq_winner_usernames else {}
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", uniq_winner_usernames) if uniq_winner_usernames else {}
 
     months: list[dict[str, Any]] = []
     for month in range(1, 13):

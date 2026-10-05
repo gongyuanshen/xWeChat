@@ -18,9 +18,9 @@ import { PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT } from '~/lib/voice-transcr
 const DEFAULT_CHAT_SOURCE = 'auto'
 const IMAGE_GROUP_LAYOUT_DURATION_MS = 250
 const IMAGE_GROUP_LAYOUT_EASING = 'cubic-bezier(0.2, 0, 0, 1)'
-const NATIVE_VOICE_DISPATCH_TOKEN = Symbol('nativeVoiceDispatchToken')
+const VOICE_DISPATCH_TOKEN = Symbol('voiceDispatchToken')
 
-const nativeVoiceErrorDetail = (error) => error?.data?.detail || error?.detail || {}
+const voiceErrorDetail = (error) => error?.data?.detail || error?.detail || {}
 
 export const clearProjectVoiceTranscripts = (loadedConversations) => {
   if (!loadedConversations || typeof loadedConversations !== 'object') return
@@ -40,39 +40,14 @@ export const clearProjectVoiceTranscripts = (loadedConversations) => {
   }
 }
 
-export const mergeWechatNativeVoiceTranscript = (message, payload) => {
-  const model = String(payload?.model ?? payload?.voiceTranscriptModel ?? '').trim().toLowerCase()
-  const text = String(payload?.text ?? payload?.voiceTranscript ?? '').trim()
-  if (model !== 'wechat-native' || !text) return message
-
-  const language = String(payload?.language ?? payload?.voiceTranscriptLanguage ?? '').trim()
-  if (
-    String(message?.voiceTranscript || '').trim() === text
-    && String(message?.voiceTranscriptStatus || '').trim() === 'success'
-    && String(message?.voiceTranscriptModel || '').trim().toLowerCase() === 'wechat-native'
-    && String(message?.voiceTranscriptLanguage || '').trim() === language
-    && !String(message?.voiceTranscriptError || '').trim()
-  ) return message
-
-  return {
-    ...message,
-    voiceTranscript: text,
-    voiceTranscriptStatus: 'success',
-    voiceTranscriptError: '',
-    voiceTranscriptLanguage: language,
-    voiceTranscriptModel: 'wechat-native',
-    voiceTranscriptNativeRequestId: ''
-  }
-}
-
 export const useChatMessages = ({
   api,
   apiBase,
   selectedAccount,
   selectedContact,
-  realtimeEnabled,
   privacyMode,
-  searchContext
+  searchContext,
+  onSnapshotChanged
 }) => {
   const messagePageSize = 50
   const messageTypeFilterScanPageSize = 640
@@ -88,11 +63,7 @@ export const useChatMessages = ({
   let messageLoadSeq = 0
   let messageLoadController = null
   let messageLoadTargetUsername = ''
-  let realtimeRefreshController = null
-  let realtimeRefreshTargetUsername = ''
-  let nativeVoiceRevision = 0
   let projectTranscriptRevision = 0
-  const nativeVoiceTranscriptPolls = new Map()
 
   const isAbortError = (error, controller = null) => {
     return !!(
@@ -104,17 +75,11 @@ export const useChatMessages = ({
   }
 
   const abortMessageLoad = () => {
+    messageLoadSeq += 1
+    isLoadingMessages.value = false
     const controller = messageLoadController
     messageLoadController = null
     messageLoadTargetUsername = ''
-    if (!controller || controller.signal.aborted) return
-    try { controller.abort() } catch {}
-  }
-
-  const abortRealtimeRefresh = () => {
-    const controller = realtimeRefreshController
-    realtimeRefreshController = null
-    realtimeRefreshTargetUsername = ''
     if (!controller || controller.signal.aborted) return
     try { controller.abort() } catch {}
   }
@@ -147,8 +112,30 @@ export const useChatMessages = ({
   const previewImageItems = ref([])
   const previewImageIndex = ref(-1)
   const previewVideoUrl = ref(null)
+  const previewVideoSourceUrl = ref(null)
   const previewVideoPosterUrl = ref('')
   const previewVideoError = ref('')
+  const previewVideoGenerating = ref(false)
+  const previewVideoNotice = ref('')
+  let videoPreviewSequence = 0
+  let videoPreviewController = null
+  const localPreviewVideoSource = computed(() => {
+    if (!previewVideoSourceUrl.value || typeof window === 'undefined') return null
+    try {
+      const base = new URL(apiBase, window.location.href)
+      const source = new URL(previewVideoSourceUrl.value, window.location.href)
+      return source.origin === base.origin
+        && source.pathname === `${base.pathname.replace(/\/$/, '')}/chat/media/video`
+        ? source : null
+    } catch {
+      return null
+    }
+  })
+  const canGenerateVideoPreview = computed(() => !!(
+    localPreviewVideoSource.value && !previewVideoGenerating.value
+    && previewVideoUrl.value === previewVideoSourceUrl.value
+    && (previewVideoError.value || previewVideoNotice.value)
+  ))
 
   const resourceSidebarOpen = ref(false)
   const resourceTimeGroup = ref('day')
@@ -193,75 +180,6 @@ export const useChatMessages = ({
     return await voiceTranscriptionStatusPromise
   }
 
-  const nativeVoiceTranscriptionStatus = ref(null)
-  const nativeVoiceTranscriptionStatusLoading = ref(false)
-  let nativeVoiceTranscriptionStatusPromise = null
-  let nativeVoiceTranscriptionStatusSequence = 0
-  let nativeVoiceTranscriptionStatusUpdatedAt = 0
-  const nativeVoiceTranscriptionStatusTtlMs = 5000
-  const nativeVoiceTranscriptionStatusKnown = computed(() => !!nativeVoiceTranscriptionStatus.value)
-  const nativeVoiceTranscriptionAvailable = computed(() => nativeVoiceTranscriptionStatus.value?.available === true)
-  const nativeVoiceTranscriptionUnavailableReason = computed(() => {
-    const reason = String(nativeVoiceTranscriptionStatus.value?.reason || '').trim()
-    return ({
-      runtime_trigger_e2e_not_validated: '当前微信版本的原生转写桥接尚未启用。',
-      unsupported_platform: '微信原生语音转文字目前仅支持 Windows。',
-      unsupported_architecture: '微信原生语音转文字需要 64 位 Windows。',
-      weixin_main_ui_not_found: '请先登录并打开微信。',
-      weixin_main_ui_ambiguous: '检测到多个微信主窗口，无法安全选择账号。',
-      weixin_version_unsupported: '当前微信版本暂不支持微信原生语音转文字。请使用微信 4.1.12.26，并完全退出、重新启动微信后再试。',
-      active_account_mismatch: '当前项目账号与已登录微信账号不一致。',
-      active_account_unverified: '无法确认当前项目账号与已登录微信账号一致。',
-      protected_build_unavailable: '当前受保护 DLL 或构建中的微信原生语音转文字功能不可用。',
-      bridge_manager_unavailable: '微信原生语音转文字服务尚未就绪。',
-      inspection_failed: '无法检查微信原生语音转文字状态。请重启本应用和微信后再试。',
-      bridge_restart_required: '桥接状态已失效。请完全退出微信，重启本应用（开发模式下同时重启后端）后，再重新打开并登录微信。'
-    })[reason] || reason || '微信原生语音转文字当前不可用。'
-  })
-
-  const refreshNativeVoiceTranscriptionStatus = async ({ force = false } = {}) => {
-    const account = String(selectedAccount.value || '').trim()
-    if (!account) {
-      nativeVoiceTranscriptionStatus.value = null
-      return null
-    }
-    if (
-      !force
-      && nativeVoiceTranscriptionStatus.value
-      && (Date.now() - nativeVoiceTranscriptionStatusUpdatedAt) < nativeVoiceTranscriptionStatusTtlMs
-    ) return nativeVoiceTranscriptionStatus.value
-    if (nativeVoiceTranscriptionStatusPromise?.account === account) {
-      return await nativeVoiceTranscriptionStatusPromise.promise
-    }
-    const sequence = ++nativeVoiceTranscriptionStatusSequence
-    nativeVoiceTranscriptionStatusLoading.value = true
-    const promise = (async () => {
-      let result
-      try {
-        result = await api.getNativeVoiceTranscriptionStatus({ account })
-      } catch (error) {
-        result = {
-          available: false,
-          reason: String(error?.message || '无法读取微信原生语音转文字状态').trim()
-        }
-      } finally {
-        if (sequence === nativeVoiceTranscriptionStatusSequence) {
-          nativeVoiceTranscriptionStatusLoading.value = false
-          nativeVoiceTranscriptionStatusPromise = null
-        }
-      }
-      if (
-        sequence === nativeVoiceTranscriptionStatusSequence
-        && String(selectedAccount.value || '').trim() === account
-      ) {
-        nativeVoiceTranscriptionStatus.value = result
-        nativeVoiceTranscriptionStatusUpdatedAt = Date.now()
-      }
-      return result
-    })()
-    nativeVoiceTranscriptionStatusPromise = { account, promise }
-    return await promise
-  }
 
   const highlightServerIdStr = ref('')
   const highlightMessageId = ref('')
@@ -1181,19 +1099,96 @@ export const useChatMessages = ({
   }
 
   const openVideoPreview = (url, poster) => {
+    closeVideoPreview()
     previewVideoUrl.value = String(url || '').trim() || null
+    previewVideoSourceUrl.value = previewVideoUrl.value
     previewVideoPosterUrl.value = String(poster || '').trim()
-    previewVideoError.value = ''
+  }
+
+  const cancelVideoPreviewGeneration = () => {
+    videoPreviewSequence += 1
+    videoPreviewController?.abort()
+    videoPreviewController = null
+    previewVideoGenerating.value = false
+    previewVideoNotice.value = '已取消生成本地预览。'
   }
 
   const closeVideoPreview = () => {
+    cancelVideoPreviewGeneration()
     previewVideoUrl.value = null
+    previewVideoSourceUrl.value = null
     previewVideoPosterUrl.value = ''
     previewVideoError.value = ''
+    previewVideoNotice.value = ''
   }
 
-  const onPreviewVideoError = () => {
-    previewVideoError.value = '视频加载失败，可能是资源不存在或无法访问。'
+  const isCurrentPreviewVideo = (video) => previewVideoUrl.value && video
+    && new URL(video.currentSrc || video.src, window.location.href).href
+      === new URL(previewVideoUrl.value, window.location.href).href
+
+  const onPreviewVideoReady = (event) => {
+    const video = event.currentTarget
+    // Metadata alone may precede decoder readiness. Inspect the picture only
+    // once current frame data is available (loadeddata/canplay also call here).
+    if (!isCurrentPreviewVideo(video) || video.readyState < 2) return
+    if (video.videoWidth > 0 && video.videoHeight > 0) return
+    video.pause()
+    previewVideoError.value = localPreviewVideoSource.value
+      ? '当前环境无法显示此视频的画面。'
+      : '当前环境无法显示此视频的画面。此视频来源不支持生成本地预览。'
+  }
+
+  const onPreviewVideoError = (event) => {
+    const video = event.currentTarget
+    if (!isCurrentPreviewVideo(video)) return
+    video.pause()
+    previewVideoError.value = localPreviewVideoSource.value
+      ? '视频加载失败，可能是资源不存在或当前环境不支持播放。'
+      : '视频加载失败。此视频来源不支持生成本地预览。'
+  }
+
+  const generateVideoPreview = async () => {
+    if (previewVideoGenerating.value) return
+    const source = localPreviewVideoSource.value
+    if (!source) {
+      previewVideoError.value = '此视频来源不支持生成本地预览。'
+      return
+    }
+    const sequence = ++videoPreviewSequence
+    const account = selectedAccount.value
+    const username = selectedContact.value?.username
+    const controller = new AbortController()
+    videoPreviewController = controller
+    previewVideoGenerating.value = true
+    previewVideoError.value = ''
+    previewVideoNotice.value = '正在生成本地预览…'
+    try {
+      const result = await api.generateChatVideoPreview(source.search, { signal: controller.signal })
+      if (sequence !== videoPreviewSequence || controller.signal.aborted
+        || account !== selectedAccount.value || username !== selectedContact.value?.username) return
+      let output
+      try { output = new URL(result?.url) } catch { throw new Error('本地视频预览响应无效。') }
+      const previewPath = `${source.pathname}/preview/`
+      if (result?.status !== 'success' || output.origin !== source.origin
+        || !output.pathname.startsWith(previewPath)
+        || !/^[a-f0-9]{64}$/.test(output.pathname.slice(previewPath.length))
+        || (source.searchParams.has('account')
+          && output.searchParams.get('account') !== source.searchParams.get('account'))) {
+        throw new Error('本地视频预览响应与当前视频不匹配。')
+      }
+      previewVideoUrl.value = output.href
+      previewVideoNotice.value = '本地预览已生成。'
+    } catch (error) {
+      if (sequence !== videoPreviewSequence || controller.signal.aborted) return
+      const detail = error?.data?.detail
+      previewVideoError.value = typeof detail === 'string' ? detail : String(error?.message || '生成本地预览失败。')
+      previewVideoNotice.value = ''
+    } finally {
+      if (sequence === videoPreviewSequence) {
+        previewVideoGenerating.value = false
+        videoPreviewController = null
+      }
+    }
   }
 
   const setVoiceRef = (id, element) => {
@@ -1251,145 +1246,30 @@ export const useChatMessages = ({
     clearProjectVoiceTranscripts(allMessages.value)
   }
 
-  const stopNativeVoiceTranscriptPolling = () => {
-    nativeVoiceRevision += 1
-    for (const entry of nativeVoiceTranscriptPolls.values()) {
-      try { entry.controller?.abort?.() } catch {}
-    }
-    nativeVoiceTranscriptPolls.clear()
+  const clearPendingVoiceTranscriptions = () => {
     for (const list of Object.values(allMessages.value || {})) {
       if (!Array.isArray(list)) continue
       for (const message of list) {
         if (
           String(message?.voiceTranscriptStatus || '').trim().toLowerCase() === 'loading'
-          && (
-            String(message?.voiceTranscriptNativeRequestId || '').trim()
-            || message?.[NATIVE_VOICE_DISPATCH_TOKEN]
-          )
+          && message?.[VOICE_DISPATCH_TOKEN]
         ) {
           message.voiceTranscriptStatus = 'idle'
           message.voiceTranscriptError = ''
-          delete message[NATIVE_VOICE_DISPATCH_TOKEN]
+          delete message[VOICE_DISPATCH_TOKEN]
         }
       }
     }
-  }
-
-  const waitForNativeVoiceTranscriptPoll = (delayMs, signal) => new Promise((resolve) => {
-    if (signal?.aborted || delayMs <= 0) {
-      resolve()
-      return
-    }
-    const finish = () => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }
-    const timer = setTimeout(finish, delayMs)
-    const onAbort = () => {
-      clearTimeout(timer)
-      finish()
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-
-  // 按 requestId + 精确消息 identity 读取 bridge 回调缓存；packed_info_data 仅作为后端兼容回退。
-  const pollNativeVoiceTranscript = async (
-    message,
-    { requestId = '', maxAttempts = 85, intervalMs = 1200 } = {}
-  ) => {
-    const accountAtStart = String(selectedAccount.value || '').trim()
-    const usernameAtStart = String(selectedContact.value?.username || '').trim()
-    const serverId = String(message?.serverIdStr || message?.serverId || '').trim()
-    const localId = String(message?.localIdStr || message?.localId || '').trim()
-    const nativeRequestId = String(requestId || '').trim()
-    const messageId = String(message?.id || '').trim()
-    if (
-      !accountAtStart
-      || !usernameAtStart
-      || !serverId
-      || serverId === '0'
-      || typeof api?.getNativeVoiceTranscript !== 'function'
-    ) return { status: 'pending', serverId, text: '', language: '', model: '' }
-
-    const pollKey = `${accountAtStart}:${usernameAtStart}:${serverId}:${localId}:${nativeRequestId}`
-    const active = nativeVoiceTranscriptPolls.get(pollKey)
-    if (active?.promise) return await active.promise
-
-    const attempts = Math.max(1, Math.min(120, Math.trunc(Number(maxAttempts) || 1)))
-    const delayMs = Math.max(0, Math.min(10000, Math.trunc(Number(intervalMs) || 0)))
-    const controller = typeof AbortController === 'function' ? new AbortController() : null
-    const entry = { controller, promise: null }
-    entry.promise = (async () => {
-      let result = { status: 'pending', serverId, text: '', language: '', model: '' }
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (
-          controller?.signal?.aborted
-          || String(selectedAccount.value || '').trim() !== accountAtStart
-          || String(selectedContact.value?.username || '').trim() !== usernameAtStart
-        ) return { ...result, status: 'cancelled' }
-
-        try {
-          result = await api.getNativeVoiceTranscript({
-            account: accountAtStart,
-            server_id: serverId,
-            username: usernameAtStart,
-            ...(localId && localId !== '0' ? { local_id: localId } : {}),
-            ...(nativeRequestId ? { request_id: nativeRequestId } : {}),
-            ...(controller ? { signal: controller.signal } : {})
-          })
-        } catch (error) {
-          if (isAbortError(error, controller)) return { ...result, status: 'cancelled' }
-          throw error
-        }
-
-        const list = allMessages.value[usernameAtStart]
-        const index = Array.isArray(list)
-          ? list.findIndex((item) => (
-              (messageId && String(item?.id || '') === messageId)
-              || String(item?.serverIdStr || item?.serverId || '').trim() === serverId
-            ))
-          : -1
-        if (index < 0) return { ...result, status: 'stale' }
-
-        const resultStatus = String(result?.status || '').trim().toLowerCase()
-        if (['error', 'expired', 'released'].includes(resultStatus)) {
-          const resultError = new Error(String(
-            result?.message || result?.error?.message || '微信原生语音转文字未能返回结果。'
-          ).trim())
-          resultError.code = String(result?.code || result?.error?.code || `native_transcript_${resultStatus}`).trim()
-          throw resultError
-        }
-
-        const updated = mergeWechatNativeVoiceTranscript(list[index], result)
-        if (updated !== list[index]) {
-          const next = list.slice()
-          next[index] = updated
-          allMessages.value = { ...allMessages.value, [usernameAtStart]: next }
-          return { ...result, status: 'success', model: 'wechat-native' }
-        }
-        if (resultStatus === 'success') return result
-        if (attempt + 1 < attempts) {
-          await waitForNativeVoiceTranscriptPoll(delayMs, controller?.signal)
-        }
-      }
-      return result
-    })().finally(() => {
-      if (nativeVoiceTranscriptPolls.get(pollKey) === entry) nativeVoiceTranscriptPolls.delete(pollKey)
-    })
-    nativeVoiceTranscriptPolls.set(pollKey, entry)
-    return await entry.promise
   }
 
   // 批量读取当前会话语音消息的转写缓存并合并进消息列表（仅恢复展示，不触发识别）。
   // serverIdStr 为精确字符串，禁止转 Number（19 位 svr_id 超出 JS Number 安全范围）。
   const restoreVoiceTranscripts = async (username) => {
-    const nativeTranscriptRevision = nativeVoiceRevision
     const transcriptRevision = projectTranscriptRevision
     const accountAtStart = String(selectedAccount.value || '').trim()
     const key = String(username || '').trim()
     if (!key || privacyMode?.value) return
     void refreshVoiceTranscriptionStatus()
-    void refreshNativeVoiceTranscriptionStatus()
     const list = allMessages.value[key]
     if (!Array.isArray(list) || !list.length) return
 
@@ -1401,128 +1281,11 @@ export const useChatMessages = ({
     })
     if (!pending.length) return
 
-    if (typeof api?.lookupNativeVoiceTranscriptionCache === 'function') {
-      try {
-        const nativeResponse = await api.lookupNativeVoiceTranscriptionCache({
-          account: accountAtStart,
-          username: key,
-          items: pending.map((message) => ({
-            server_id: String(message?.serverIdStr || message?.serverId || '').trim(),
-            local_id: String(message?.localIdStr || message?.localId || '').trim()
-          })).filter((item) => item.server_id && item.local_id && item.local_id !== '0')
-        })
-        if (
-          nativeTranscriptRevision !== nativeVoiceRevision
-          || String(selectedAccount.value || '').trim() !== accountAtStart
-        ) return
-        const nativeItems = Array.isArray(nativeResponse?.items) ? nativeResponse.items : []
-        if (nativeItems.length) {
-          const hits = new Map(nativeItems.map((item) => [
-            `${String(item?.serverId || '').trim()}:${String(item?.localId || '').trim()}`,
-            item
-          ]))
-          const current = allMessages.value[key]
-          if (!Array.isArray(current) || !current.length) return
-          let changed = false
-          const resumedPolls = []
-          const next = current.map((message) => {
-            const identity = `${String(message?.serverIdStr || message?.serverId || '').trim()}:${String(message?.localIdStr || message?.localId || '').trim()}`
-            const hit = hits.get(identity)
-            const hitStatus = String(hit?.status || '').trim().toLowerCase()
-            let updated = mergeWechatNativeVoiceTranscript(message, hit)
-            if (updated === message && hitStatus === 'pending') {
-              const requestId = String(hit?.requestId || '').trim()
-              if (requestId) {
-                updated = {
-                  ...message,
-                  voiceTranscriptStatus: 'loading',
-                  voiceTranscriptError: '',
-                  voiceTranscriptNativeRequestId: requestId
-                }
-                resumedPolls.push({
-                  message: updated,
-                  requestId,
-                  intervalMs: Math.max(1200, Number(hit?.pollAfterMs) || 0)
-                })
-              }
-            } else if (updated === message && hitStatus === 'error') {
-              updated = {
-                ...message,
-                voiceTranscriptStatus: 'error',
-                voiceTranscriptError: String(hit?.message || '微信原生语音转文字未能返回结果。').trim(),
-                voiceTranscriptNativeRequestId: String(hit?.requestId || '').trim()
-              }
-            }
-            if (updated !== message) changed = true
-            return updated
-          })
-          if (changed) allMessages.value = { ...allMessages.value, [key]: next }
-          for (const resumed of resumedPolls) {
-            void pollNativeVoiceTranscript(resumed.message, {
-              requestId: resumed.requestId,
-              intervalMs: resumed.intervalMs
-            }).then(async (result) => {
-              const status = String(result?.status || '').trim().toLowerCase()
-              if (['success', 'cancelled', 'stale'].includes(status)) return
-              const pendingError = new Error('微信原生语音转文字尚未返回结果，请稍后重试。')
-              pendingError.code = 'native_transcript_pending'
-              throw pendingError
-            }).catch(async (error) => {
-              if (
-                nativeTranscriptRevision !== nativeVoiceRevision
-                || String(selectedAccount.value || '').trim() !== accountAtStart
-                || String(selectedContact.value?.username || '').trim() !== key
-              ) return
-              await refreshNativeVoiceTranscriptionStatus({ force: true })
-              if (
-                nativeTranscriptRevision !== nativeVoiceRevision
-                || String(selectedAccount.value || '').trim() !== accountAtStart
-                || String(selectedContact.value?.username || '').trim() !== key
-              ) return
-              const messages = allMessages.value[key]
-              const index = Array.isArray(messages)
-                ? messages.findIndex((message) => (
-                    String(message?.id || '') === String(resumed.message?.id || '')
-                    || String(message?.serverIdStr || message?.serverId || '').trim()
-                      === String(resumed.message?.serverIdStr || resumed.message?.serverId || '').trim()
-                  ))
-                : -1
-              if (index < 0) return
-              if (
-                String(messages[index]?.voiceTranscriptNativeRequestId || '').trim()
-                !== resumed.requestId
-              ) return
-              const detail = nativeVoiceErrorDetail(error)
-              const updated = {
-                ...messages[index],
-                voiceTranscriptStatus: 'error',
-                voiceTranscriptError: String(
-                  detail?.message || error?.message || '微信原生语音转文字未能返回结果。'
-                ).trim(),
-                voiceTranscriptNativeRequestId: ''
-              }
-              const replacement = messages.slice()
-              replacement[index] = updated
-              allMessages.value = { ...allMessages.value, [key]: replacement }
-            })
-          }
-        }
-      } catch {}
-    }
-
     if (typeof api?.lookupChatVoiceTranscriptionCache !== 'function') return
-    const projectPending = (allMessages.value[key] || []).filter((message) => {
-      if (String(message?.renderType || '') !== 'voice') return false
-      if (!String(message?.serverIdStr || '').trim()) return false
-      const status = String(message?.voiceTranscriptStatus || 'idle')
-      return !status || status === 'idle'
-    })
-    if (!projectPending.length) return
-
     try {
       const resp = await api.lookupChatVoiceTranscriptionCache({
         account: accountAtStart,
-        server_ids: projectPending.map((m) => String(m.serverIdStr).trim())
+        server_ids: pending.map((m) => String(m.serverIdStr).trim())
       })
       if (
         transcriptRevision !== projectTranscriptRevision
@@ -1548,165 +1311,19 @@ export const useChatMessages = ({
     } catch {}
   }
 
-  const transcribeVoice = async (message) => {
-    const transcriptRevision = nativeVoiceRevision
-    const accountAtStart = String(selectedAccount.value || '').trim()
-    const usernameAtStart = String(selectedContact.value?.username || '').trim()
-    // 语音消息的 svr_id 是 19 位大整数，超出 JS Number 安全范围（2^53），
-    // 必须使用精确字符串 serverIdStr，否则后端会查不到语音数据。
-    const serverIdStr = String(message?.serverIdStr ?? '').trim()
-    const serverId = serverIdStr || String(message?.serverId ?? '').trim()
-    const localIdStr = String(message?.localIdStr ?? '').trim()
-    const localId = localIdStr || String(message?.localId ?? '').trim()
-    const usableServerId = serverId && serverId !== '0' ? serverId : ''
-    const usableLocalId = localId && localId !== '0' ? localId : ''
-    if (
-      !message
-      || !accountAtStart
-      || !usernameAtStart
-      || (!usableServerId && !usableLocalId)
-      || message.voiceTranscriptStatus === 'loading'
-    ) return
-
-    // 模板渲染的是 renderMessages 的浅拷贝（非响应式），直接改拷贝不会驱动 UI 更新，
-    // 且 computed 重算时拷贝会被替换导致状态丢失。必须修改 allMessages 中的原对象。
-    const key = usernameAtStart
-    const list = key ? allMessages.value[key] : null
-    const target =
-      (Array.isArray(list) ? list.find((item) => item?.id === message.id) : null) || message
-
-    const nativeDispatchToken = Symbol('nativeVoiceDispatch')
-    Object.defineProperty(target, NATIVE_VOICE_DISPATCH_TOKEN, {
-      configurable: true,
-      enumerable: false,
-      value: nativeDispatchToken,
-      writable: true
-    })
-    target.voiceTranscriptStatus = 'loading'
-    target.voiceTranscriptError = ''
-    target.voiceTranscriptNativeRequestId = ''
-
-    const requestIsCurrent = () => !(
-      target[NATIVE_VOICE_DISPATCH_TOKEN] !== nativeDispatchToken
-      || transcriptRevision !== nativeVoiceRevision
-      || String(selectedAccount.value || '').trim() !== accountAtStart
-      || String(selectedContact.value?.username || '').trim() !== usernameAtStart
-    )
-
-    const setVoiceError = (error, fallback = '语音识别失败') => {
-      if (!requestIsCurrent()) return
-      const detail = nativeVoiceErrorDetail(error)
-      target.voiceTranscriptError = String(detail?.message || error?.message || fallback).trim()
-      target.voiceTranscriptStatus = 'error'
-      target.voiceTranscriptNativeRequestId = ''
-    }
-
-    if (typeof api?.triggerNativeVoiceTranscription !== 'function') {
-      setVoiceError(null, '当前版本未提供微信原生语音转文字接口。')
-      delete target[NATIVE_VOICE_DISPATCH_TOKEN]
-      return
-    }
-
-    try {
-      const nativeResult = await api.triggerNativeVoiceTranscription({
-        account: accountAtStart,
-        username: usernameAtStart,
-        ...(usableServerId ? { server_id: usableServerId } : {}),
-        ...(usableLocalId ? { local_id: usableLocalId } : {})
-      })
-      if (!requestIsCurrent()) return
-
-      const resolvedServerId = String(nativeResult?.serverId ?? '').trim()
-      const resolvedLocalId = String(nativeResult?.localId ?? '').trim()
-      if (resolvedServerId && resolvedServerId !== '0') target.serverIdStr = resolvedServerId
-      if (resolvedLocalId && resolvedLocalId !== '0') target.localIdStr = resolvedLocalId
-
-      const nativeStatus = String(nativeResult?.status || '').trim().toLowerCase()
-      if (nativeStatus === 'success') {
-        const updated = mergeWechatNativeVoiceTranscript(target, {
-          ...nativeResult,
-          model: 'wechat-native'
-        })
-        if (updated === target) {
-          const invalidResponse = new Error('微信原生语音转写返回了无效结果。')
-          invalidResponse.code = 'native_transport_invalid_response'
-          throw invalidResponse
-        }
-        Object.assign(target, updated)
-        target.voiceTranscriptNativeRequestId = ''
-        return
-      }
-
-      if (nativeStatus === 'accepted' || nativeStatus === 'pending') {
-        const nativeRequestId = String(nativeResult?.requestId || '').trim()
-        if (!nativeRequestId) {
-          const invalidResponse = new Error('微信原生语音转写未返回可轮询的 requestId。')
-          invalidResponse.code = 'native_transport_invalid_response'
-          throw invalidResponse
-        }
-        target.voiceTranscriptNativeRequestId = nativeRequestId
-        const pollResult = await pollNativeVoiceTranscript(target, {
-          requestId: nativeRequestId,
-          intervalMs: Math.max(1200, Number(nativeResult?.pollAfterMs) || 0)
-        })
-        if (!requestIsCurrent()) return
-        if (String(pollResult?.status || '').trim().toLowerCase() === 'success') {
-          const updated = mergeWechatNativeVoiceTranscript(target, {
-            ...pollResult,
-            model: 'wechat-native'
-          })
-          if (updated === target) {
-            const invalidResponse = new Error('微信原生语音转写轮询返回了无效结果。')
-            invalidResponse.code = 'native_transport_invalid_response'
-            setVoiceError(invalidResponse)
-            return
-          }
-          Object.assign(target, updated)
-          target.voiceTranscriptNativeRequestId = ''
-          return
-        }
-        if (['cancelled', 'stale'].includes(String(pollResult?.status || '').trim().toLowerCase())) return
-        const pendingError = new Error('微信原生语音转写尚未返回结果，请稍后重试。')
-        pendingError.code = 'native_transcript_pending'
-        await refreshNativeVoiceTranscriptionStatus({ force: true })
-        if (!requestIsCurrent()) return
-        setVoiceError(pendingError)
-        return
-      }
-
-      const invalidResponse = new Error('微信原生语音转写返回了未知状态。')
-      invalidResponse.code = 'native_transport_invalid_response'
-      throw invalidResponse
-    } catch (error) {
-      if (!requestIsCurrent()) return
-      await refreshNativeVoiceTranscriptionStatus({ force: true })
-      if (!requestIsCurrent()) return
-      setVoiceError(error, '微信原生语音转写触发失败')
-    } finally {
-      if (target[NATIVE_VOICE_DISPATCH_TOKEN] === nativeDispatchToken) {
-        delete target[NATIVE_VOICE_DISPATCH_TOKEN]
-        if (String(target.voiceTranscriptStatus || '').trim().toLowerCase() === 'loading') {
-          target.voiceTranscriptStatus = 'idle'
-          target.voiceTranscriptError = ''
-        }
-      }
-    }
-  }
-
-  // 本地模型是用户显式选择的备用路径；原生转写失败时不要静默切换来源。
-  const transcribeVoiceLocally = async (message, { force = false } = {}) => {
+  const transcribeVoice = async (message, { force = false, source = 'local' } = {}) => {
+    const native = source === 'wechat'
+    const sourceLabel = native ? '微信' : '本地'
     const transcriptRevision = projectTranscriptRevision
     const accountAtStart = String(selectedAccount.value || '').trim()
     const usernameAtStart = String(selectedContact.value?.username || '').trim()
-    // 与微信原生路径一样，svr_id 必须保留精确字符串，不能经过 Number。
+    // svr_id 必须保留精确字符串，不能经过 Number。
     const serverIdStr = String(message?.serverIdStr ?? '').trim()
     const serverId = serverIdStr || String(message?.serverId ?? '').trim()
     const usableServerId = serverId && serverId !== '0' ? serverId : ''
     if (
       !message
-      || !accountAtStart
-      || !usernameAtStart
-      || !usableServerId
+      || (!native && (!accountAtStart || !usernameAtStart || !usableServerId))
       || message.voiceTranscriptStatus === 'loading'
     ) return
 
@@ -1714,57 +1331,78 @@ export const useChatMessages = ({
     const list = key ? allMessages.value[key] : null
     const target =
       (Array.isArray(list) ? list.find((item) => item?.id === message.id) : null) || message
-    const localDispatchToken = Symbol('localVoiceDispatch')
-    Object.defineProperty(target, NATIVE_VOICE_DISPATCH_TOKEN, {
+    if (target.voiceTranscriptStatus === 'loading') return
+    const dispatchToken = Symbol('voiceDispatch')
+    Object.defineProperty(target, VOICE_DISPATCH_TOKEN, {
       configurable: true,
       enumerable: false,
-      value: localDispatchToken,
+      value: dispatchToken,
       writable: true
     })
     target.voiceTranscriptStatus = 'loading'
     target.voiceTranscriptError = ''
-    target.voiceTranscriptNativeRequestId = ''
+    target._voiceTranscriptionSource = source
 
     const requestIsCurrent = () => !(
-      target[NATIVE_VOICE_DISPATCH_TOKEN] !== localDispatchToken
+      target[VOICE_DISPATCH_TOKEN] !== dispatchToken
       || transcriptRevision !== projectTranscriptRevision
       || String(selectedAccount.value || '').trim() !== accountAtStart
       || String(selectedContact.value?.username || '').trim() !== usernameAtStart
     )
 
-    const setVoiceError = (error, fallback = '本地语音转文字失败') => {
+    const setVoiceError = (error, fallback = `${sourceLabel}语音转文字失败`) => {
       if (!requestIsCurrent()) return
-      const detail = nativeVoiceErrorDetail(error)
-      target.voiceTranscriptError = String(detail?.message || error?.message || fallback).trim()
+      const detail = voiceErrorDetail(error)
+      target.voiceTranscriptError = String((typeof detail === 'string' ? detail : detail?.message) || error?.message || fallback).trim()
       target.voiceTranscriptStatus = 'error'
-      target.voiceTranscriptNativeRequestId = ''
     }
 
     try {
-      if (typeof api?.transcribeChatVoice !== 'function') {
-        setVoiceError(null, '当前版本未提供本地语音转文字接口。')
-        return
+      let result
+      if (native) {
+        if (!accountAtStart || !usernameAtStart
+          || typeof message.serverIdStr !== 'string' || !/^[1-9]\d*$/.test(serverIdStr)
+          || !/^[^:]+:[^:]+:[1-9]\d*$/.test(String(message.id || ''))
+          || !Number.isSafeInteger(message.createTime) || message.createTime <= 0) {
+          throw new Error('此消息缺少完整、精确的消息身份，暂不支持微信转文字。')
+        }
+        if (typeof api?.transcribeChatVoiceNative !== 'function') {
+          throw new Error('当前版本未提供微信语音转文字接口。')
+        }
+        result = await api.transcribeChatVoiceNative({
+          account: accountAtStart,
+          username: usernameAtStart,
+          display_name: String(selectedContact.value?.name || '').trim() || undefined,
+          message_id: message.id,
+          server_id: serverIdStr,
+          create_time: message.createTime
+        })
+        if (!requestIsCurrent()) return
+        if (result?.status !== 'success' || result?.model !== 'wechat-native'
+          || result?.account !== accountAtStart || result?.username !== usernameAtStart
+          || result?.message_id !== message.id || result?.server_id !== serverIdStr) {
+          throw new Error('微信转文字响应与请求的消息身份不一致。')
+        }
+      } else {
+        if (typeof api?.transcribeChatVoice !== 'function') {
+          throw new Error('当前版本未提供本地语音转文字接口。')
+        }
+        const capability = await refreshVoiceTranscriptionStatus({ force: true })
+        if (!requestIsCurrent()) return
+        if (!capability?.available) {
+          throw new Error(String(capability?.reason || '本地语音模型尚未准备好。').trim())
+        }
+        result = await api.transcribeChatVoice({
+          account: accountAtStart,
+          server_id: usableServerId,
+          force: !!force
+        })
       }
-      const capability = await refreshVoiceTranscriptionStatus({ force: true })
-      if (!requestIsCurrent()) return
-      if (!capability?.available) {
-        setVoiceError(
-          { message: String(capability?.reason || '本地语音模型尚未准备好。').trim() },
-          '本地语音模型尚未准备好。'
-        )
-        return
-      }
-
-      const result = await api.transcribeChatVoice({
-        account: accountAtStart,
-        server_id: usableServerId,
-        force: !!force
-      })
       if (!requestIsCurrent()) return
 
       const text = String(result?.text || '').trim()
       if (!text) {
-        setVoiceError(null, '本地语音转文字未返回文字。')
+        setVoiceError(null, `${sourceLabel}语音转文字未返回文字。`)
         return
       }
       target.voiceTranscript = text
@@ -1772,12 +1410,11 @@ export const useChatMessages = ({
       target.voiceTranscriptModel = String(result?.model || '').trim()
       target.voiceTranscriptStatus = 'success'
       target.voiceTranscriptError = ''
-      target.voiceTranscriptNativeRequestId = ''
     } catch (error) {
       setVoiceError(error)
     } finally {
-      if (target[NATIVE_VOICE_DISPATCH_TOKEN] === localDispatchToken) {
-        delete target[NATIVE_VOICE_DISPATCH_TOKEN]
+      if (target[VOICE_DISPATCH_TOKEN] === dispatchToken) {
+        delete target[VOICE_DISPATCH_TOKEN]
         if (String(target.voiceTranscriptStatus || '').trim().toLowerCase() === 'loading') {
           target.voiceTranscriptStatus = 'idle'
           target.voiceTranscriptError = ''
@@ -1785,6 +1422,9 @@ export const useChatMessages = ({
       }
     }
   }
+
+  const transcribeVoiceLocally = (message, { force = false } = {}) => transcribeVoice(message, { force })
+  const transcribeVoiceNatively = (message) => transcribeVoice(message, { source: 'wechat' })
 
   const getQuoteVoiceId = (message) => `quote-${String(message?.quoteServerId || message?.id || '')}`
 
@@ -1844,12 +1484,13 @@ export const useChatMessages = ({
         account: selectedAccount.value,
         md5: message.emojiMd5,
         emoji_url: emojiUrl,
-        force: false
+        force: !!message._emojiRenderError
       })
       message._emojiDownloaded = true
       if (message.emojiLocalUrl) {
-        message.emojiUrl = message.emojiLocalUrl
+        message.emojiUrl = `${message.emojiLocalUrl}&v=${Date.now()}`
       }
+      message._emojiRenderError = false
     } catch (error) {
       showErrorAlert(error?.message || '下载失败')
     } finally {
@@ -1894,15 +1535,15 @@ export const useChatMessages = ({
     if (!left || !right) return false
     const leftId = String(left?.id || '').trim()
     const rightId = String(right?.id || '').trim()
-    if (leftId && rightId && leftId === rightId) return true
+    if (leftId && rightId) return leftId === rightId
 
-    const leftLocalId = Number(left?.localId || 0)
-    const rightLocalId = Number(right?.localId || 0)
-    if (leftLocalId && rightLocalId && leftLocalId === rightLocalId) return true
-
-    const leftServerId = String(left?.serverIdStr || left?.serverId || '').trim()
-    const rightServerId = String(right?.serverIdStr || right?.serverId || '').trim()
-    if (leftServerId && rightServerId && leftServerId === rightServerId) return true
+    const leftServerValue = left.serverIdStr || left.serverId
+    const rightServerValue = right.serverIdStr || right.serverId
+    if (typeof leftServerValue === 'number' && !Number.isSafeInteger(leftServerValue)) return false
+    if (typeof rightServerValue === 'number' && !Number.isSafeInteger(rightServerValue)) return false
+    const leftServerId = String(leftServerValue || '').trim()
+    const rightServerId = String(rightServerValue || '').trim()
+    if (leftServerId && leftServerId !== '0' && rightServerId && leftServerId === rightServerId) return true
 
     return false
   }
@@ -2078,11 +1719,14 @@ export const useChatMessages = ({
     }
   }
 
-  const loadMessages = async ({ username, reset }) => {
+  const loadMessages = async ({ username, reset, throwOnError = false, signal }) => {
     if (!username || !selectedAccount.value) return
 
     abortMessageLoad()
     const requestController = typeof AbortController === 'function' ? new AbortController() : null
+    const abort = () => requestController?.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) abort()
     messageLoadController = requestController
     messageLoadTargetUsername = String(username || '').trim()
     const loadSeq = ++messageLoadSeq
@@ -2120,6 +1764,7 @@ export const useChatMessages = ({
       let requestScanOffset = scanOffset
       let requestFilterOffset = filterOffset
       let response = null
+      let snapshotGeneration = reset ? null : currentMeta.snapshotGeneration
       const rawChunks = []
       const seenFilterCursors = new Set()
       // 筛选模式按“扫描窗口”分页。不要为了凑满 50 条一直扫；一旦拿到
@@ -2134,7 +1779,7 @@ export const useChatMessages = ({
         if (filterActive) seenFilterCursors.add(cursorKey)
 
         const params = {
-          account: selectedAccount.value,
+          account: accountAtStart,
           username,
           limit: messagePageSize,
           offset: requestOffset,
@@ -2157,11 +1802,17 @@ export const useChatMessages = ({
           scanLimit: filterActive ? messageTypeFilterScanPageSize : null,
           existingCount: existing.length,
           renderTypeFilter: messageTypeFilter.value,
-          source: DEFAULT_CHAT_SOURCE,
-          realtime: !!realtimeEnabled.value
+          source: DEFAULT_CHAT_SOURCE
         })
 
         response = await api.listChatMessages(params)
+        if (loadSeq !== messageLoadSeq || requestController?.signal.aborted || selectedAccount.value !== accountAtStart) return
+        const responseGeneration = response.snapshotGeneration
+        if (snapshotGeneration !== null && responseGeneration !== snapshotGeneration) {
+          await onSnapshotChanged()
+          return
+        }
+        snapshotGeneration = responseGeneration
         const pageRaw = Array.isArray(response?.messages) ? response.messages : []
         rawChunks.push(pageRaw)
         trace.log('loadMessages:request:end', {
@@ -2206,6 +1857,7 @@ export const useChatMessages = ({
 
       if (
         loadSeq !== messageLoadSeq
+        || requestController?.signal.aborted
         || activeMessagesFor.value !== username
         || String(selectedAccount.value || '').trim() !== accountAtStart
         || String(selectedContact.value?.username || '').trim() !== String(username || '').trim()
@@ -2248,6 +1900,7 @@ export const useChatMessages = ({
       messagesMeta.value = {
         ...messagesMeta.value,
         [username]: {
+          snapshotGeneration,
           total: Number(response?.total || 0),
           hasMore: response?.hasMore,
           renderTypes: filterActive ? String(messageTypeFilter.value || '') : '',
@@ -2310,8 +1963,10 @@ export const useChatMessages = ({
       })
       if (loadSeq === messageLoadSeq) {
         messagesError.value = error?.message || '加载聊天记录失败'
+        if (throwOnError) throw error
       }
     } finally {
+      signal?.removeEventListener('abort', abort)
       if (messageLoadController === requestController) {
         messageLoadController = null
         messageLoadTargetUsername = ''
@@ -2333,10 +1988,22 @@ export const useChatMessages = ({
     await loadMessages({ username: selectedContact.value.username, reset: false })
   }
 
-  const refreshSelectedMessages = async () => {
+  const refreshSelectedMessages = async (options = {}) => {
     if (!selectedContact.value) return
+    searchContext.value = { ...searchContext.value, active: false, savedMessages: null, savedMeta: null }
     bumpLocalMediaVersion()
-    await loadMessages({ username: selectedContact.value.username, reset: true })
+    await loadMessages({ username: selectedContact.value.username, reset: true, ...options })
+  }
+
+  const invalidateSnapshotMessages = () => {
+    abortMessageLoad()
+    const username = selectedContact.value?.username
+    const current = username ? allMessages.value[username] : null
+    // Keep the visible rows until their replacement arrives; no old offset or
+    // cached conversation may be used to page into the newly published files.
+    allMessages.value = current ? { [username]: current } : {}
+    messagesMeta.value = {}
+    bumpLocalMediaVersion()
   }
 
   const refreshCurrentMessageMedia = async () => {
@@ -2361,223 +2028,6 @@ export const useChatMessages = ({
     trace.log('refreshCurrentMessageMedia:end')
   }
 
-  const mergeRealtimeMessages = (existing, rawMessages, { authoritative = false } = {}) => {
-    const input = (Array.isArray(rawMessages) ? rawMessages : [rawMessages])
-      .filter((message) => message && typeof message === 'object')
-    if (!input.length) return { changed: false, messages: existing, addedCount: 0 }
-
-    loadLargeImagePreferences()
-    // A revoke notice can replace the database row of its original message.
-    // Keep those two timeline entries distinct even when both IDs are equal.
-    const isSystem = (message) => message.renderType === 'system' || Number(message.type) === 10000
-    const idKey = (message) => `${isSystem(message) ? 'system' : 'message'}:${message.id || ''}`
-    const serverKey = (message) => {
-      const serverId = String(message.serverIdStr || message.serverId || '').trim()
-      return serverId && serverId !== '0' ? `${isSystem(message) ? 'system' : 'message'}:${serverId}` : ''
-    }
-    const latest = hydrateQuoteImageUrls(input.map(normalizeMessage), existing)
-    const latestById = new Map(
-      latest
-        .filter((message) => !!message.id)
-        .map((message) => [idKey(message), message])
-    )
-    const latestByServerId = new Map(
-      latest
-        .map((message) => [serverKey(message), message])
-        .filter(([key]) => !!key)
-    )
-    let existingChanged = false
-    const updatedExisting = existing.map((message) => {
-      const incoming = latestByServerId.get(serverKey(message)) || latestById.get(idKey(message))
-      if (!incoming) return message
-      if (serverKey(message) && serverKey(incoming) && serverKey(message) !== serverKey(incoming)) return message
-      let updated = mergeWechatNativeVoiceTranscript(message, incoming)
-      if (!isSystem(message) && (authoritative || incoming.isRevoked) && incoming.isRevoked !== !!updated.isRevoked) {
-        updated = { ...updated, isRevoked: incoming.isRevoked, revokeTime: incoming.isRevoked ? incoming.revokeTime : 0 }
-      }
-      if (updated !== message) existingChanged = true
-      return updated
-    })
-
-    const seenIds = new Set(updatedExisting.map(idKey))
-    const seenServerIds = new Set(
-      updatedExisting
-        .map(serverKey)
-        .filter(Boolean)
-    )
-    const newOnes = []
-    for (const message of latest) {
-      const id = idKey(message)
-      const serverId = serverKey(message)
-      if (!message.id || seenIds.has(id) || (serverId && seenServerIds.has(serverId))) continue
-      seenIds.add(id)
-      if (serverId) seenServerIds.add(serverId)
-      newOnes.push(message)
-    }
-
-    const combined = [...updatedExisting, ...newOnes]
-    for (const msg of latest) {
-      if (!isSystem(msg)) continue
-      const revServerId = String(msg.revokedServerId || '').trim()
-      const revLocalId = Number(msg.revokedLocalId || 0)
-      if ((!revServerId || revServerId === '0') && revLocalId <= 0) continue
-      for (let i = 0; i < combined.length; i++) {
-        const target = combined[i]
-        if (isSystem(target)) continue
-        const targetServerId = String(target.serverIdStr || target.serverId || '').trim()
-        const hasRevServerId = !!revServerId && revServerId !== '0'
-        const hasTargetServerId = !!targetServerId && targetServerId !== '0'
-        const match = hasRevServerId || hasTargetServerId
-          ? hasRevServerId && hasTargetServerId && targetServerId === revServerId
-          : revLocalId > 0 && Number(target.localId || 0) === revLocalId
-        if (match && !target.isRevoked) {
-          combined[i] = { ...target, isRevoked: true, revokeTime: msg.revokeTime || msg.createTime || 0 }
-          existingChanged = true
-        }
-      }
-    }
-
-    // Mirror the backend archive ID when the native row now belongs to the
-    // system notice, so Vue can render both entries with distinct keys.
-    const systemIds = new Set(combined.filter(isSystem).map((message) => message.id))
-    for (let i = 0; i < combined.length; i++) {
-      const message = combined[i]
-      if (isSystem(message) || !systemIds.has(message.id)) continue
-      const serverId = String(message.serverIdStr || message.serverId || '').trim()
-      const originalId = serverId && serverId !== '0' ? serverId : message.localId
-      combined[i] = { ...message, id: `anti_revoke:${selectedContact.value.username}:${originalId}` }
-      existingChanged = true
-    }
-
-    return {
-      changed: newOnes.length > 0 || existingChanged,
-      messages: hydrateQuoteImageUrls(combined),
-      addedCount: newOnes.length
-    }
-  }
-
-  const applyRealtimeMessage = async (event) => {
-    if (!realtimeEnabled.value || !selectedAccount.value || !selectedContact.value?.username) return false
-
-    const eventAccount = String(event?.account || '').trim()
-    if (eventAccount && eventAccount !== String(selectedAccount.value || '').trim()) return false
-
-    const rawMessage = event?.message && typeof event.message === 'object'
-      ? event.message
-      : event?.data && typeof event.data === 'object' && !Array.isArray(event.data)
-        ? event.data
-        : event && typeof event === 'object' && event.id
-          ? event
-          : null
-    if (!rawMessage) return false
-
-    const username = String(
-      event?.username
-      || rawMessage.username
-      || rawMessage.chatUsername
-      || rawMessage.sessionId
-      || ''
-    ).trim()
-    const selectedUsername = String(selectedContact.value.username || '').trim()
-    if (!username || username !== selectedUsername) return false
-
-    const message = rawMessage.username ? rawMessage : { ...rawMessage, username }
-    const existing = allMessages.value[username] || []
-    const container = messageContainerRef.value
-    const atBottom = !!container && (container.scrollHeight - container.scrollTop - container.clientHeight) < 80
-    const merged = mergeRealtimeMessages(existing, message)
-    if (!merged.changed) return false
-
-    allMessages.value = {
-      ...allMessages.value,
-      [username]: merged.messages
-    }
-
-    await nextTick()
-    const nextContainer = messageContainerRef.value
-    if (nextContainer && atBottom) nextContainer.scrollTop = nextContainer.scrollHeight
-    updateJumpToBottomState()
-    return true
-  }
-
-  const refreshRealtimeIncremental = async () => {
-    if (!realtimeEnabled.value || !selectedAccount.value || !selectedContact.value?.username) return
-    if (searchContext.value?.active || isLoadingMessages.value) return
-
-    const username = selectedContact.value.username
-    const existing = allMessages.value[username] || []
-    if (!existing.length) return
-
-    const container = messageContainerRef.value
-    const atBottom = !!container && (container.scrollHeight - container.scrollTop - container.clientHeight) < 80
-
-    const params = {
-      account: selectedAccount.value,
-      username,
-      limit: 30,
-      offset: 0,
-      order: 'asc',
-      source: DEFAULT_CHAT_SOURCE
-    }
-    if (messageTypeFilter.value && messageTypeFilter.value !== 'all') {
-      params.render_types = messageTypeFilter.value
-    }
-
-    abortRealtimeRefresh()
-    const requestController = typeof AbortController === 'function' ? new AbortController() : null
-    realtimeRefreshController = requestController
-    realtimeRefreshTargetUsername = String(username || '').trim()
-    if (requestController) params.signal = requestController.signal
-    try {
-      const response = await api.listChatMessages(params)
-      if (selectedContact.value?.username !== username) return
-
-      const merged = mergeRealtimeMessages(existing, response?.messages || [], { authoritative: true })
-      if (!merged.changed) return
-      allMessages.value = {
-        ...allMessages.value,
-        [username]: merged.messages
-      }
-
-      await nextTick()
-      const nextContainer = messageContainerRef.value
-      if (nextContainer && atBottom) {
-        nextContainer.scrollTop = nextContainer.scrollHeight
-      }
-      updateJumpToBottomState()
-    } catch (error) {
-      if (isAbortError(error, requestController)) return
-      console.error('[chat-messages] refreshRealtimeIncremental:error', {
-        account: String(selectedAccount.value || '').trim(),
-        username: String(username || '').trim(),
-        error
-      })
-    } finally {
-      if (realtimeRefreshController === requestController) {
-        realtimeRefreshController = null
-        realtimeRefreshTargetUsername = ''
-      }
-    }
-  }
-
-  let realtimeRefreshFuture = null
-  let realtimeRefreshQueued = false
-
-  const queueRealtimeRefresh = () => {
-    if (realtimeRefreshFuture) {
-      realtimeRefreshQueued = true
-      return
-    }
-
-    realtimeRefreshFuture = refreshRealtimeIncremental().finally(() => {
-      realtimeRefreshFuture = null
-      if (realtimeRefreshQueued) {
-        realtimeRefreshQueued = false
-        queueRealtimeRefresh()
-      }
-    })
-  }
-
   const clearVoicePlaybackState = () => {
     try {
       currentPlayingVoice.value?.pause?.()
@@ -2591,8 +2041,7 @@ export const useChatMessages = ({
   const resetMessageState = () => {
     projectTranscriptRevision += 1
     abortMessageLoad()
-    abortRealtimeRefresh()
-    stopNativeVoiceTranscriptPolling()
+    clearPendingVoiceTranscriptions()
     clearVoicePlaybackState()
     allMessages.value = {}
     messagesMeta.value = {}
@@ -2762,7 +2211,7 @@ export const useChatMessages = ({
     const params = {
       account,
       q: username,
-      source: 'realtime',
+      source: 'decrypted',
       limit: 200,
       offset: 0
     }
@@ -3203,25 +2652,18 @@ export const useChatMessages = ({
     if (selectedContact.value?.username) void refreshSelectedMessages()
   }
 
-  const onNativeVoiceWindowFocus = () => {
-    void refreshNativeVoiceTranscriptionStatus({ force: true })
-  }
-
   if (typeof window !== 'undefined') {
     window.addEventListener(PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT, onProjectVoiceTranscriptsInvalidated)
-    window.addEventListener('focus', onNativeVoiceWindowFocus)
   }
 
   watch(
     () => selectedContact.value?.username,
     (username) => {
-      stopNativeVoiceTranscriptPolling()
+      closeVideoPreview()
+      clearPendingVoiceTranscriptions()
       const nextUsername = String(username || '').trim()
       if (messageLoadTargetUsername && messageLoadTargetUsername !== nextUsername) {
         abortMessageLoad()
-      }
-      if (realtimeRefreshTargetUsername && realtimeRefreshTargetUsername !== nextUsername) {
-        abortRealtimeRefresh()
       }
       clearExpandedImageGroups()
       loadLargeImagePreferences()
@@ -3239,13 +2681,8 @@ export const useChatMessages = ({
   watch(
     () => selectedAccount.value,
     () => {
-      stopNativeVoiceTranscriptPolling()
-      nativeVoiceTranscriptionStatusSequence += 1
-      nativeVoiceTranscriptionStatusPromise = null
-      nativeVoiceTranscriptionStatusLoading.value = false
-      nativeVoiceTranscriptionStatus.value = null
-      nativeVoiceTranscriptionStatusUpdatedAt = 0
-      void refreshNativeVoiceTranscriptionStatus()
+      closeVideoPreview()
+      clearPendingVoiceTranscriptions()
       clearExpandedImageGroups()
       loadLargeImagePreferences()
       clearContactProfileHoverHideTimer()
@@ -3257,13 +2694,12 @@ export const useChatMessages = ({
   )
 
   onUnmounted(() => {
+    closeVideoPreview()
     if (typeof window !== 'undefined') {
       window.removeEventListener(PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT, onProjectVoiceTranscriptsInvalidated)
-      window.removeEventListener('focus', onNativeVoiceWindowFocus)
     }
     abortMessageLoad()
-    abortRealtimeRefresh()
-    stopNativeVoiceTranscriptPolling()
+    clearPendingVoiceTranscriptions()
     if (highlightTimer) clearTimeout(highlightTimer)
     highlightTimer = null
     cancelImageGroupTransition()
@@ -3295,8 +2731,12 @@ export const useChatMessages = ({
     previewImageCounterText,
     canSwitchPreviewImage,
     previewVideoUrl,
+    previewVideoSourceUrl,
     previewVideoPosterUrl,
     previewVideoError,
+    previewVideoGenerating,
+    previewVideoNotice,
+    canGenerateVideoPreview,
     resourceSidebarOpen,
     resourceTimeGroup,
     resourceItems,
@@ -3315,12 +2755,6 @@ export const useChatMessages = ({
     voiceTranscriptionAvailable,
     voiceTranscriptionUnavailableReason,
     refreshVoiceTranscriptionStatus,
-    nativeVoiceTranscriptionStatus,
-    nativeVoiceTranscriptionStatusLoading,
-    nativeVoiceTranscriptionStatusKnown,
-    nativeVoiceTranscriptionAvailable,
-    nativeVoiceTranscriptionUnavailableReason,
-    refreshNativeVoiceTranscriptionStatus,
     highlightServerIdStr,
     highlightMessageId,
     expandedImageGroupKeys,
@@ -3372,6 +2806,9 @@ export const useChatMessages = ({
     openVideoPreview,
     closeVideoPreview,
     onPreviewVideoError,
+    onPreviewVideoReady,
+    generateVideoPreview,
+    cancelVideoPreviewGeneration,
     openResourceSidebar,
     closeResourceSidebar,
     toggleResourceSidebar,
@@ -3380,11 +2817,9 @@ export const useChatMessages = ({
     openResourcePreview,
     setVoiceRef,
     playVoice,
-    transcribeVoice,
     transcribeVoiceLocally,
-    pollNativeVoiceTranscript,
+    transcribeVoiceNatively,
     restoreVoiceTranscripts,
-    stopNativeVoiceTranscriptPolling,
     invalidateProjectVoiceTranscripts,
     playQuoteVoice,
     getQuoteVoiceId,
@@ -3406,10 +2841,8 @@ export const useChatMessages = ({
     loadMessages,
     loadMoreMessages,
     refreshSelectedMessages,
+    invalidateSnapshotMessages,
     refreshCurrentMessageMedia,
-    applyRealtimeMessage,
-    refreshRealtimeIncremental,
-    queueRealtimeRefresh,
     resetMessageState,
     fetchContactProfile,
     loadContactFriendVerifications,

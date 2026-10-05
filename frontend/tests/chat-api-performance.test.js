@@ -6,9 +6,6 @@ import { useChatMessages } from '~/composables/chat/useChatMessages'
 import { useApi } from '~/composables/useApi'
 
 vi.mock('~/lib/server-error-logging', () => ({ reportServerError: vi.fn() }))
-vi.mock('~/stores/chatAccounts', () => ({
-  useChatAccountsStore: () => ({ applySourceResponse: vi.fn() })
-}))
 
 afterEach(() => {
   localStorage.clear()
@@ -31,7 +28,6 @@ describe('chat API performance probe', () => {
           apiBase: '/api',
           selectedAccount: ref('account-a'),
           selectedContact: ref({ username: '44372432598@chatroom' }),
-          realtimeEnabled: ref(false),
           privacyMode: ref(false),
           searchContext: ref({ active: false })
         })
@@ -70,7 +66,7 @@ describe('chat API performance probe', () => {
       setResourceTimingBufferSize: vi.fn()
     })
     vi.stubGlobal('useApiBase', () => '/api')
-    const fetch = vi.fn(async () => ({ messages: [], total: 0, hasMore: false }))
+    const fetch = vi.fn(async () => ({ messages: [], total: 0, hasMore: false, snapshotGeneration: 'legacy' }))
     vi.stubGlobal('$fetch', fetch)
     const info = vi.spyOn(console, 'info').mockImplementation(() => {})
 

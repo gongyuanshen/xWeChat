@@ -1,5 +1,6 @@
 """微信解密工具的FastAPI Web服务器"""
 
+import asyncio
 import mimetypes
 import os
 from pathlib import Path
@@ -22,14 +23,14 @@ request_logger = get_logger("wechat_decrypt_tool.request")
 
 from . import __version__ as APP_VERSION
 from .path_fix import PathFixRoute
-from .chat_realtime_autosync import CHAT_REALTIME_AUTOSYNC
-from .sns_realtime_autosync import SNS_REALTIME_AUTOSYNC
 from .routers.chat import router as _chat_router
-from .routers.chat_realtime_sse import router as _chat_realtime_sse_router
 from .routers.chat_contacts import router as _chat_contacts_router
 from .routers.chat_export import router as _chat_export_router
 from .routers.chat_media import router as _chat_media_router
 from .routers.decrypt import router as _decrypt_router
+from .routers.snapshot_refresh import router as _snapshot_refresh_router
+from .snapshot_refresh import SNAPSHOT_REFRESH
+from .snapshot_registry import SnapshotReadMiddleware, SnapshotRegistryError
 from .routers.import_decrypted import router as _import_decrypted_router
 from .routers.health import router as _health_router
 from .routers.admin import router as _admin_router
@@ -46,12 +47,6 @@ from .routers.favorites import router as _favorites_router
 from .routers.record_export import router as _record_export_router
 from .request_logging import log_server_errors_middleware
 from .perf_trace import ChatRequestPerfMiddleware
-from .native_core_telemetry import (
-    record_product_event,
-    shutdown_product_telemetry,
-)
-from .wcdb_realtime import WCDB_REALTIME, shutdown as _wcdb_shutdown
-from .img_helper import IMG_HELPER
 from .routers.biz import router as _biz_router
 from .routers.system import router as _system_router
 
@@ -60,6 +55,15 @@ app = FastAPI(
     description="现代化的微信数据库解密工具，支持微信信息检测和数据库解密功能",
     version=APP_VERSION,
 )
+
+app.add_middleware(SnapshotReadMiddleware)
+
+
+@app.exception_handler(SnapshotRegistryError)
+async def _snapshot_registry_error(request: Request, exc: SnapshotRegistryError):
+    logger.error("Snapshot registry error: %s", exc, exc_info=True)
+    return JSONResponse(status_code=409, content={"detail": str(exc), "type": type(exc).__name__})
+
 
 # 设置自定义路由类
 app.router.route_class = PathFixRoute
@@ -83,50 +87,6 @@ async def _log_server_errors(request: Request, call_next):
     return await log_server_errors_middleware(request_logger, request, call_next)
 
 
-_ASYNC_EXPORT_PATHS = {
-    "/api/account/archive_export",
-    "/api/chat/exports",
-    "/api/sns/exports",
-}
-_SYNC_EXPORT_PATHS = {
-    "/api/chat/contacts/export",
-    "/api/chat/contacts/export/seal",
-    "/api/records/export",
-}
-_USAGE_EVENT_PATHS = {
-    "/api/chat/messages": "message_page",
-    "/api/chat/search": "search",
-    "/api/chat/sessions": "conversation_list",
-}
-
-
-@app.middleware("http")
-async def _record_content_free_product_events(request: Request, call_next):
-    path = request.url.path
-    is_export = request.method == "POST" and path in (
-        _ASYNC_EXPORT_PATHS | _SYNC_EXPORT_PATHS
-    )
-    if is_export:
-        record_product_event("export_started")
-    try:
-        response = await call_next(request)
-    except BaseException:
-        if is_export:
-            record_product_event("export_failed")
-        raise
-    if response.status_code < 400:
-        usage_event = (
-            _USAGE_EVENT_PATHS.get(path) if request.method == "GET" else None
-        )
-        if usage_event is not None:
-            record_product_event(usage_event)
-        if is_export and path in _SYNC_EXPORT_PATHS:
-            record_product_event("export_completed")
-    elif is_export:
-        record_product_event("export_failed")
-    return response
-
-
 app.add_middleware(ChatRequestPerfMiddleware, logger=request_logger)
 
 
@@ -144,11 +104,11 @@ app.include_router(_account_archive_export_router)
 app.include_router(_wechat_detection_router)
 app.include_router(_import_decrypted_router)
 app.include_router(_decrypt_router)
+app.include_router(_snapshot_refresh_router)
 app.include_router(_keys_router)
 app.include_router(_media_router)
 app.include_router(_mcp_router)
 app.include_router(_chat_router)
-app.include_router(_chat_realtime_sse_router)
 app.include_router(_chat_contacts_router)
 app.include_router(_chat_export_router)
 app.include_router(_chat_media_router)
@@ -287,89 +247,23 @@ _maybe_mount_frontend()
 
 
 @app.on_event("startup")
-async def _startup_native_core() -> None:
-    from .native_core_client import configure_native_core_entrypoint
-
-    configure_native_core_entrypoint()
-    record_product_event("app_open")
-
-
-@app.on_event("startup")
 async def _startup_background_jobs() -> None:
     from .ai.lifecycle import start_services
     await start_services()
-    try:
-        WCDB_REALTIME.start_background_prime()
-    except Exception:
-        logger.exception("Failed to start native-core account preparation")
-    try:
-        CHAT_REALTIME_AUTOSYNC.start()
-    except Exception:
-        logger.exception("Failed to start realtime autosync service")
-    try:
-        SNS_REALTIME_AUTOSYNC.start()
-    except Exception as exc:
-        logger.exception("Failed to start SNS realtime autosync service")
-        logger.error(
-            "[sns.incremental-sync] status=error phase=service-start error_type=%s",
-            type(exc).__name__,
-        )
 
 
 @app.on_event("shutdown")
-async def _shutdown_wcdb_realtime() -> None:
+async def _shutdown_background_jobs() -> None:
     from .ai.lifecycle import stop_services
+    await asyncio.to_thread(SNAPSHOT_REFRESH.shutdown)
     await stop_services()
-    try:
-        CHAT_REALTIME_AUTOSYNC.stop()
-    except Exception:
-        pass
-    try:
-        SNS_REALTIME_AUTOSYNC.stop()
-    except Exception:
-        pass
-    try:
-        WCDB_REALTIME.stop_background_prime()
-    except Exception:
-        pass
-    
-    # Uninstall img_helper hook if enabled
-    try:
-        IMG_HELPER.disable()
-    except Exception:
-        pass
-
-    close_ok = False
-    lock_timeout_s: float | None = 0.2
-    try:
-        raw = str(os.environ.get("WECHAT_TOOL_WCDB_SHUTDOWN_LOCK_TIMEOUT_S", "0.2") or "").strip()
-        lock_timeout_s = float(raw) if raw else 0.2
-        if lock_timeout_s <= 0:
-            lock_timeout_s = None
-    except Exception:
-        lock_timeout_s = 0.2
-    try:
-        close_ok = WCDB_REALTIME.close_all(lock_timeout_s=lock_timeout_s)
-    except Exception:
-        close_ok = False
-    if close_ok:
-        try:
-            _wcdb_shutdown()
-        except Exception:
-            pass
-    else:
-        # If some conn locks were busy, other threads may still be running WCDB calls; avoid shutting down the lib.
-        logger.warning("[wcdb] close_all not fully completed; skip wcdb_shutdown")
-    shutdown_product_telemetry()
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    from .native_core_client import configure_native_core_entrypoint
     from .runtime_settings import default_backend_host, read_effective_backend_port
 
-    configure_native_core_entrypoint()
     host = os.environ.get("WECHAT_TOOL_HOST", default_backend_host())
     port, _ = read_effective_backend_port(default=10392)
     uvicorn.run(app, host=host, port=port, log_config=None)

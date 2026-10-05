@@ -18,6 +18,7 @@
     <div v-if="message.renderType === 'system'" class="flex justify-center">
       <div class="message-time-divider px-2.5 py-0.5 text-xs">
         {{ message.content }}
+        <span v-if="message.revokeOriginalStatus === 'unresolved'" class="ml-1">· 未匹配到已归档原文</span>
       </div>
     </div>
 

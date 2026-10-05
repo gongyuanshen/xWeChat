@@ -59,4 +59,18 @@ describe('导出媒体与语音模型选项', () => {
     expect(api.createChatExport).not.toHaveBeenCalled()
     expect(state.exportError.value).toBe('请先下载模型')
   })
+
+  it.each([
+    { types: ['image'], privacy: false, enabled: false, expected: false },
+    { types: ['image'], privacy: false, enabled: true, expected: true },
+    { types: ['chatHistory'], privacy: false, enabled: true, expected: true },
+    { types: ['text'], privacy: false, enabled: true, expected: false },
+    { types: ['image'], privacy: true, enabled: true, expected: false },
+  ])('只在明确启用且导出图片时读取媒体密钥：%j', async ({ types, privacy, enabled, expected }) => {
+    const { state, api } = setup({ types, privacy })
+    expect(state.exportExtractImageKeys.value).toBe(false)
+    state.exportExtractImageKeys.value = enabled
+    await state.startChatExport()
+    expect(api.createChatExport).toHaveBeenCalledWith(expect.objectContaining({ allow_process_key_extract: expected }))
+  })
 })

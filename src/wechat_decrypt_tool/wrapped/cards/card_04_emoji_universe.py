@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import functools
 import hashlib
@@ -636,7 +637,7 @@ def compute_emoji_universe_stats(*, account_dir: Path, year: int) -> dict[str, A
                 pass
 
     # Parse local_type=47 payloads from raw message DBs (md5/cdnurl), plus fallback counters when index missing.
-    session_usernames = _list_session_usernames(account_dir / "session.db")
+    session_usernames = _list_session_usernames(resolve_account_database_dir(account_dir) / "session.db")
     md5_to_username: dict[str, str] = {}
     table_to_username: dict[str, str] = {}
     for u in session_usernames:
@@ -657,7 +658,7 @@ def compute_emoji_universe_stats(*, account_dir: Path, year: int) -> dict[str, A
 
     resource_conn: sqlite3.Connection | None = None
     resource_chat_id_cache: dict[str, Optional[int]] = {}
-    resource_db_path = account_dir / "message_resource.db"
+    resource_db_path = resolve_account_database_dir(account_dir) / "message_resource.db"
     if resource_db_path.exists():
         try:
             resource_conn = sqlite3.connect(str(resource_db_path))
@@ -1023,7 +1024,7 @@ def compute_emoji_universe_stats(*, account_dir: Path, year: int) -> dict[str, A
     sample_sticker_keys = [k for k, _ in top_stickers_raw + new_sticker_samples_raw + revived_sticker_samples_raw]
     sample_usernames = [pick_sticker_owner_username(key) for key in sample_sticker_keys]
     sample_contact_rows = _load_contact_rows(
-        account_dir / "contact.db",
+        resolve_account_database_dir(account_dir) / "contact.db",
         [u for u in sample_usernames if u],
     )
 
@@ -1150,7 +1151,7 @@ def compute_emoji_universe_stats(*, account_dir: Path, year: int) -> dict[str, A
     ]
     if battle_candidates:
         top_u, top_cnt = sorted(battle_candidates, key=lambda kv: (-int(kv[1]), str(kv[0])))[0]
-        rows = _load_contact_rows(account_dir / "contact.db", [top_u])
+        rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", [top_u])
         row = rows.get(top_u)
         display = _pick_display_name(row, top_u)
         top_battle_partner_obj = {

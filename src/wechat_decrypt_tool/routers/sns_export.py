@@ -4,11 +4,12 @@ import time
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, SecretStr
 
 from ..path_fix import PathFixRoute
-from ..native_core_export import decode_export_content_key, erase_export_content_key
+from ..account_workers import export_file_response
+from ..export_crypto import decode_export_content_key, erase_export_content_key
 from ..sns_export_service import SNS_EXPORT_MANAGER
 
 router = APIRouter(route_class=PathFixRoute)
@@ -101,7 +102,7 @@ async def download_sns_export(export_id: str):
         raise HTTPException(status_code=404, detail="Export not found.")
     if not job.zip_path or (not job.zip_path.exists()):
         raise HTTPException(status_code=409, detail="Export not ready.")
-    return FileResponse(
+    return export_file_response(
         str(job.zip_path),
         media_type="application/octet-stream" if job.zip_path.suffix.lower() == ".wec" else "application/zip",
         filename=job.zip_path.name,
@@ -126,7 +127,7 @@ async def download_sns_export_file(export_id: str, file_id: str):
     )
     if path is None:
         raise HTTPException(status_code=404, detail="Export file not found.")
-    return FileResponse(str(path), media_type="application/octet-stream", filename=path.name)
+    return export_file_response(path, media_type="application/octet-stream", filename=path.name)
 
 
 @router.post("/api/sns/exports/{export_id}/commit", summary="确认浏览器已完成增量目录写入")
@@ -177,7 +178,10 @@ async def stream_sns_export_events(export_id: str, request: Request):
 
 @router.delete("/api/sns/exports/{export_id}", summary="取消导出任务")
 async def cancel_sns_export(export_id: str):
-    ok = SNS_EXPORT_MANAGER.cancel_job(str(export_id or "").strip())
+    export_id = str(export_id or "").strip()
+    ok = SNS_EXPORT_MANAGER.cancel_job(export_id)
     if not ok:
+        if SNS_EXPORT_MANAGER.get_job(export_id) is not None:
+            raise HTTPException(status_code=409, detail="Export has finished or publication has started; cancellation was not accepted.")
         raise HTTPException(status_code=404, detail="Export not found.")
     return {"status": "success"}

@@ -9,8 +9,6 @@ import sqlite3
 
 
 async def main(args):
-    from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-    configure_native_core_entrypoint()
     from wechat_decrypt_tool.ai.agent_tools import ChatTools
     report = json.loads(args.verification.read_text(encoding='utf-8'))
     if report['account'] != args.account or report['run_id'] != args.run or report['expected_source'] != 'realtime_original_metadata':
@@ -62,7 +60,6 @@ async def main(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--run', required=True)
     parser.add_argument('--verification', type=Path, required=True)
@@ -72,5 +69,4 @@ if __name__ == '__main__':
         parser.error('修复记录须为应用数据目录外的新文件')
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(args.data_dir.resolve())
     os.environ['WECHAT_TOOL_OUTPUT_DIR'] = str(args.data_dir.resolve() / 'output')
-    os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
     asyncio.run(main(args))

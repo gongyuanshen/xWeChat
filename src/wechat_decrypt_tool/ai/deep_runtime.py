@@ -212,7 +212,7 @@ class RuntimeEvents(AgentMiddleware):
                     self.service.timeline_item(run['id'], 'answer', '', item_id='answer:' + run['id'])
             return None
         # 选择范围不等于实际检索，内部文件为空更不能证明聊天服务没有读取能力。
-        chat_actions = {'read_messages', 'list_files', 'search_messages', 'search_live_messages', 'count_messages', 'task'}
+        chat_actions = {'read_messages', 'list_files', 'search_messages', 'count_messages', 'task'}
         needs_read = re.search(r'讨论|内容|原文|原话|消息|总结|分析|何时|时间|哪些|多少|依据', run.get('input_digest', '')) or re.search(r'(?:不能|无法|不具备).{0,24}(?:读取|获取|聊天)', str(message.text))
         if needs_read and run.get('scope_handle') and not run.get('read_count') and not any(t.get('action') in chat_actions for t in run.get('timeline', [])):
             self.read_retries += 1
@@ -269,7 +269,7 @@ class RuntimeEvents(AgentMiddleware):
                     or not re.search(r'金额|总额|合计|加总|计算|差额|数量|费用|借|还款|转账|sum|total', run.get('input_digest', ''), re.I)):
                 continue
             # 全量任务必须先读完原文；普通搜索连续无新增时改读原文，分页搜索仍可持续推进。
-            if name in ('search_messages', 'search_live_messages') and (full_pending or self.empty_searches >= 3
+            if name in ('search_messages') and (full_pending or self.empty_searches >= 3
                     or (run.get('child_role') == 'range-analyst' and scope and scope['complete_required'])):
                 continue
             if full_pending and name in ('ls', 'grep', 'search_material', 'write_file', 'edit_file', 'write_todos'):
@@ -312,7 +312,7 @@ class RuntimeEvents(AgentMiddleware):
                         params['properties'][field] = {'type': 'string', 'description': 'plan_parallel_work 返回的有效句柄'}
                         params['required'].append(field)
                 definitions.append(spec)
-            elif name in ('read_messages', 'list_files', 'commit_findings', 'search_messages', 'search_live_messages', 'count_messages') and known_scopes:
+            elif name in ('read_messages', 'list_files', 'commit_findings', 'search_messages', 'count_messages') and known_scopes:
                 spec = convert_to_openai_tool(entry)
                 props = spec['function']['parameters']['properties']
                 choices = ([s for s in known_scopes if s.get('pending_page')] if name == 'commit_findings' else
@@ -429,13 +429,13 @@ class RuntimeEvents(AgentMiddleware):
                         detail=detail, result={'progress': progress})
                 progress_token = MEDIA_PROGRESS.set(media_progress)
             # 原生模型可能返回本次未公开的历史工具；执行入口必须独立校验范围。
-            scope_tools = {'search_messages', 'search_live_messages', 'read_messages', 'list_files', 'commit_findings',
+            scope_tools = {'search_messages', 'read_messages', 'list_files', 'commit_findings',
                 'read_context', 'count_messages', 'calculate_values', 'search_material', 'read_material', 'analyze_media', 'task'}
             if name in scope_tools:
                 if not self.gateway.scopes():
                     raise ScopeError('scope_required', '本轮尚未选择查询范围，请先调用 select_chat_scope')
                 self.gateway.scope(args.get('scope_handle'))
-            if run.get('manifest_id') and name in ('search_messages', 'search_live_messages', 'count_messages'):
+            if run.get('manifest_id') and name in ('search_messages', 'count_messages'):
                 raise ValueError('分片只能读取分配清单，不能搜索清单外资料；具体疑点交主任务核查')
             if name in ('write_file', 'edit_file'):
                 path = TaskBackend.path(args.get('file_path', ''))
@@ -483,7 +483,7 @@ class RuntimeEvents(AgentMiddleware):
                 summary['source_ids'] = [m['source'] for m in body['messages']]
             if self.gateway.guard().get('read_count', 0) > before_sources:
                 self.empty_searches = 0
-            elif name in ('search_messages', 'search_live_messages') and isinstance(body, dict) and not body.get('has_more'):
+            elif name in ('search_messages') and isinstance(body, dict) and not body.get('has_more'):
                 self.empty_searches += 1
             self.service.timeline_item(run['id'], 'tool', label, item_id=entry, status='completed', result=summary)
             repeated = self.record_outcome(call, text)

@@ -8,8 +8,6 @@ from pathlib import Path
 
 
 async def verify(args):
-    from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
-    configure_native_core_entrypoint()
     from wechat_decrypt_tool.ai.agent_tools import ChatTools
     from wechat_decrypt_tool.ai.agent_service import AgentService
     from wechat_decrypt_tool.ai.agent_schemas import AgentAction
@@ -107,7 +105,6 @@ async def verify(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--data-dir', type=Path, required=True)
-    parser.add_argument('--native-core-dir', type=Path, required=True)
     parser.add_argument('--account', required=True)
     parser.add_argument('--query', required=True)
     parser.add_argument('--username', default='')
@@ -118,7 +115,6 @@ def main():
     parser.add_argument('--verify-replay', action='store_true', help='每页提交后重建生产服务并校验重放结果')
     args = parser.parse_args()
     os.environ['WECHAT_TOOL_DATA_DIR'] = str(args.data_dir.resolve())
-    os.environ['WCE_NATIVE_CORE_SOURCE_DIR'] = str(args.native_core_dir.resolve())
     asyncio.run(verify(args))
 
 

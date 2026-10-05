@@ -27,7 +27,6 @@ import uvicorn
 from wechat_decrypt_tool.desktop_parent_watchdog import (
     start_desktop_parent_watchdog_from_env,
 )
-from wechat_decrypt_tool.native_core_client import configure_native_core_entrypoint
 from wechat_decrypt_tool.network_access import get_lan_access_host
 from wechat_decrypt_tool.runtime_settings import (
     read_effective_backend_host,
@@ -40,7 +39,6 @@ def main():
     import wechat_decrypt_tool
     print(f"Backend source: {wechat_decrypt_tool.__file__}", flush=True)
     start_desktop_parent_watchdog_from_env()
-    configure_native_core_entrypoint()
     host, host_source = read_effective_backend_host(default="127.0.0.1")
     port, port_source = read_effective_backend_port(default=10392)
     access_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host

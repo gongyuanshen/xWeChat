@@ -1,3 +1,4 @@
+from .snapshot_registry import resolve_account_database_dir, snapshot_cache_dir, start_snapshot_thread
 import os
 import hashlib
 import json
@@ -24,7 +25,8 @@ from .chat_helpers import (
     _iter_message_db_paths,
 )
 from .logging_config import get_logger
-from .wcdb_realtime import resolve_account_native_wxid
+from .account_identity import resolve_account_username
+from .data_source import normalize_data_source
 
 logger = get_logger(__name__)
 
@@ -59,30 +61,19 @@ def _insert_batch_size() -> int:
 
 
 def _normalize_index_source(value: Optional[str], *, default: str = "decrypted") -> str:
-    v = str(value or "").strip().lower()
-    if not v:
-        v = str(default or "decrypted").strip().lower()
-    # 搜索索引恢复为旧模式：先由解密/同步流程落地 output/databases/{account}
-    # 下的 SQLite，再从 session.db/contact.db/message_*.db 构建 FTS。
-    # 因此 auto/realtime 对“索引构建”都解析为 decrypted，避免构建线程直接
-    # 全量拉实时接口导致超时。
-    if v in {"auto", "default", "wechat", "realtime", "real-time", "wcdb"}:
-        return "decrypted"
-    if v in {"decrypted", "local", "sqlite", "legacy"}:
-        return "decrypted"
-    return "decrypted"
+    return normalize_data_source(value, default)
 
 
 def _account_key(account_dir: Path) -> str:
-    return str(account_dir.name)
+    return str(snapshot_cache_dir(account_dir))
 
 
 def _index_db_path(account_dir: Path) -> Path:
-    return account_dir / _INDEX_DB_NAME
+    return snapshot_cache_dir(account_dir) / _INDEX_DB_NAME
 
 
 def _index_db_tmp_path(account_dir: Path) -> Path:
-    return account_dir / _INDEX_DB_TMP_NAME
+    return snapshot_cache_dir(account_dir) / _INDEX_DB_TMP_NAME
 
 
 def get_chat_search_index_db_path(account_dir: Path) -> Path:
@@ -91,11 +82,11 @@ def get_chat_search_index_db_path(account_dir: Path) -> Path:
     Legacy (older builds): {account}/message_fts.db (only if it looks like our index schema).
     """
 
-    preferred = account_dir / _INDEX_DB_NAME
+    preferred = snapshot_cache_dir(account_dir) / _INDEX_DB_NAME
     if preferred.exists():
         return preferred
 
-    legacy = account_dir / _LEGACY_INDEX_DB_NAME
+    legacy = snapshot_cache_dir(account_dir) / _LEGACY_INDEX_DB_NAME
     if legacy.exists():
         insp = _inspect_index(legacy)
         if bool(insp.get("hasFtsTable")) and bool(insp.get("hasMetaTable")):
@@ -189,6 +180,7 @@ def _inspect_index(index_path: Path) -> dict[str, Any]:
 
 def _index_meta_source(meta: dict[str, str]) -> str:
     raw = str((meta or {}).get("source") or "").strip().lower()
+    # Preserve historical provenance so an old index is not mistaken for the current source.
     if raw in {"realtime", "decrypted"}:
         return raw
     # Pre-migration indexes did not record a source and were built from local decrypted DBs.
@@ -198,7 +190,7 @@ def _index_meta_source(meta: dict[str, str]) -> str:
 def _latest_decrypted_source_mtime(account_dir: Path) -> tuple[int, str]:
     """Return the newest mtime among SQLite files consumed by the index."""
 
-    paths = [account_dir / "session.db", account_dir / "contact.db"]
+    paths = [resolve_account_database_dir(account_dir) / "session.db", resolve_account_database_dir(account_dir) / "contact.db"]
     try:
         paths.extend(_iter_message_db_paths(account_dir))
     except Exception:
@@ -321,13 +313,12 @@ def start_chat_search_index_build(account_dir: Path, *, rebuild: bool = False, s
             "error": "",
         }
 
-    t = threading.Thread(
-        target=_build_worker,
-        args=(account_dir, bool(rebuild), source_norm),
-        daemon=True,
-        name=f"chat-search-index:{key}",
-    )
-    t.start()
+    try:
+        start_snapshot_thread(account_dir, _build_worker,
+                              args=(account_dir, bool(rebuild), source_norm), name=f"chat-search-index:{key}")
+    except Exception as exc:
+        _update_build_state(key, status="error", error=str(exc), finishedAt=int(time.time()))
+        raise
     return get_chat_search_index_status(account_dir, source=source_norm)
 
 
@@ -357,7 +348,7 @@ def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]
 
 
 def _load_session_table_targets(account_dir: Path) -> dict[str, dict[str, Any]]:
-    session_db_path = account_dir / "session.db"
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
     if not session_db_path.exists():
         return {}
 
@@ -387,7 +378,7 @@ def _load_session_table_targets(account_dir: Path) -> dict[str, dict[str, Any]]:
 
 
 def _load_contact_usernames_for_index(account_dir: Path) -> set[str]:
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     if not contact_db_path.exists():
         return set()
 
@@ -437,7 +428,7 @@ def _load_name2id_usernames_for_index(conn: sqlite3.Connection) -> set[str]:
 
 def _load_message_backed_index_targets(*, account_dir: Path, seed_usernames: set[str]) -> set[str]:
     out: set[str] = set()
-    self_aliases = {account_dir.name, resolve_account_native_wxid(account_dir)}
+    self_aliases = {account_dir.name, resolve_account_username(account_dir)}
     for db_path in _iter_message_db_paths(account_dir):
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -717,7 +708,7 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
     tmp_path = _index_db_tmp_path(account_dir)
     final_path = _index_db_path(account_dir)
 
-    self_username = resolve_account_native_wxid(account_dir)
+    self_username = resolve_account_username(account_dir)
     try:
         try:
             if tmp_path.exists():
@@ -734,6 +725,7 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
         if not db_paths:
             raise RuntimeError("No message databases found for this account.")
 
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
         conn_fts = sqlite3.connect(str(tmp_path))
         conn_fts.isolation_level = None  # manual transaction control (prevents implicit BEGIN)
         try:
@@ -804,13 +796,13 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                         account_dir,
                     )
                     if my_rowid is None:
-                        native_rowid, native_match = resolve_account_self_rowid(
+                        source_rowid, source_match = resolve_account_self_rowid(
                             msg_conn,
                             account_dir,
                             candidates=(self_username,),
                         )
-                        if native_rowid is not None:
-                            my_rowid, _matched_self_username = native_rowid, native_match
+                        if source_rowid is not None:
+                            my_rowid, _matched_self_username = source_rowid, source_match
                     db_self_username = _matched_self_username or self_username
 
                     for conv_username, sess_info in sessions.items():

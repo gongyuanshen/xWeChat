@@ -643,23 +643,48 @@
       class="fixed inset-0 z-[13000] bg-black/90 flex items-center justify-center"
       @click="closeVideoPreview"
     >
-      <div class="relative max-w-[92vw] max-h-[92vh] flex flex-col items-center" @click.stop>
+      <div class="relative max-w-[92vw] max-h-[92vh] flex flex-col items-center overflow-y-auto" @click.stop>
         <video
           :key="previewVideoUrl"
           :src="previewVideoUrl"
           :poster="previewVideoPosterUrl"
-          class="max-w-[90vw] max-h-[90vh] object-contain"
+          class="min-h-0 max-w-[90vw] max-h-[90vh] shrink object-contain"
           controls
           autoplay
           playsinline
+          @loadedmetadata="onPreviewVideoReady"
+          @loadeddata="onPreviewVideoReady"
+          @canplay="onPreviewVideoReady"
           @error="onPreviewVideoError"
         ></video>
         <ErrorNotice
           v-if="previewVideoError"
           :message="previewVideoError"
           compact
-          class="mt-3 text-xs text-red-200 text-center max-w-[90vw]"
+          class="mt-3 shrink-0 text-xs text-red-200 text-center max-w-[90vw]"
         />
+        <div
+          v-if="canGenerateVideoPreview || previewVideoGenerating || previewVideoNotice"
+          class="mt-3 max-w-[90vw] shrink-0 rounded-[10px] border border-[var(--chat-input-border)] bg-[var(--chat-input-bg)] px-4 py-3 text-sm text-[var(--app-text-primary)]"
+          @click.stop
+        >
+          <p v-if="previewVideoNotice" role="status" aria-live="polite">{{ previewVideoNotice }}</p>
+          <p class="mt-1 text-xs text-[var(--app-text-secondary)]">仅生成本地播放副本，原视频保持不变。</p>
+          <button
+            v-if="canGenerateVideoPreview"
+            type="button"
+            data-action="generate-video-preview"
+            class="mt-3 rounded-[10px] bg-[var(--chat-accent)] px-3 py-2 text-[var(--chat-input-bg)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--chat-accent)]"
+            @click="generateVideoPreview"
+          >生成本地预览</button>
+          <button
+            v-if="previewVideoGenerating"
+            type="button"
+            data-action="cancel-video-preview"
+            class="mt-3 rounded-[10px] border border-[var(--chat-input-border)] px-3 py-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--chat-accent)]"
+            @click="cancelVideoPreviewGeneration"
+          >取消生成</button>
+        </div>
       </div>
       <button
         class="absolute top-4 right-4 text-white/80 hover:text-white p-2 rounded-full bg-black/30 hover:bg-black/50 transition-colors"
@@ -965,28 +990,21 @@
         定位引用消息
       </button>
       <button
-        v-if="contextMenu.message?.renderType === 'voice'
-          && !privacyMode
-          && nativeVoiceTranscriptionAvailable
-          && typeof transcribeVoice === 'function'
-          && !(contextMenu.message?.voiceTranscriptStatus === 'success'
-            && contextMenu.message?.voiceTranscriptModel === 'wechat-native')"
+        v-if="canShowVoiceContextAction(contextMenu.message)"
         class="chat-context-menu__item block w-full text-left px-3 py-2"
         type="button"
-        :disabled="contextMenu.message?.voiceTranscriptStatus === 'loading'"
-        :title="contextMenu.message?.voiceTranscriptStatus === 'error' ? '重试微信转文字' : '微信转文字'"
-        :class="contextMenu.message?.voiceTranscriptStatus === 'loading' ? 'opacity-50 cursor-not-allowed' : ''"
-        @click="onTranscribeVoiceClick"
-      >
-        微信转文字
-      </button>
-      <button
-        v-if="canShowLocalVoiceContextAction(contextMenu.message)"
-        class="chat-context-menu__item block w-full text-left px-3 py-2"
-        type="button"
-        @click="onTranscribeVoiceLocallyClick"
+        @click="onTranscribeVoiceClick('local')"
       >
         本地转文字
+      </button>
+      <button
+        v-if="canShowVoiceContextAction(contextMenu.message, 'wechat')"
+        class="chat-context-menu__item block w-full text-left px-3 py-2"
+        type="button"
+        title="会短暂切换微信；同一分钟多条语音无法唯一定位时会报错。"
+        @click="onTranscribeVoiceClick('wechat')"
+      >
+        微信转文字
       </button>
       <button
         class="chat-context-menu__item block w-full text-left px-3 py-2"
@@ -1080,40 +1098,29 @@ export default defineComponent({
 
     const previewImageScaleText = computed(() => `${Math.round(previewImageScale.value * 100)}%`)
 
-    const onTranscribeVoiceClick = () => {
-      const menuRef = props.state?.contextMenu
-      const menu = menuRef && typeof menuRef === 'object' && 'value' in menuRef ? menuRef.value : menuRef
-      const message = menu?.message
-      const transcribe = props.state?.transcribeVoice
-      if (!message || typeof transcribe !== 'function') return
-      const status = String(message?.voiceTranscriptStatus || '')
-      if (status === 'loading') return
-      if (typeof props.state?.closeContextMenu === 'function') props.state.closeContextMenu()
-      void transcribe(message)
-    }
-
-    const canShowLocalVoiceContextAction = (message) => {
+    const canShowVoiceContextAction = (message, source = 'local') => {
       if (!message || String(message?.renderType || '').trim() !== 'voice' || readMaybeRef(props.state?.privacyMode)) {
         return false
       }
       const status = String(message?.voiceTranscriptStatus || 'idle').trim().toLowerCase()
       if (status === 'loading' || status === 'success' || String(message?.voiceTranscript || '').trim()) return false
-      if (typeof props.state?.transcribeVoiceLocally !== 'function') return false
-      if (readMaybeRef(props.state?.voiceTranscriptionStatusLoading) === true) return false
+      const transcribe = source === 'wechat' ? props.state?.transcribeVoiceNatively : props.state?.transcribeVoiceLocally
+      if (typeof transcribe !== 'function') return false
+      if (source === 'local' && readMaybeRef(props.state?.voiceTranscriptionStatusLoading) === true) return false
       return true
     }
 
-    const onTranscribeVoiceLocallyClick = () => {
+    const onTranscribeVoiceClick = (source) => {
       const menuRef = props.state?.contextMenu
       const menu = menuRef && typeof menuRef === 'object' && 'value' in menuRef ? menuRef.value : menuRef
       const message = menu?.message
-      const transcribe = props.state?.transcribeVoiceLocally
+      const transcribe = source === 'wechat' ? props.state?.transcribeVoiceNatively : props.state?.transcribeVoiceLocally
       if (!message || typeof transcribe !== 'function') return
       const status = String(message?.voiceTranscriptStatus || '').trim().toLowerCase()
       if (status === 'loading') return
       if (typeof props.state?.closeContextMenu === 'function') props.state.closeContextMenu()
-      const options = { force: status === 'error' }
-      void transcribe(message, options)
+      if (source === 'wechat') void transcribe(message)
+      else void transcribe(message, { force: status === 'error' })
     }
 
     watch(
@@ -1135,9 +1142,8 @@ export default defineComponent({
       onPreviewImageWheel,
       rotatePreviewImageLeft,
       rotatePreviewImageRight,
+      canShowVoiceContextAction,
       onTranscribeVoiceClick,
-      canShowLocalVoiceContextAction,
-      onTranscribeVoiceLocallyClick,
     }
   }
 })

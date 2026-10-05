@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from .data_source import normalize_data_source
+from .account_identity import resolve_account_username
+from .snapshot_registry import resolve_account_database_dir, capture_snapshot_work, start_snapshot_thread
+
 import copy
 import functools
 import base64
@@ -19,20 +23,20 @@ import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
+from contextlib import ExitStack
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Optional
 from urllib.parse import urlencode, urljoin, urlparse
+from xml.etree import ElementTree as ET
 
 import requests
 
 from .account_identity import resolve_account_self_rowid, resolve_account_self_username
-from .account_source_policy import account_prefers_decrypted_snapshot
-from .anti_revoke import (
-    get_anti_revoke_db_path,
-    get_revoked_messages_map,
-    get_revoked_messages_list,
-)
+
+from .archive_checksums import write_zip_checksums
+from . import independent_html
+from .anti_revoke import get_revoked_messages_map, get_revoked_messages_list
 from .chat_helpers import (
     _decode_message_content,
     _decode_sqlite_text,
@@ -64,8 +68,8 @@ from .chat_helpers import (
     _split_group_sender_prefix,
     _resolve_msg_table_name_by_map,
 )
-from .chat_realtime_autosync import CHAT_REALTIME_AUTOSYNC
-from .chat_realtime_reader import count_realtime_message_rows_via_exec, iter_realtime_message_rows
+
+
 from .chat_incremental_export import (
     ChatFolderContext,
     ChatIncrementalError,
@@ -88,36 +92,26 @@ from .media_helpers import (
     _resolve_account_wxid_dir,
     _resolve_media_path_for_kind,
     _try_find_decrypted_resource,
+    _validate_image_bytes,
 )
 from .perf_trace import create_perf_trace
-from .source_fallback import build_source_fallback_meta
-from .export_integrity import export_css as _native_export_css
-from .export_integrity import load_wce_integrity_native
-from .export_integrity import write_active_html_zip_integrity
-from .export_integrity import write_zip_integrity_sidecars
-from .native_core_export import (
+
+from .independent_html import export_css as _export_css
+
+
+from .export_crypto import (
     encrypt_export_file_and_remove_source,
     erase_export_content_key,
 )
-from .native_core_telemetry import record_product_event
+
 from .xlsx_export import build_xlsx_workbook
-from .wcdb_realtime import (
-    WCDB_REALTIME,
-    WCDBRealtimeError,
-    close_message_cursor as _wcdb_close_message_cursor,
-    exec_query as _wcdb_exec_query,
-    fetch_message_batch as _wcdb_fetch_message_batch,
-    get_avatar_urls as _wcdb_get_avatar_urls,
-    get_display_names as _wcdb_get_display_names,
-    get_message_count as _wcdb_get_message_count,
-    get_messages as _wcdb_get_messages,
-    get_sessions as _wcdb_get_sessions,
-    open_message_cursor as _wcdb_open_message_cursor,
-    resolve_account_native_wxid as _wcdb_resolve_account_native_wxid,
-)
+from .key_service import prepare_export_image_keys
+from .image_key_memory_scan import ImageKeyScanCancelled
+
 from .voice_transcription import (
     VoiceTranscriptionConfig,
     VoiceTranscriptionError,
+    _VoiceTranscriptionCancelled,
     acquire_voice_model_activity,
     capture_voice_transcript_cache_generation,
     get_voice_transcription_service,
@@ -128,7 +122,7 @@ logger = get_logger(__name__)
 
 ExportFormat = Literal["json", "txt", "html", "excel"]
 ExportScope = Literal["selected", "all", "groups", "singles"]
-ChatSource = Literal["auto", "decrypted", "realtime"]
+ChatSource = Literal["auto", "decrypted"]
 ExportStatus = Literal["queued", "running", "done", "error", "cancelled"]
 ExportOutputMode = Literal["zip", "folder"]
 MediaKind = Literal["image", "emoji", "video", "video_thumb", "voice", "file"]
@@ -148,22 +142,9 @@ def _safe_json_dumps(value: Any) -> str:
         return str(value)
 
 
-def _normalize_chat_source(value: Optional[str], *, default: str = "auto") -> str:
-    v = str(value or "").strip().lower()
-    if not v:
-        v = str(default or "auto").strip().lower()
-    if v in {"decrypted", "local", "sqlite"}:
-        return "decrypted"
-    if v in {"auto", "default", "wechat"}:
-        return "auto"
-    if v in {"realtime", "real-time", "wcdb"}:
-        return "realtime"
-    raise ValueError("Invalid source, use 'auto', 'decrypted' or 'realtime'.")
-
-
 def _has_decrypted_export_dbs(account_dir: Path) -> bool:
     try:
-        return bool((account_dir / "session.db").exists() and (account_dir / "contact.db").exists())
+        return bool((resolve_account_database_dir(account_dir) / "session.db").exists() and (resolve_account_database_dir(account_dir) / "contact.db").exists())
     except Exception:
         return False
 
@@ -301,41 +282,50 @@ def _resolve_ui_public_dir() -> Optional[Path]:
     return None
 
 
-_CHAT_HISTORY_MD5_TAG_RE = re.compile(
-    r"(?i)<(?P<tag>fullmd5|thumbfullmd5|md5|emoticonmd5|emojimd5|cdnthumbmd5)>(?P<md5>[0-9a-f]{32})<"
-)
-_CHAT_HISTORY_DATAITEM_RE = re.compile(r"(?is)<dataitem\b(?P<attrs>[^>]*)>(?P<body>.*?)</dataitem>")
-_CHAT_HISTORY_DATA_TYPE_RE = re.compile(r"(?i)\bdatatype\s*=\s*['\"]?(?P<type>\d+)")
-_CHAT_HISTORY_DATA_TYPE_TAG_RE = re.compile(r"(?i)<datatype>\s*(?P<type>\d+)\s*<")
 _CHAT_HISTORY_URL_TAG_RE = re.compile(r"(?i)<(?:sourceheadurl|cdnurlstring|encrypturlstring|externurl)>(https?://[^<\s]+)<")
-_CHAT_HISTORY_SERVER_ID_TAG_RE = re.compile(r"(?i)<fromnewmsgid>\s*(\d+)\s*<")
 
 
-def _iter_chat_history_media_refs(record_item: str) -> list[tuple[str, str]]:
-    """Return recordItem media hashes with a type hint when the item defines one."""
+def _iter_chat_history_media_refs(record_item: str) -> Iterable[dict[str, str]]:
+    """Read declared media types, including XML embedded in nested records.
 
-    raw = str(record_item or "")
-    refs: list[tuple[str, str]] = []
-    handled: set[str] = set()
-    for item_match in _CHAT_HISTORY_DATAITEM_RE.finditer(raw):
-        attrs = str(item_match.group("attrs") or "")
-        body = str(item_match.group("body") or "")
-        type_match = _CHAT_HISTORY_DATA_TYPE_RE.search(attrs) or _CHAT_HISTORY_DATA_TYPE_TAG_RE.search(body)
-        if not type_match or str(type_match.group("type") or "") != "4":
+    Keep the existing record-item video mapping. A declared file extension can
+    identify video without guessing between the different favorite numbering
+    schemes. Unknown media-bearing types fail instead of trying other decoders.
+    """
+    if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", record_item, re.IGNORECASE):
+        raise ValueError("Merged record XML cannot contain document type or entity declarations")
+    root = ET.fromstring(record_item)
+    for node in root.iter("dataitem"):
+        datatype = str(node.get("datatype") or node.findtext("datatype") or "").strip()
+        fmt = str(node.findtext("datafmt") or "").strip().lower().lstrip(".")
+        nested = node.find("recorditem")
+        if nested is None:
+            nested = node.find("recordxml")
+        if nested is not None and nested.text and nested.text.lstrip().startswith("<"):
+            yield from _iter_chat_history_media_refs(nested.text)
+        if datatype == "17":
             continue
-        for md5_match in _CHAT_HISTORY_MD5_TAG_RE.finditer(body):
-            md5 = str(md5_match.group("md5") or "").lower()
-            tag = str(md5_match.group("tag") or "").lower()
+        kind = {"2": "image", "3": "image", "4": "video", "5": "image", "8": "file", "37": "emoji", "47": "emoji"}.get(datatype, "")
+        if fmt == "mp4" and datatype != "8":
+            kind = "video"
+        md5 = str(node.findtext("fullmd5") or node.findtext("md5") or node.findtext("emoticonmd5") or node.findtext("emojimd5") or "").strip().lower()
+        thumb = str(node.findtext("thumbfullmd5") or node.findtext("cdnthumbmd5") or "").strip().lower()
+        if datatype == "5" and kind == "image":
+            md5 = thumb or md5
             if not md5:
                 continue
-            refs.append((md5, "video_thumb" if "thumb" in tag else "video"))
-            handled.add(md5)
-
-    for md5_match in _CHAT_HISTORY_MD5_TAG_RE.finditer(raw):
-        md5 = str(md5_match.group("md5") or "").lower()
-        if md5 and md5 not in handled:
-            refs.append((md5, ""))
-    return refs
+        if not kind:
+            if md5 or thumb:
+                raise ValueError(f"Unsupported merged record media type: datatype={datatype}, datafmt={fmt}")
+            continue
+        for digest in (md5, thumb):
+            if digest and not _is_md5(digest):
+                raise ValueError(f"Invalid merged record media MD5: {digest}")
+        yield {"kind": kind, "md5": md5, "fileId": str(node.get("dataid") or node.findtext("dataid") or "").strip(),
+               "serverId": str(node.findtext("fromnewmsgid") or "").strip(),
+               "title": str(node.findtext("datatitle") or "").strip()}
+        if thumb and kind == "video":
+            yield {"kind": "video_thumb", "md5": thumb, "fileId": "", "title": ""}
 
 
 _VOICE_TRANSCRIPT_EXPORT_CSS = """
@@ -647,7 +637,7 @@ _MOBILE_EXPORT_CSS = """
 def _load_ui_css_bundle(*, ui_public_dir: Optional[Path], report: dict[str, Any]) -> str:
     del ui_public_dir, report
     return (
-        f'{_native_export_css("chat").rstrip()}\n'
+        f'{_export_css("chat").rstrip()}\n'
         f'{_VOICE_TRANSCRIPT_EXPORT_CSS}\n'
         f'{_MOBILE_EXPORT_CSS}\n'
     )
@@ -793,32 +783,29 @@ def _download_remote_image_to_zip(
     zf: zipfile.ZipFile,
     url: str,
     remote_written: dict[str, str],
-    report: dict[str, Any],
+    job: ExportJob,
 ) -> str:
     started_at = time.perf_counter()
+    _raise_if_job_cancelled(job, "remote_image.start")
     raw = str(url or "").strip()
     if not raw:
-        return ""
+        raise ValueError("Remote image URL is empty")
 
     cached = remote_written.get(raw)
     if cached is not None:
         return cached
 
     current = raw
-    last_error = ""
-
     for _ in range(4):  # 0..3 redirects
+        _raise_if_job_cancelled(job, "remote_image.request")
         parsed = urlparse(current)
         if parsed.scheme not in {"http", "https"}:
-            last_error = f"unsupported scheme: {parsed.scheme}"
-            break
+            raise ValueError(f"Remote image unsupported scheme: {parsed.scheme}")
         host = parsed.hostname or ""
         if not host:
-            last_error = "missing hostname"
-            break
+            raise ValueError("Remote image URL missing hostname")
         if not _is_safe_remote_host(host, parsed.port):
-            last_error = f"blocked host: {host}"
-            break
+            raise ValueError(f"Remote image blocked host: {host}")
 
         resp = None
         try:
@@ -832,371 +819,70 @@ def _download_remote_image_to_zip(
                     "Accept": "image/*",
                 },
             )
-
+            _raise_if_job_cancelled(job, "remote_image.response")
             if int(resp.status_code) in {301, 302, 303, 307, 308}:
                 loc = str(resp.headers.get("Location") or "").strip()
                 if not loc:
-                    last_error = f"redirect without Location ({resp.status_code})"
-                    break
+                    raise ValueError(f"Remote image redirect without Location ({resp.status_code})")
                 current = urljoin(current, loc)
                 continue
 
             if int(resp.status_code) != 200:
-                last_error = f"http {resp.status_code}"
-                break
-
-            ct = str(resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            ext = _REMOTE_IMAGE_ALLOWED_CT.get(ct, "")
+                raise requests.HTTPError(f"Remote image HTTP {resp.status_code}", response=resp)
 
             cl = str(resp.headers.get("Content-Length") or "").strip()
             if cl:
-                try:
-                    if int(cl) > _REMOTE_IMAGE_MAX_BYTES:
-                        last_error = f"remote image too large: {cl} bytes"
-                        break
-                except Exception:
-                    pass
+                if int(cl) > _REMOTE_IMAGE_MAX_BYTES:
+                    raise ValueError(f"Remote image too large: {cl} bytes")
 
             buf = bytearray()
-            too_large = False
             for chunk in resp.iter_content(chunk_size=65536):
+                _raise_if_job_cancelled(job, "remote_image.chunk")
                 if not chunk:
                     continue
                 buf.extend(chunk)
                 if len(buf) > _REMOTE_IMAGE_MAX_BYTES:
-                    too_large = True
-                    break
+                    raise ValueError(f"Remote image too large: >{_REMOTE_IMAGE_MAX_BYTES} bytes")
 
-            if too_large:
-                last_error = f"remote image too large: >{_REMOTE_IMAGE_MAX_BYTES} bytes"
-                break
-
-            if not ext:
-                # Some WeChat CDN endpoints return `application/octet-stream` even for images.
-                # Detect by magic bytes to improve offline exports for merged-forward emojis/avatars.
-                try:
-                    mt2 = _detect_image_media_type(bytes(buf[:32]))
-                except Exception:
-                    mt2 = ""
-                ext = _REMOTE_IMAGE_ALLOWED_CT.get(str(mt2 or "").strip().lower(), "")
-            if not ext:
-                last_error = f"unsupported content-type: {ct or 'unknown'}"
-                break
-
-            h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
-            arc = f"media/remote/{h[:32]}.{ext}"
-            zf.writestr(arc, bytes(buf))
-            remote_written[raw] = arc
-            _log_export_slow_step(
-                "download_remote_image",
-                started_at,
-                url=raw,
-                finalUrl=current,
-                arc=arc,
-                contentType=ct,
-                bytes=len(buf),
-            )
-            return arc
-        except Exception as e:
-            last_error = f"request failed: {e}"
-            break
+        except requests.RequestException:
+            _raise_if_job_cancelled(job, "remote_image.request_failed")
+            raise
         finally:
-            try:
-                if resp is not None:
-                    resp.close()
-            except Exception:
-                pass
+            if resp is not None:
+                resp.close()
 
-    try:
-        clipped = raw if len(raw) <= 260 else (raw[:257] + "...")
-        report["errors"].append(f"WARN: Remote image download skipped/failed: {clipped} ({last_error})")
-    except Exception:
-        pass
-    remote_written[raw] = ""
-    _log_export_slow_step(
-        "download_remote_image_failed",
-        started_at,
-        url=raw,
-        finalUrl=current,
-        error=last_error,
-    )
-    return ""
+        _raise_if_job_cancelled(job, "remote_image.validate")
+        data = bytes(buf)
+        media_type = _validate_image_bytes(data)
+        ext = _REMOTE_IMAGE_ALLOWED_CT[media_type]
+        h = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+        arc = f"media/remote/{h[:32]}.{ext}"
+        _raise_if_job_cancelled(job, "remote_image.write")
+        zf.writestr(arc, data)
+        _raise_if_job_cancelled(job, "remote_image.done")
+        remote_written[raw] = arc
+        _log_export_slow_step(
+            "download_remote_image",
+            started_at,
+            urlHash=h,
+            host=host,
+            arc=arc,
+            contentType=media_type,
+            bytes=len(buf),
+        )
+        return arc
 
-
-
-# HTML export integrity/style/runtime core is provided by native/wce_integrity.pyd.
-# Keep Python as orchestration only; do not provide Python fallbacks for these pieces.
-_HTML_EXPORT_NATIVE_ERROR = "\u0048\u0054\u004d\u004c \u5bfc\u51fa\u7ec4\u4ef6\u521d\u59cb\u5316\u5931\u8d25\u3002"
-
-
-def _load_wce_integrity_native() -> Any:
-    return load_wce_integrity_native()
-
-
-def _native_text(native_integrity: Any, func_name: str, *args: Any, error: str = _HTML_EXPORT_NATIVE_ERROR) -> str:
-    try:
-        fn = getattr(native_integrity, func_name)
-        value = str(fn(*args))
-    except Exception as e:
-        raise RuntimeError(error) from e
-    if not value.strip():
-        raise RuntimeError(error)
-    return value
-
-
-def _native_json_list(
-    native_integrity: Any,
-    func_name: str,
-    *args: Any,
-    length: int,
-    error: str = _HTML_EXPORT_NATIVE_ERROR,
-) -> list[str]:
-    raw = _native_text(native_integrity, func_name, *args, error=error)
-    try:
-        value = json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(error) from e
-    if not isinstance(value, list) or len(value) < length:
-        raise RuntimeError(error)
-    out = [str(value[i] or "").strip() for i in range(length)]
-    if any(not item for item in out):
-        raise RuntimeError(error)
-    return out
-
-
-def _html_export_runtime_js(native_integrity: Any) -> str:
-    # 原生运行时会参与导出页的自校验，必须逐字节保持原样。
-    return _native_text(native_integrity, "runtime_js")
-
-
-def _html_export_folder_runtime_js(native_integrity: Any) -> str:
-    """保留 HTML 交互能力，但关闭只适用于不可变 ZIP 的阻断式校验。"""
-
-    wrapped = _html_export_runtime_js(native_integrity)
-    match = re.search(
-        r"const _0=(\[.*?\]),_1=(\[[0-9,\s]+\]);let _2=atob",
-        wrapped,
-        flags=re.DOTALL,
-    )
-    if match is None:
-        raise RuntimeError(_HTML_EXPORT_NATIVE_ERROR)
-    try:
-        chunks = json.loads(match.group(1))
-        key = bytes(int(value) & 0xFF for value in json.loads(match.group(2)))
-        encrypted = base64.b64decode("".join(str(value) for value in chunks), validate=True)
-        source = bytes(value ^ key[index % len(key)] for index, value in enumerate(encrypted)).decode("utf-8")
-    except Exception as exc:
-        raise RuntimeError(_HTML_EXPORT_NATIVE_ERROR) from exc
-
-    startup = "const integrityOk = await initExportIntegrity()"
-    if source.count(startup) != 1:
-        raise RuntimeError(_HTML_EXPORT_NATIVE_ERROR)
-    folder_startup = """const integrityOk = true
-    try {
-      document.documentElement.setAttribute('data-wce-folder-mode', '1')
-      document.documentElement.setAttribute('data-wce-integrity-ok', '1')
-      window.__WCE_VERIFY_FRAGMENT__ = () => true
-    } catch {}"""
-    source = source.replace(startup, folder_startup, 1)
-
-    # 增量目录中的每个会话页可能生成于不同批次。运行时统一读取公共会话清单，
-    # 避免点击会话后左侧目录退回到该页面生成时的旧快照。
-    listener_marker = "  document.addEventListener('DOMContentLoaded', async () => {"
-    search_marker = "    initSessionSearch()"
-    if source.count(listener_marker) != 1 or source.count(search_marker) != 1:
-        raise RuntimeError(_HTML_EXPORT_NATIVE_ERROR)
-    folder_sessions_runtime = r"""  const wceFolderRuntimeSrc = (() => {
-    try {
-      const currentSrc = String((document.currentScript && document.currentScript.src) || '')
-      if (currentSrc) return currentSrc
-      const scripts = Array.from(document.querySelectorAll('script[src]'))
-      const runtimeScript = scripts.find((element) => {
-        const src = String((element && element.src) || '')
-        return /(^|\/)chat-export\.js(?:[?#].*)?$/.test(src)
-      })
-      return String((runtimeScript && runtimeScript.src) || '')
-    } catch {
-      return ''
-    }
-  })()
-
-  async function loadFolderSessionCatalog() {
-    const ready = window.__WCE_FOLDER_SESSIONS__
-    if (ready && Array.isArray(ready.items)) return true
-    if (!wceFolderRuntimeSrc) return false
-
-    return await new Promise((resolve) => {
-      let settled = false
-      const finish = (value) => {
-        if (settled) return
-        settled = true
-        resolve(Boolean(value))
-      }
-      let script = document.querySelector('script[data-wce-folder-sessions="1"]')
-      if (!script) {
-        script = document.createElement('script')
-        script.defer = true
-        script.setAttribute('data-wce-folder-sessions', '1')
-        try {
-          script.src = new URL('chat-sessions.js', wceFolderRuntimeSrc).href
-        } catch {
-          finish(false)
-          return
-        }
-        document.head.appendChild(script)
-      }
-      if (window.__WCE_FOLDER_SESSIONS__ && Array.isArray(window.__WCE_FOLDER_SESSIONS__.items)) {
-        finish(true)
-        return
-      }
-      script.addEventListener('load', () => finish(
-        window.__WCE_FOLDER_SESSIONS__ && Array.isArray(window.__WCE_FOLDER_SESSIONS__.items)
-      ), { once: true })
-      script.addEventListener('error', () => finish(false), { once: true })
-      window.setTimeout(() => finish(false), 3000)
-    })
-  }
-
-  function syncFolderSessionCatalog() {
-    const catalog = window.__WCE_FOLDER_SESSIONS__
-    const container = document.querySelector('[data-wce-session-list="1"]')
-    if (!catalog || !Array.isArray(catalog.items) || !container || !wceFolderRuntimeSrc) return
-
-    let exportRoot
-    try {
-      exportRoot = new URL('../', wceFolderRuntimeSrc)
-    } catch {
-      return
-    }
-    const currentPath = (() => {
-      try { return decodeURIComponent(window.location.pathname || '').replace(/\\/g, '/') }
-      catch { return String(window.location.pathname || '').replace(/\\/g, '/') }
-    })()
-    const fragment = document.createDocumentFragment()
-
-    for (const rawItem of catalog.items) {
-      const convDir = String((rawItem && rawItem.convDir) || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
-      if (!convDir) continue
-      const displayName = String((rawItem && rawItem.displayName) || '').trim() || '会话'
-      const username = String((rawItem && rawItem.username) || '').trim()
-      const avatarPath = String((rawItem && rawItem.avatarPath) || '').trim().replace(/\\/g, '/').replace(/^\/+/, '')
-      const lastTimeText = String((rawItem && rawItem.lastTimeText) || '').trim()
-      const previewText = String((rawItem && rawItem.previewText) || '').trim()
-      const messageSuffix = `/${convDir}/messages.html`
-      const active = currentPath.endsWith(messageSuffix)
-
-      const link = document.createElement('a')
-      link.href = new URL(`${convDir}/messages.html`, exportRoot).href
-      link.className = 'px-3 cursor-pointer transition-colors duration-150 border-b border-gray-100 h-[calc(80px/var(--dpr))] flex items-center '
-        + (active ? 'bg-[#DEDEDE]' : 'hover:bg-[#F5F5F5]')
-      link.setAttribute('data-wce-session-item', '1')
-      link.setAttribute('data-wce-session-name', displayName)
-      link.setAttribute('data-wce-session-username', username)
-      if (active) link.setAttribute('aria-current', 'page')
-
-      const avatarWrap = document.createElement('div')
-      avatarWrap.className = 'relative'
-      const avatarBox = document.createElement('div')
-      avatarBox.className = 'w-[calc(45px/var(--dpr))] h-[calc(45px/var(--dpr))] rounded-md overflow-hidden bg-gray-300'
-      if (avatarPath) {
-        const image = document.createElement('img')
-        image.src = new URL(avatarPath, exportRoot).href
-        image.alt = displayName
-        image.className = 'w-full h-full object-cover'
-        image.referrerPolicy = 'no-referrer'
-        avatarBox.appendChild(image)
-      } else {
-        const fallback = document.createElement('div')
-        fallback.className = 'w-full h-full flex items-center justify-center text-white text-xs font-bold'
-        fallback.style.backgroundColor = '#4B5563'
-        fallback.textContent = (displayName.slice(0, 1).trim() || '?')
-        avatarBox.appendChild(fallback)
-      }
-      avatarWrap.appendChild(avatarBox)
-      link.appendChild(avatarWrap)
-
-      const content = document.createElement('div')
-      content.className = 'flex-1 min-w-0 ml-3'
-      const heading = document.createElement('div')
-      heading.className = 'flex items-center justify-between'
-      const title = document.createElement('h3')
-      title.className = 'text-sm font-medium text-gray-900 truncate'
-      title.textContent = displayName
-      heading.appendChild(title)
-      const timeWrap = document.createElement('div')
-      timeWrap.className = 'flex items-center flex-shrink-0 ml-2'
-      const time = document.createElement('span')
-      time.className = 'text-xs text-gray-500'
-      time.textContent = lastTimeText
-      timeWrap.appendChild(time)
-      heading.appendChild(timeWrap)
-      content.appendChild(heading)
-      const preview = document.createElement('p')
-      preview.className = 'text-xs text-gray-500 truncate mt-0.5 leading-tight'
-      preview.textContent = previewText
-      content.appendChild(preview)
-      link.appendChild(content)
-      fragment.appendChild(link)
-    }
-
-    container.replaceChildren(fragment)
-    container.setAttribute('data-wce-session-catalog', '1')
-  }"""
-    source = source.replace(listener_marker, folder_sessions_runtime + "\n\n" + listener_marker, 1)
-    source = source.replace(
-        search_marker,
-        "    await loadFolderSessionCatalog()\n    syncFolderSessionCatalog()\n\n" + search_marker,
-        1,
-    )
-    return source
-
-
-def _html_export_asset_paths(export_id: str) -> tuple[str, str, str]:
-    values = _native_json_list(
-        _load_wce_integrity_native(),
-        "asset_paths",
-        str(export_id or ""),
-        length=3,
-    )
-    return values[0], values[1], values[2]
-
-
-def _html_export_integrity_sidecar_paths(export_id: str) -> tuple[str, str]:
-    values = _native_json_list(
-        _load_wce_integrity_native(),
-        "integrity_sidecar_paths",
-        str(export_id or ""),
-        length=2,
-    )
-    return values[0], values[1]
-
-
-def _html_export_integrity_script_tag(*, src: str) -> str:
-    return _native_text(_load_wce_integrity_native(), "integrity_script_tag", str(src or ""))
+    raise ValueError("Remote image redirect limit (3) exceeded")
 
 
 def _html_export_attribution_html() -> str:
-    return _native_text(_load_wce_integrity_native(), "attribution_html")
-
-
-def _html_export_gate_style() -> str:
-    return _native_text(_load_wce_integrity_native(), "gate_style")
+    return independent_html.attribution_html()
 
 
 def _html_export_page_fragment_js(*, export_id: str, arc_js: str, page_no: int, fragment_html: str) -> str:
-    return _native_text(
-        _load_wce_integrity_native(),
-        "page_fragment_js",
-        str(export_id or ""),
-        _zip_arcname(arc_js),
-        int(page_no),
-        str(fragment_html or ""),
-    )
+    return independent_html.page_fragment_js(page_no, fragment_html)
 
 
-def _sri_sha384(text: str) -> str:
-    digest = hashlib.sha384(str(text or "").encode("utf-8")).digest()
-    return "sha384-" + base64.b64encode(digest).decode("ascii")
 
 
 def _sha256_hex_bytes(data: bytes) -> str:
@@ -1286,9 +972,8 @@ def _html_export_folder_sessions_js(session_items: list[dict[str, Any]]) -> str:
 class _ZipIntegrityWriter:
     """Small ZipFile proxy that records hashes for the exported integrity bundle."""
 
-    def __init__(self, zf: zipfile.ZipFile, *, native_integrity: Any = None):
+    def __init__(self, zf: zipfile.ZipFile):
         self._zf = zf
-        self._native_integrity = native_integrity
         self._entries: dict[str, dict[str, Any]] = {}
 
     def __getattr__(self, name: str) -> Any:
@@ -1308,32 +993,18 @@ class _ZipIntegrityWriter:
             raw = data.tobytes()
         else:
             raw = bytes(data or b"")
-        native = self._native_integrity
-        if native is not None:
-            try:
-                entry = json.loads(str(native.record_bytes(arc, raw)))
-            except Exception as e:
-                raise RuntimeError("HTML 导出完整性组件记录文件失败。") from e
-        else:
-            entry = {"path": arc, "size": len(raw), "sha256": _sha256_hex_bytes(raw)}
+        entry = {"path": arc, "size": len(raw), "sha256": _sha256_hex_bytes(raw)}
         self._entries[arc] = entry
 
     def _record_file(self, src: Any, arcname: Any) -> None:
         arc = _zip_arcname(arcname)
         if not arc or arc.endswith("/"):
             return
-        native = self._native_integrity
-        if native is not None:
-            try:
-                entry = json.loads(str(native.record_file(str(Path(src)), arc)))
-            except Exception as e:
-                raise RuntimeError("HTML 导出完整性组件记录资源失败。") from e
-        else:
-            try:
-                size, digest = _sha256_hex_file(Path(src))
-            except Exception:
-                return
-            entry = {"path": arc, "size": int(size), "sha256": digest}
+        try:
+            size, digest = _sha256_hex_file(Path(src))
+        except Exception:
+            return
+        entry = {"path": arc, "size": int(size), "sha256": digest}
         self._entries[arc] = entry
 
     def writestr(self, zinfo_or_arcname: Any, data: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1497,6 +1168,7 @@ class ExportJob:
     options: dict[str, Any] = field(default_factory=dict)
     progress: ExportProgress = field(default_factory=ExportProgress)
     cancel_requested: bool = False
+    cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     content_key: Optional[bytearray] = field(default=None, repr=False)
     voice_cache_generation: Optional[int] = field(default=None, repr=False)
 
@@ -1564,6 +1236,7 @@ class ChatExportManager:
                 logger.info("chat export cancel requested for missing job export_id=%s", export_id)
                 return False
             job.cancel_requested = True
+            job.cancel_event.set()
             logger.info(
                 "chat export cancel requested %s",
                 _safe_json_dumps(
@@ -1653,32 +1326,8 @@ class ChatExportManager:
         if output_mode_norm == "folder" and bool(encrypt):
             raise ValueError("增量目录不支持整包加密，请使用 ZIP 全量导出。")
         account_dir = _resolve_account_dir(account)
-        source_requested = _normalize_chat_source(source, default="auto")
+        source_requested = normalize_data_source(source, default="auto")
         source_norm = source_requested
-        fallback_reason = ""
-        retry_after_seconds = 0
-        if source_requested == "auto" and account_prefers_decrypted_snapshot(account_dir):
-            source_norm = "decrypted"
-        elif source_requested in {"auto", "realtime"}:
-            try:
-                WCDB_REALTIME.ensure_connected(account_dir)
-                source_norm = "realtime"
-            except WCDBRealtimeError as e:
-                if not _has_decrypted_export_dbs(account_dir):
-                    raise ValueError(f"Realtime export requires WCDB/direct mode but connection failed: {e}") from e
-                source_norm = "decrypted"
-                fallback_reason = str(e)
-                try:
-                    failure = WCDB_REALTIME.get_recent_failure(account_dir.name)
-                    retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-                except Exception:
-                    retry_after_seconds = 0
-        fallback_meta = build_source_fallback_meta(
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=fallback_reason,
-            retry_after_seconds=retry_after_seconds,
-        )
         export_id = uuid.uuid4().hex[:12]
 
         if output_mode_norm == "folder":
@@ -1759,7 +1408,6 @@ class ChatExportManager:
             options={
                 "scope": scope,
                 "source": source_norm,
-                **fallback_meta,
                 "usernames": usernames,
                 "format": export_format,
                 "startTime": int(start_time) if start_time else None,
@@ -1828,15 +1476,9 @@ class ChatExportManager:
             ),
         )
 
-        t = threading.Thread(
-            target=self._run_job_safe,
-            args=(job, account_dir),
-            kwargs={"voice_activity_key": voice_activity_key},
-            name=f"chat-export-{export_id}",
-            daemon=True,
-        )
         try:
-            t.start()
+            start_snapshot_thread(account_dir, self._run_job_safe, args=(job, account_dir),
+                                  kwargs={"voice_activity_key": voice_activity_key}, name=f"chat-export-{export_id}")
         except Exception:
             release_voice_model_activity(voice_activity_key)
             erase_export_content_key(job.content_key)
@@ -1885,13 +1527,12 @@ class ChatExportManager:
             release_voice_model_activity(voice_activity_key or "")
             erase_export_content_key(job.content_key)
             job.content_key = None
-            if report_outcome and outcome is not None:
-                record_product_event(outcome)
 
     def run_prepared_archive(
         self,
         *,
         account_dir: Path,
+        source: Literal["decrypted"],
         output_dir: Path,
         file_name: str,
         title: str,
@@ -1917,7 +1558,7 @@ class ChatExportManager:
             account=Path(account_dir).name,
             options={
                 "scope": "selected",
-                "source": "realtime",
+                "source": source,
                 "format": export_format,
                 "includeHidden": False,
                 "includeOfficial": False,
@@ -1939,7 +1580,9 @@ class ChatExportManager:
             },
             content_key=content_key,
         )
-        self._run_job_safe(job, Path(account_dir), report_outcome=False)
+        capture_snapshot_work(Path(account_dir)).run(
+            self._run_job_safe, job, Path(account_dir), report_outcome=False
+        )
         return job
 
     def _should_cancel(self, job: ExportJob) -> bool:
@@ -1982,49 +1625,10 @@ class ChatExportManager:
             if str(item.get("username") or "").strip()
         }
         has_prepared_conversations = bool(prepared_by_username)
-        source_requested = _normalize_chat_source(opts.get("source"), default="auto")
-        source_norm = (
-            "decrypted"
-            if source_requested == "auto" and account_prefers_decrypted_snapshot(account_dir)
-            else ("realtime" if source_requested in {"auto", "realtime"} else "decrypted")
-        )
-        rt_conn = None
-        if source_norm == "realtime" and not has_prepared_conversations:
-            try:
-                rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-                _safe_trace(
-                    trace,
-                    "realtime_connected",
-                    sourceRequested=source_requested,
-                    dbStorageDir=str(getattr(rt_conn, "db_storage_dir", "") or ""),
-                )
-            except WCDBRealtimeError as e:
-                raise RuntimeError(f"Realtime export requires WCDB/direct mode but connection failed: {e}") from e
-        self_username = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
+        source_requested = normalize_data_source(opts.get("source"), default="auto")
+        source_norm = source_requested
+        self_username = resolve_account_username(account_dir)
 
-        realtime_pause_reason = f"chat_export:{job.export_id}"
-        realtime_paused = False
-        if source_norm == "decrypted":
-            try:
-                pause_depth = CHAT_REALTIME_AUTOSYNC.pause_account(account_dir.name, reason=realtime_pause_reason)
-                realtime_paused = bool(pause_depth > 0)
-                _safe_trace(
-                    trace,
-                    "realtime_autosync_paused",
-                    account=account_dir.name,
-                    reason=realtime_pause_reason,
-                    depth=int(pause_depth),
-                )
-            except Exception:
-                logger.exception("failed to pause realtime autosync account=%s export_id=%s", account_dir.name, job.export_id)
-                _safe_trace(
-                    trace,
-                    "realtime_autosync_pause_failed",
-                    account=account_dir.name,
-                    reason=realtime_pause_reason,
-                )
-        else:
-            _safe_trace(trace, "realtime_autosync_pause_skipped", source=source_norm)
 
         scope: ExportScope = str(opts.get("scope") or "selected")  # type: ignore[assignment]
         export_format_raw = str(opts.get("format") or "json").strip() or "json"
@@ -2108,7 +1712,6 @@ class ChatExportManager:
                 include_hidden=include_hidden,
                 include_official=include_official,
                 source=source_norm,
-                rt_conn=rt_conn,
             )
         _safe_trace(
             trace,
@@ -2190,7 +1793,6 @@ class ChatExportManager:
                             include_hidden=True,
                             include_official=True,
                             source=source_norm,
-                            rt_conn=rt_conn,
                         )
                     for username in candidates:
                         key = incremental_conversation_key(
@@ -2252,10 +1854,10 @@ class ChatExportManager:
         tmp_zip = (exports_root / f".{base_name}.{job.export_id}.part").resolve()
         _safe_trace(trace, "zip_paths_prepared", finalZip=str(final_zip), tmpZip=str(tmp_zip))
 
-        contact_db_path = account_dir / "contact.db"
-        message_resource_db_path = account_dir / "message_resource.db"
-        media_db_path = account_dir / "media_0.db"
-        head_image_db_path = account_dir / "head_image.db"
+        contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+        message_resource_db_path = resolve_account_database_dir(account_dir) / "message_resource.db"
+        media_db_path = resolve_account_database_dir(account_dir) / "media_0.db"
+        head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
 
         phase_started = time.perf_counter()
         resource_conn: Optional[sqlite3.Connection] = None
@@ -2314,12 +1916,6 @@ class ChatExportManager:
                     media_username = str(message.get("_mediaUsername") or "").strip()
                     if media_username and media_username not in prepared_media_usernames:
                         prepared_media_usernames.append(media_username)
-        if source_norm == "realtime" and target_usernames and rt_conn is not None:
-            try:
-                with rt_conn.lock:
-                    wcdb_display_cache = _wcdb_get_display_names(rt_conn.handle, list(target_usernames))
-            except Exception:
-                wcdb_display_cache = {}
 
         def resolve_display_name(u: str) -> str:
             if not u:
@@ -2335,17 +1931,6 @@ class ChatExportManager:
             if row is not None:
                 contact_row_cache[u] = row
             name = _pick_display_name(row, u)
-            if name == u:
-                try:
-                    if rt_conn is not None:
-                        with rt_conn.lock:
-                            extra = _wcdb_get_display_names(rt_conn.handle, [u])
-                        wd2 = str(extra.get(u) or "").strip()
-                        if wd2 and wd2 != u:
-                            name = wd2
-                            wcdb_display_cache[u] = wd2
-                except Exception:
-                    pass
             contact_cache[u] = name
             return name
 
@@ -2450,6 +2035,10 @@ class ChatExportManager:
 
         encrypted_output_path: Optional[Path] = None
         try:
+            if allow_process_key_extract and include_media and "image" in media_kinds:
+                key_source = prepare_export_image_keys(account_dir, cancel_event=job.cancel_event)
+                _safe_trace(trace, "image_keys_ready", source=key_source)
+                _raise_if_job_cancelled(job, "image_keys_ready", trace)
             if tmp_zip.exists():
                 try:
                     tmp_zip.unlink()
@@ -2458,15 +2047,9 @@ class ChatExportManager:
 
             phase_started = time.perf_counter()
             _safe_trace(trace, "zip_open_start", tmpZip=str(tmp_zip))
-            native_integrity = (
-                _load_wce_integrity_native()
-                if folder_context is None or export_format == "html"
-                else None
-            )
             with zipfile.ZipFile(tmp_zip, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as raw_zf:
                 zf = _ZipIntegrityWriter(
                     raw_zf,
-                    native_integrity=None if folder_context is not None else native_integrity,
                 )
                 _safe_trace(trace, "zip_opened", durationMs=_elapsed_ms(phase_started))
                 # Keep the indexes keyed by conversation directory while the
@@ -2528,33 +2111,18 @@ class ChatExportManager:
                     phase_started = time.perf_counter()
                     _safe_trace(trace, "html_assets_start")
                     ui_public_dir = _resolve_ui_public_dir()
-                    if folder_context is not None:
-                        css_asset_path = "assets/chat-export.css"
-                        js_asset_path = "assets/chat-export.js"
-                        integrity_asset_path = ""
-                        manifest_asset_path = ""
-                        signature_asset_path = ""
-                    else:
-                        css_asset_path, js_asset_path, integrity_asset_path = _html_export_asset_paths(job.export_id)
-                        manifest_asset_path, signature_asset_path = _html_export_integrity_sidecar_paths(job.export_id)
+                    css_asset_path = "assets/chat-export.css"
+                    js_asset_path = "assets/chat-export.js"
                     css_payload = _minify_css_for_export(_load_ui_css_bundle(ui_public_dir=ui_public_dir, report=report))
                     js_payload = (
-                        _html_export_folder_runtime_js(native_integrity)
-                        if folder_context is not None
-                        else _html_export_runtime_js(native_integrity)
+                        (independent_html.runtime_js())
                     )
                     job.options["_htmlAssets"] = {
                         "cssPath": css_asset_path,
                         "jsPath": js_asset_path,
-                        "integrityPath": integrity_asset_path,
-                        "manifestPath": manifest_asset_path,
-                        "signaturePath": signature_asset_path,
-                        "cssIntegrity": _sri_sha384(css_payload),
-                        "jsIntegrity": _sri_sha384(js_payload),
                     }
-                    if folder_context is not None:
-                        job.options["_htmlAssets"]["folderMode"] = True
-                        job.options["_htmlAssets"]["sessionCatalogPath"] = "assets/chat-sessions.js"
+                    job.options["_htmlAssets"]["folderMode"] = True
+                    job.options["_htmlAssets"]["sessionCatalogPath"] = "assets/chat-sessions.js"
                     zf.writestr(css_asset_path, css_payload)
                     zf.writestr(js_asset_path, js_payload)
 
@@ -2635,30 +2203,14 @@ class ChatExportManager:
                                         except Exception:
                                             continue
                                 last_ts_by_username[username] = last_timestamp
-                        elif source_norm == "realtime" and rt_conn is not None:
-                            try:
-                                with rt_conn.lock:
-                                    raw_sessions_for_index = _wcdb_get_sessions(rt_conn.handle)
-                                for item in _normalize_realtime_session_rows(raw_sessions_for_index):
-                                    u = str(item.get("username") or "").strip()
-                                    if not u or u not in target_usernames:
-                                        continue
-                                    preview = re.sub(r"\s+", " ", str(item.get("summary") or "").strip()).strip()
-                                    if not preview:
-                                        preview = _infer_message_brief_by_local_type(int(item.get("last_msg_type") or 0))
-                                    preview_by_username[u] = preview
-                                    last_ts_by_username[u] = int(item.get("sort_timestamp") or 0)
-                            except Exception:
-                                preview_by_username = {}
-                                last_ts_by_username = {}
                         else:
                             try:
                                 preview_by_username = _load_latest_message_previews(account_dir, target_usernames)
                             except Exception:
                                 preview_by_username = {}
 
-                        session_db_path = Path(account_dir) / "session.db"
-                        if source_norm != "realtime" and session_db_path.exists():
+                        session_db_path = resolve_account_database_dir(account_dir) / "session.db"
+                        if (session_db_path.exists()):
                             sconn = sqlite3.connect(str(session_db_path))
                             sconn.row_factory = sqlite3.Row
                             try:
@@ -2748,11 +2300,10 @@ class ChatExportManager:
                         durationMs=_elapsed_ms(phase_started),
                         sessionItems=len(session_items),
                     )
-                    if folder_context is not None:
-                        zf.writestr(
-                            "assets/chat-sessions.js",
-                            _html_export_folder_sessions_js(session_items),
-                        )
+                    zf.writestr(
+                        "assets/chat-sessions.js",
+                        _html_export_folder_sessions_js(session_items),
+                    )
 
                 for idx, conv_username in enumerate(target_usernames, start=1):
                     _raise_if_job_cancelled(job, "conversation_loop_start", trace, index=idx)
@@ -2820,7 +2371,6 @@ class ChatExportManager:
                                 end_time=et,
                                 local_types=estimate_local_types,
                                 source=source_norm,
-                                rt_conn=rt_conn,
                             )
                         except Exception:
                             estimated_total = 0
@@ -2933,7 +2483,6 @@ class ChatExportManager:
                                     start_time=st,
                                     end_time=et,
                                     source=source_norm,
-                                    rt_conn=rt_conn,
                                     old_state=incremental_old,
                                     want_types=want_types,
                                     is_group=conv_is_group,
@@ -2957,7 +2506,6 @@ class ChatExportManager:
                                     start_time=st,
                                     end_time=et,
                                     source=source_norm,
-                                    rt_conn=rt_conn,
                                     old_state=incremental_old,
                                     want_types=want_types,
                                     is_group=conv_is_group,
@@ -3166,7 +2714,6 @@ class ChatExportManager:
                             want_types=want_types,
                             local_types=local_types,
                             source=source_norm,
-                            rt_conn=rt_conn,
                             resource_conn=resource_conn,
                             resource_chat_id=chat_id,
                             head_image_conn=head_image_conn,
@@ -3198,7 +2745,6 @@ class ChatExportManager:
                             want_types=want_types,
                             local_types=local_types,
                             source=source_norm,
-                            rt_conn=rt_conn,
                             resource_conn=resource_conn,
                             resource_chat_id=chat_id,
                             head_image_conn=head_image_conn,
@@ -3233,7 +2779,6 @@ class ChatExportManager:
                             want_types=want_types,
                             local_types=local_types,
                             source=source_norm,
-                            rt_conn=rt_conn,
                             resource_conn=resource_conn,
                             resource_chat_id=chat_id,
                             head_image_conn=head_image_conn,
@@ -3281,7 +2826,6 @@ class ChatExportManager:
                             want_types=want_types,
                             local_types=local_types,
                             source=source_norm,
-                            rt_conn=rt_conn,
                             resource_conn=resource_conn,
                             resource_chat_id=chat_id,
                             head_image_conn=head_image_conn,
@@ -3457,24 +3001,15 @@ class ChatExportManager:
                     parts.append('  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n')
                     parts.append(f"  <title>{esc_text(archive_title)}导出</title>\n")
                     html_assets = dict(job.options.get("_htmlAssets") or {})
-                    css_asset_path = str(html_assets.get("cssPath") or _html_export_asset_paths(job.export_id)[0])
-                    js_asset_path = str(html_assets.get("jsPath") or _html_export_asset_paths(job.export_id)[1])
+                    css_asset_path = str(html_assets.get("cssPath") or "assets/chat-export.css")
+                    js_asset_path = str(html_assets.get("jsPath") or "assets/chat-export.js")
                     session_catalog_path = str(html_assets.get("sessionCatalogPath") or "assets/chat-sessions.js")
-                    integrity_asset_path = str(html_assets.get("integrityPath") or _html_export_asset_paths(job.export_id)[2])
-                    css_integrity = str(html_assets.get("cssIntegrity") or "")
-                    js_integrity = str(html_assets.get("jsIntegrity") or "")
-                    if folder_context is not None:
-                        parts.append(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_asset_path)}" />\n')
-                        parts.append(
-                            f'  <script defer src="{esc_attr(session_catalog_path)}" data-wce-folder-sessions="1"></script>\n'
-                        )
-                        parts.append(f'  <script defer src="{esc_attr(js_asset_path)}"></script>\n')
-                    else:
-                        parts.append(_html_export_gate_style())
-                        # file:// 下由导出运行时核对 data-wce-sri，不能使用浏览器原生 SRI。
-                        parts.append(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_asset_path)}" data-wce-sri="{esc_attr(css_integrity)}" />\n')
-                        parts.append(_html_export_integrity_script_tag(src=integrity_asset_path))
-                        parts.append(f'  <script defer src="{esc_attr(js_asset_path)}" data-wce-sri="{esc_attr(js_integrity)}"></script>\n')
+                    parts.append(independent_html.HEAD)
+                    parts.append(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_asset_path)}" />\n')
+                    parts.append(
+                        f'  <script defer src="{esc_attr(session_catalog_path)}" data-wce-folder-sessions="1"></script>\n'
+                    )
+                    parts.append(f'  <script defer src="{esc_attr(js_asset_path)}"></script>\n')
                     parts.append("</head>\n")
                     parts.append("<body>\n")
                     parts.append(
@@ -3482,7 +3017,7 @@ class ChatExportManager:
                         + (
                             "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认导出目录中的运行时文件完整。</div>\n"
                             if folder_context is not None
-                            else "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认已完整解压导出目录，并检查 assets/_wce/ 下的运行时文件是否完整。</div>\n"
+                            else "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认已完整解压导出目录，并检查 assets/ 下的运行时文件是否完整。</div>\n"
                         )
                     )
                     parts.append('<div class="wce-index">\n')
@@ -3597,18 +3132,8 @@ class ChatExportManager:
                 }
                 zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
                 zf.writestr("report.json", json.dumps(report, ensure_ascii=False, indent=2))
-                if folder_context is not None:
-                    # 可持续目录由基线保存逐文件摘要；不可变 ZIP 的阻断式完整性链不适用于原地更新。
-                    pass
-                elif export_format == "html":
-                    try:
-                        html_assets = dict(job.options.get("_htmlAssets") or {})
-                        write_active_html_zip_integrity(zf, job.export_id, html_assets)
-                    except Exception as e:
-                        _safe_trace(trace, "html_integrity_bundle_failed", error=str(e))
-                        raise
-                else:
-                    write_zip_integrity_sidecars(zf, job.export_id)
+                if folder_context is None:
+                    write_zip_checksums(raw_zf, job.export_id, check_cancel=lambda: _raise_if_job_cancelled(job, "checksums"))
                 _safe_trace(
                     trace,
                     "manifest_written",
@@ -3676,6 +3201,9 @@ class ChatExportManager:
                 final_out = final_zip
             _safe_trace(trace, "zip_finalized", durationMs=_elapsed_ms(phase_started), finalZip=str(final_out))
 
+            voice_failed = int(report.get("voiceTranscription", {}).get("failed", 0))
+            if voice_failed:
+                job.warning = f"{job.warning} {voice_failed} 条语音转写失败，具体原因已写入对应消息。".strip()
             with self._lock:
                 job.status = "done"
                 job.zip_path = final_out if folder_context is None else None
@@ -3690,7 +3218,7 @@ class ChatExportManager:
                 mediaCopied=job.progress.media_copied,
                 mediaMissing=job.progress.media_missing,
             )
-        except _JobCancelled:
+        except (_JobCancelled, ImageKeyScanCancelled):
             try:
                 if tmp_zip.exists():
                     tmp_zip.unlink()
@@ -3710,8 +3238,8 @@ class ChatExportManager:
                 mediaMissing=job.progress.media_missing,
             )
         except Exception:
+            tmp_zip.unlink(missing_ok=True)
             if job.content_key is not None or folder_context is not None:
-                tmp_zip.unlink(missing_ok=True)
                 if encrypted_output_path is not None:
                     encrypted_output_path.unlink(missing_ok=True)
                 if job.staging_dir is not None and job.staging_dir.exists():
@@ -3722,24 +3250,6 @@ class ChatExportManager:
                     job.staged_files = {}
             raise
         finally:
-            if realtime_paused:
-                try:
-                    resume_depth = CHAT_REALTIME_AUTOSYNC.resume_account(account_dir.name, reason=realtime_pause_reason)
-                    _safe_trace(
-                        trace,
-                        "realtime_autosync_resumed",
-                        account=account_dir.name,
-                        reason=realtime_pause_reason,
-                        depth=int(resume_depth),
-                    )
-                except Exception:
-                    logger.exception("failed to resume realtime autosync account=%s export_id=%s", account_dir.name, job.export_id)
-                    _safe_trace(
-                        trace,
-                        "realtime_autosync_resume_failed",
-                        account=account_dir.name,
-                        reason=realtime_pause_reason,
-                    )
             try:
                 if resource_conn is not None:
                     resource_conn.close()
@@ -3760,47 +3270,15 @@ def _resolve_export_targets(
     include_hidden: bool,
     include_official: bool,
     source: str = "decrypted",
-    rt_conn: Any | None = None,
 ) -> list[str]:
     if scope == "selected":
         uniq = list(dict.fromkeys([str(u or "").strip() for u in usernames if str(u or "").strip()]))
         return uniq
 
-    if source == "realtime":
-        if rt_conn is None:
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-        self_aliases = {account_dir.name, _wcdb_resolve_account_native_wxid(account_dir, rt_conn)}
-        with rt_conn.lock:
-            raw_sessions = _wcdb_get_sessions(rt_conn.handle)
-        rows = _normalize_realtime_session_rows(raw_sessions)
-
-        def should_include_rt(item: dict[str, Any]) -> bool:
-            u = str(item.get("username") or "").strip()
-            if not u or u in self_aliases:
-                return False
-            if not include_hidden and int(item.get("is_hidden") or 0) == 1:
-                return False
-            if not _should_keep_session(u, include_official=include_official):
-                return False
-            if scope == "groups" and (not u.endswith("@chatroom")):
-                return False
-            if scope == "singles" and u.endswith("@chatroom"):
-                return False
-            return True
-
-        out: list[str] = []
-        seen: set[str] = set()
-        for item in rows:
-            u = str(item.get("username") or "").strip()
-            if u in seen or (not should_include_rt(item)):
-                continue
-            seen.add(u)
-            out.append(u)
-        return out
 
     session_rows, session_hidden_by_username = _load_export_session_targets(account_dir)
     contact_usernames = _load_export_contact_usernames(account_dir)
-    self_aliases = {account_dir.name, _wcdb_resolve_account_native_wxid(account_dir)}
+    self_aliases = {account_dir.name, resolve_account_username(account_dir)}
     discovered_message_targets = _load_message_backed_export_targets(
         account_dir=account_dir,
         seed_usernames=contact_usernames,
@@ -3854,33 +3332,8 @@ def _to_int(value: Any) -> int:
         return 0
 
 
-def _normalize_realtime_session_rows(raw_sessions: Any) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for item in raw_sessions or []:
-        if not isinstance(item, dict):
-            continue
-        username = str(_pick_case_insensitive_value(item, "username", "user_name", "UserName") or "").strip()
-        if not username:
-            continue
-        out.append(
-            {
-                "username": username,
-                "is_hidden": _to_int(_pick_case_insensitive_value(item, "is_hidden", "isHidden")),
-                "sort_timestamp": _to_int(
-                    _pick_case_insensitive_value(item, "sort_timestamp", "sortTimestamp", "last_timestamp", "lastTimestamp")
-                ),
-                "summary": str(_pick_case_insensitive_value(item, "summary", "Summary") or ""),
-                "draft": str(_pick_case_insensitive_value(item, "draft", "Draft") or ""),
-                "last_msg_type": _to_int(_pick_case_insensitive_value(item, "last_msg_type", "lastMsgType")),
-                "last_msg_sub_type": _to_int(_pick_case_insensitive_value(item, "last_msg_sub_type", "lastMsgSubType")),
-            }
-        )
-    out.sort(key=lambda r: int(r.get("sort_timestamp") or 0), reverse=True)
-    return out
-
-
 def _load_export_session_targets(account_dir: Path) -> tuple[list[tuple[str, int]], dict[str, int]]:
-    session_db_path = account_dir / "session.db"
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
     if not session_db_path.exists():
         return [], {}
 
@@ -3936,10 +3389,7 @@ def _load_export_session_targets(account_dir: Path) -> tuple[list[tuple[str, int
 
 
 def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
-    try:
-        rows = conn.execute(f"PRAGMA table_info({_quote_ident(table_name)})").fetchall()
-    except Exception:
-        return set()
+    rows = conn.execute(f"PRAGMA table_info({_quote_ident(table_name)})").fetchall()
 
     columns: set[str] = set()
     for row in rows:
@@ -3953,7 +3403,7 @@ def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]
 
 
 def _load_export_contact_usernames(account_dir: Path) -> set[str]:
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     if not contact_db_path.exists():
         return set()
 
@@ -3965,10 +3415,7 @@ def _load_export_contact_usernames(account_dir: Path) -> set[str]:
             columns = _sqlite_table_columns(conn, table)
             if "username" not in columns:
                 continue
-            try:
-                rows = conn.execute(f"SELECT username FROM {_quote_ident(table)}").fetchall()
-            except Exception:
-                continue
+            rows = conn.execute(f"SELECT username FROM {_quote_ident(table)}").fetchall()
             for row in rows:
                 try:
                     username = str(row["username"] or "").strip()
@@ -3988,10 +3435,7 @@ def _load_name2id_usernames(conn: sqlite3.Connection) -> set[str]:
         return set()
 
     out: set[str] = set()
-    try:
-        rows = conn.execute(f"SELECT {_quote_ident(username_col)} AS username FROM Name2Id").fetchall()
-    except Exception:
-        return out
+    rows = conn.execute(f"SELECT {_quote_ident(username_col)} AS username FROM Name2Id").fetchall()
     for row in rows:
         try:
             username = str(row["username"] if isinstance(row, sqlite3.Row) else row[0] or "").strip()
@@ -4004,25 +3448,19 @@ def _load_name2id_usernames(conn: sqlite3.Connection) -> set[str]:
 
 def _message_table_latest_timestamp(conn: sqlite3.Connection, table_name: str) -> Optional[int]:
     quoted = _quote_ident(table_name)
-    try:
-        row = conn.execute(f"SELECT MAX(create_time) FROM {quoted}").fetchone()
-        if row is not None and row[0] is not None:
-            return int(row[0] or 0)
-    except Exception:
-        pass
+    row = conn.execute(f"SELECT MAX(create_time) FROM {quoted}").fetchone()
+    if row is not None and row[0] is not None:
+        return int(row[0] or 0)
 
-    try:
-        row = conn.execute(f"SELECT 1 FROM {quoted} LIMIT 1").fetchone()
-        if row is not None:
-            return 0
-    except Exception:
-        pass
+    row = conn.execute(f"SELECT 1 FROM {quoted} LIMIT 1").fetchone()
+    if row is not None:
+        return 0
     return None
 
 
 def _load_message_backed_export_targets(*, account_dir: Path, seed_usernames: set[str]) -> dict[str, int]:
     out: dict[str, int] = {}
-    self_aliases = {account_dir.name, _wcdb_resolve_account_native_wxid(account_dir)}
+    self_aliases = {account_dir.name, resolve_account_username(account_dir)}
     for db_path in _iter_message_db_paths(account_dir):
         conn: Optional[sqlite3.Connection] = None
         try:
@@ -4049,8 +3487,6 @@ def _load_message_backed_export_targets(*, account_dir: Path, seed_usernames: se
                 previous_ts = out.get(u)
                 if previous_ts is None or int(latest_ts or 0) > int(previous_ts or 0):
                     out[u] = int(latest_ts or 0)
-        except Exception:
-            continue
         finally:
             if conn is not None:
                 try:
@@ -4064,33 +3500,12 @@ def build_chat_export_targets_preview(
     *,
     account_dir: Path,
     source: str = "auto",
-    rt_conn: Any | None = None,
     include_hidden: bool = True,
     include_official: bool = False,
     base_url: str = "",
 ) -> dict[str, Any]:
-    source_requested = _normalize_chat_source(source, default="auto")
+    source_requested = normalize_data_source(source, default="auto")
     source_norm = source_requested
-    fallback_reason = ""
-    retry_after_seconds = 0
-    if source_requested == "auto" and account_prefers_decrypted_snapshot(account_dir):
-        source_norm = "decrypted"
-    elif source_requested in {"auto", "realtime"}:
-        source_norm = "realtime"
-        if rt_conn is None:
-            try:
-                rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            except WCDBRealtimeError as e:
-                if not _has_decrypted_export_dbs(account_dir):
-                    raise ValueError(f"Realtime export targets require WCDB/direct mode but connection failed: {e}") from e
-                source_norm = "decrypted"
-                fallback_reason = str(e)
-                try:
-                    failure = WCDB_REALTIME.get_recent_failure(account_dir.name)
-                    retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-                except Exception:
-                    retry_after_seconds = 0
-                rt_conn = None
 
     targets = _resolve_export_targets(
         account_dir=account_dir,
@@ -4099,29 +3514,12 @@ def build_chat_export_targets_preview(
         include_hidden=bool(include_hidden),
         include_official=bool(include_official),
         source=source_norm,
-        rt_conn=rt_conn,
     )
     session_hidden_by_username: dict[str, int] = {}
-    if source_norm == "realtime" and rt_conn is not None:
-        with rt_conn.lock:
-            session_raw = _wcdb_get_sessions(rt_conn.handle)
-        session_rows_norm = _normalize_realtime_session_rows(session_raw)
-        session_usernames = {str(r.get("username") or "").strip() for r in session_rows_norm if str(r.get("username") or "").strip()}
-        session_hidden_by_username = {
-            str(r.get("username") or "").strip(): int(r.get("is_hidden") or 0)
-            for r in session_rows_norm
-            if str(r.get("username") or "").strip()
-        }
-        try:
-            with rt_conn.lock:
-                wcdb_names = _wcdb_get_display_names(rt_conn.handle, targets)
-        except Exception:
-            wcdb_names = {}
-    else:
-        session_rows, session_hidden_by_username = _load_export_session_targets(account_dir)
-        session_usernames = {u for u, _sort_ts in session_rows}
-        wcdb_names = {}
-    contact_rows = _load_contact_rows(account_dir / "contact.db", targets)
+    session_rows, session_hidden_by_username = _load_export_session_targets(account_dir)
+    session_usernames = {u for u, _sort_ts in session_rows}
+    wcdb_names = {}
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", targets)
     base = str(base_url or "").rstrip("/")
 
     conversations: list[dict[str, Any]] = []
@@ -4148,12 +3546,7 @@ def build_chat_export_targets_preview(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **build_source_fallback_meta(
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=fallback_reason,
-            retry_after_seconds=retry_after_seconds,
-        ),
+
         "includeHidden": bool(include_hidden),
         "includeOfficial": bool(include_official),
         "targets": conversations,
@@ -4174,7 +3567,7 @@ def get_chat_export_targets_preview(
     base_url: str = "",
 ) -> dict[str, Any]:
     account_dir = _resolve_account_dir(account)
-    source_norm = _normalize_chat_source(source, default="auto")
+    source_norm = normalize_data_source(source, default="auto")
     return build_chat_export_targets_preview(
         account_dir=account_dir,
         source=source_norm,
@@ -4201,141 +3594,6 @@ def _conversation_dir_name(
     return f"{idx:04d}_{base}_{user_part}_{h}"
 
 
-def _normalize_realtime_message_item_for_export(
-    item: dict[str, Any],
-    *,
-    account_dir: Path,
-    conv_username: str,
-    self_username: str = "",
-) -> _Row:
-    resolved_self_username = str(
-        self_username
-        or _wcdb_resolve_account_native_wxid(account_dir)
-        or resolve_account_self_username(account_dir)
-        or account_dir.name
-        or ""
-    ).strip()
-    self_aliases = {
-        value.lower()
-        for value in (
-            account_dir.name,
-            resolve_account_self_username(account_dir),
-            resolved_self_username,
-        )
-        if value
-    }
-    message_content = _pick_case_insensitive_value(item, "message_content", "messageContent", "MessageContent")
-    compress_content = _pick_case_insensitive_value(item, "compress_content", "compressContent", "CompressContent")
-    raw_text = _decode_message_content(compress_content, message_content).strip()
-    sender_username = str(
-        _pick_case_insensitive_value(item, "sender_username", "senderUsername", "sender", "SenderUsername") or ""
-    ).strip()
-
-    is_sent = False
-    sent_value = _pick_case_insensitive_value(item, "computed_is_send", "computed_isSend", "computed_is_sent", "is_send", "isSent")
-    if sent_value is not None:
-        try:
-            is_sent = bool(int(sent_value))
-        except Exception:
-            is_sent = bool(sent_value)
-    if not is_sent:
-        try:
-            if sender_username and sender_username.lower() in self_aliases:
-                is_sent = True
-        except Exception:
-            pass
-
-    is_group = bool(str(conv_username or "").endswith("@chatroom"))
-    if is_sent:
-        sender_username = resolved_self_username
-    elif (not is_group) and (not sender_username):
-        sender_username = conv_username
-
-    table_name = str(_pick_case_insensitive_value(item, "table_name", "tableName") or "").strip()
-    if not table_name:
-        table_name = f"msg_{hashlib.md5(str(conv_username or '').strip().encode('utf-8')).hexdigest()}"
-    db_path = str(_pick_case_insensitive_value(item, "_db_path", "db_path", "dbPath") or "").strip()
-    db_stem = Path(db_path).stem if db_path else f"realtime_{account_dir.name}"
-    return _Row(
-        db_stem=db_stem,
-        table_name=table_name,
-        local_id=_to_int(_pick_case_insensitive_value(item, "local_id", "localId")),
-        server_id=_to_int(_pick_case_insensitive_value(item, "server_id", "serverId", "MsgSvrID")),
-        local_type=_to_int(_pick_case_insensitive_value(item, "local_type", "localType", "Type", "type")),
-        sort_seq=_to_int(_pick_case_insensitive_value(item, "sort_seq", "sortSeq", "SortSeq")),
-        create_time=_to_int(_pick_case_insensitive_value(item, "create_time", "createTime", "CreateTime")),
-        raw_text=raw_text,
-        sender_username=sender_username,
-        is_sent=bool(is_sent),
-        packed_info_data=_pick_case_insensitive_value(item, "packed_info_data", "packedInfoData", "PackedInfoData"),
-        msg_source=_pick_case_insensitive_value(item, "msg_source", "source", "msgSource"),
-    )
-
-
-def _iter_realtime_rows_for_conversation(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    conv_username: str,
-    start_time: Optional[int],
-    end_time: Optional[int],
-    local_types: Optional[set[int]] = None,
-    checkpoint: Optional[Callable[[], None]] = None,
-    descending: bool = False,
-) -> Iterable[_Row]:
-    db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-    logger.info(
-        "[chat-export] realtime message stream started account=%s conversation=%s page_size=%s",
-        account_dir.name,
-        conv_username,
-        1000,
-    )
-    source_rows = iter_realtime_message_rows(
-        rt_conn=rt_conn,
-        account_dir=account_dir,
-        username=conv_username,
-        db_storage_dir=db_storage_dir,
-        exec_query=_wcdb_exec_query,
-        open_cursor=_wcdb_open_message_cursor,
-        fetch_batch=_wcdb_fetch_message_batch,
-        close_cursor=_wcdb_close_message_cursor,
-        get_messages=_wcdb_get_messages,
-        normalize_item=lambda item: dict(item),
-        start_time=start_time,
-        end_time=end_time,
-        local_types=local_types,
-        page_size=1000,
-        checkpoint=checkpoint,
-        descending=descending,
-    )
-    yielded = 0
-    self_username = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
-    try:
-        for item in source_rows:
-            if not isinstance(item, dict):
-                continue
-            row = _normalize_realtime_message_item_for_export(
-                item,
-                account_dir=account_dir,
-                conv_username=conv_username,
-                self_username=self_username,
-            )
-            if row.local_id <= 0:
-                continue
-            yielded += 1
-            yield row
-    finally:
-        # 消费者暂停或提前结束时，立即释放底层原生消息游标。
-        if hasattr(source_rows, 'close'):
-            source_rows.close()
-    logger.info(
-        "[chat-export] realtime message stream completed account=%s conversation=%s rows=%s",
-        account_dir.name,
-        conv_username,
-        yielded,
-    )
-
-
 def _estimate_conversation_message_count(
     *,
     account_dir: Path,
@@ -4344,37 +3602,7 @@ def _estimate_conversation_message_count(
     end_time: Optional[int],
     local_types: Optional[set[int]] = None,
     source: str = "decrypted",
-    rt_conn: Any | None = None,
 ) -> int:
-    if source == "realtime":
-        if rt_conn is None:
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-        direct_count = count_realtime_message_rows_via_exec(
-            rt_conn=rt_conn,
-            account_dir=account_dir,
-            username=conv_username,
-            db_storage_dir=_resolve_account_db_storage_dir(account_dir),
-            exec_query=_wcdb_exec_query,
-            start_time=start_time,
-            end_time=end_time,
-            local_types=local_types,
-        )
-        if direct_count is not None:
-            return int(direct_count)
-        if start_time is None and end_time is None and not local_types:
-            with rt_conn.lock:
-                return int(_wcdb_get_message_count(rt_conn.handle, conv_username) or 0)
-        return sum(
-            1
-            for _ in _iter_realtime_rows_for_conversation(
-                rt_conn=rt_conn,
-                account_dir=account_dir,
-                conv_username=conv_username,
-                start_time=start_time,
-                end_time=end_time,
-                local_types=local_types,
-            )
-        )
 
     total = 0
     for db_path in _iter_message_db_paths(account_dir):
@@ -4461,8 +3689,8 @@ def _merge_anti_revoke_into_row_stream(
         rsid = int(rsid_str) if rsid_str.isdigit() else 0
         deleted_rows.append(
             _Row(
-                db_stem="anti_revoke",
-                table_name="revoked_messages",
+                db_stem=str(rev_row.get("source_db") or "anti_revoke"),
+                table_name=str(rev_row.get("source_table") or "revoked_messages"),
                 local_id=rlid,
                 server_id=rsid,
                 local_type=lt,
@@ -4489,7 +3717,8 @@ def _merge_anti_revoke_into_row_stream(
                 if sid and sid != "0":
                     match = revoked_map.get(f"server:{sid}")
                 elif lid > 0:
-                    match = revoked_map.get(f"local:{lid}")
+                    local_identity = f"{r.db_stem}:{r.table_name}:{lid}" if r.db_stem or r.table_name else str(lid)
+                    match = revoked_map.get(f"local:{local_identity}")
                     if match is not None and str(match.get("server_id") or "0") != "0":
                         match = None
                 if match is not None:
@@ -4500,7 +3729,7 @@ def _merge_anti_revoke_into_row_stream(
             yield r
 
     seen_non_sys_servers: set[str] = set()
-    seen_non_sys_locals: set[int] = set()
+    seen_non_sys_locals: set[tuple[str, str, int]] = set()
     tagged = tagged_stream()
     try:
         for r in heapq.merge(tagged, deleted_rows, key=sort_key, reverse=descending):
@@ -4513,9 +3742,10 @@ def _merge_anti_revoke_into_row_stream(
                         continue
                     seen_non_sys_servers.add(sid)
                 elif lid > 0:
-                    if lid in seen_non_sys_locals:
+                    local_identity = (r.db_stem, r.table_name, lid)
+                    if local_identity in seen_non_sys_locals:
                         continue
-                    seen_non_sys_locals.add(lid)
+                    seen_non_sys_locals.add(local_identity)
             yield r
     finally:
         tagged.close()
@@ -4531,36 +3761,16 @@ def _iter_rows_for_conversation(
     end_time: Optional[int],
     local_types: Optional[set[int]] = None,
     source: str = "decrypted",
-    rt_conn: Any | None = None,
     checkpoint: Optional[Callable[[], None]] = None,
     descending: bool = False,
+    include_archive: bool = True,
+    db_paths: Optional[list[Path]] = None,
 ) -> Iterable[_Row]:
-    if source == "realtime":
-        if rt_conn is None:
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-        base_stream = _iter_realtime_rows_for_conversation(
-            rt_conn=rt_conn,
-            account_dir=account_dir,
-            conv_username=conv_username,
-            start_time=start_time,
-            end_time=end_time,
-            local_types=local_types,
-            checkpoint=checkpoint,
-            descending=descending,
-        )
-        return _merge_anti_revoke_into_row_stream(
-            base_stream,
-            account_dir=account_dir,
-            conv_username=conv_username,
-            start_time=start_time,
-            end_time=end_time,
-            local_types=local_types,
-            descending=descending,
-        )
 
-    db_paths = _iter_message_db_paths(account_dir)
+    if db_paths is None:
+        db_paths = _iter_message_db_paths(account_dir)
     if not db_paths:
-        return []
+        raise FileNotFoundError(f"No decrypted message databases found for account {account_dir.name}.")
 
     account_wxid = resolve_account_self_username(account_dir)
     direction = 'DESC' if descending else 'ASC'
@@ -4573,6 +3783,9 @@ def _iter_rows_for_conversation(
             if not table_name:
                 return
 
+            has_sender_names = "user_name" in _sqlite_table_columns(conn, "Name2Id")
+            if (not has_sender_names):
+                raise sqlite3.DatabaseError(f"Missing Name2Id.user_name sender mapping in {db_path}")
             # Force sqlite3 to return TEXT as raw bytes for this query, so we can zstd-decompress
             # compress_content reliably (and avoid losing binary payloads).
             conn.text_factory = bytes
@@ -4582,7 +3795,7 @@ def _iter_rows_for_conversation(
                 account_dir,
             )
             if my_rowid is None:
-                native_self_username = _wcdb_resolve_account_native_wxid(account_dir)
+                native_self_username = resolve_account_username(account_dir)
                 if native_self_username:
                     native_rowid, native_match = resolve_account_self_rowid(
                         conn,
@@ -4596,15 +3809,10 @@ def _iter_rows_for_conversation(
             quoted = _quote_ident(table_name)
             has_packed_info_data = False
             source_column = None
-            try:
-                cols = conn.execute(f"PRAGMA table_info({quoted})").fetchall()
-                column_names = {_decode_sqlite_text(c[1]).strip().lower() for c in cols}
-                source_column = next((c for c in ('source', 'msg_source') if c in column_names), None)
-                has_packed_info_data = any(
-                    _decode_sqlite_text(c[1]).strip().lower() == "packed_info_data" for c in cols
-                )
-            except Exception:
-                has_packed_info_data = False
+            cols = conn.execute(f"PRAGMA table_info({quoted})").fetchall()
+            column_names = {_decode_sqlite_text(c[1]).strip().lower() for c in cols}
+            source_column = next((c for c in ('source', 'msg_source') if c in column_names), None)
+            has_packed_info_data = "packed_info_data" in column_names
 
             where = []
             params: list[Any] = []
@@ -4649,10 +3857,7 @@ def _iter_rows_for_conversation(
                 f"ORDER BY m.create_time {direction}, m.sort_seq {direction}, m.local_id {direction} "
             )
 
-            try:
-                cur = conn.execute(sql_with_join, params)
-            except Exception:
-                cur = conn.execute(sql_no_join, params)
+            cur = conn.execute(sql_with_join if has_sender_names else sql_no_join, params)
 
             batch = 400
             while True:
@@ -4666,15 +3871,25 @@ def _iter_rows_for_conversation(
                     sort_seq = int(r["sort_seq"] or 0) if r["sort_seq"] is not None else 0
                     create_time = int(r["create_time"] or 0)
                     sender_username = _decode_sqlite_text(r["sender_username"]).strip()
+                    raw_text = _decode_message_content(r["compress_content"], r["message_content"]).strip()
+                    # Native pat/video records may store their actor in XML rather than Name2Id.
+                    sender_from_xml = local_type in (266287972401, 43) and not sender_username
+                    if sender_from_xml:
+                        sender_username = _extract_sender_from_group_xml(raw_text, local_type=local_type)
+
+                    if (local_type != 10000) and (not sender_username):
+                        raise sqlite3.DatabaseError(
+                            f"Missing Name2Id sender mapping for message {local_id} in {db_path}"
+                        )
 
                     is_sent = False
-                    if my_rowid is not None:
+                    if sender_from_xml or local_type == 266287972401:
+                        is_sent = sender_username == resolved_account_wxid
+                    elif my_rowid is not None:
                         try:
                             is_sent = int(r["real_sender_id"] or 0) == int(my_rowid)
                         except Exception:
                             is_sent = False
-
-                    raw_text = _decode_message_content(r["compress_content"], r["message_content"]).strip()
 
                     is_group = bool(conv_username.endswith("@chatroom"))
 
@@ -4715,6 +3930,9 @@ def _iter_rows_for_conversation(
             # heapq.merge 不负责关闭输入流；需主动释放各分库的 SQLite 连接。
             for stream in streams:
                 stream.close()
+
+    if not include_archive:
+        return merged_rows()
 
     return _merge_anti_revoke_into_row_stream(
         merged_rows(),
@@ -4775,7 +3993,6 @@ def _probe_incremental_append(
     start_time: Optional[int],
     end_time: Optional[int],
     source: str,
-    rt_conn: Any | None,
     old_state: dict[str, Any],
     want_types: Optional[set[str]] = None,
     is_group: bool = False,
@@ -4800,7 +4017,6 @@ def _probe_incremental_append(
         end_time=end_time,
         local_types=None,
         source=source,
-        rt_conn=rt_conn,
         checkpoint=checkpoint,
     )
     for row in rows:
@@ -4849,7 +4065,6 @@ def _probe_incremental_conversation(
     start_time: Optional[int],
     end_time: Optional[int],
     source: str,
-    rt_conn: Any | None,
     old_state: dict[str, Any],
     want_types: Optional[set[str]] = None,
     is_group: bool = False,
@@ -4874,7 +4089,6 @@ def _probe_incremental_conversation(
         end_time=end_time,
         local_types=None,
         source=source,
-        rt_conn=rt_conn,
         checkpoint=checkpoint,
     )
     for row in rows:
@@ -4940,6 +4154,7 @@ def _parse_message_for_export(
 ) -> dict[str, Any]:
     raw_text = row.raw_text or ""
     sender_username = str(row.sender_username or "").strip()
+    local_type = int(row.local_type or 0)
 
     if is_group and raw_text and (not raw_text.startswith("<")) and (not raw_text.startswith('"<')):
         sender_prefix, raw_text = _split_group_sender_prefix(raw_text, sender_username, sender_alias)
@@ -4947,11 +4162,10 @@ def _parse_message_for_export(
             sender_username = sender_prefix
 
     if is_group and raw_text and (raw_text.startswith("<") or raw_text.startswith('"<')):
-        xml_sender = _extract_sender_from_group_xml(raw_text)
+        xml_sender = _extract_sender_from_group_xml(raw_text, local_type=local_type)
         if xml_sender:
             sender_username = xml_sender
 
-    local_type = int(row.local_type or 0)
     native_voice_transcript = (
         _extract_voice_transcript_from_packed_info(row.packed_info_data)
         if local_type == 34
@@ -5146,11 +4360,6 @@ def _parse_message_for_export(
 
         def add_url_or_id(v: Any) -> None:
             s = str(v or "").strip()
-            if s:
-                try:
-                    s = html.unescape(s).strip()
-                except Exception:
-                    pass
             if s and s not in url_or_id_candidates:
                 url_or_id_candidates.append(s)
 
@@ -5458,7 +4667,6 @@ def _write_conversation_json(
     want_types: Optional[set[str]],
     local_types: Optional[set[int]],
     source: str = "decrypted",
-    rt_conn: Any | None = None,
     resource_conn: Optional[sqlite3.Connection],
     resource_chat_id: Optional[int],
     head_image_conn: Optional[sqlite3.Connection],
@@ -5503,7 +4711,7 @@ def _write_conversation_json(
     phase_started = time.perf_counter()
     if conv_is_group:
         try:
-            contact_db_path = account_dir / "contact.db"
+            contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
             if contact_db_path.exists():
                 contact_conn = sqlite3.connect(str(contact_db_path))
         except Exception:
@@ -5542,7 +4750,9 @@ def _write_conversation_json(
     # zipfile forbids interleaving writes; stream to a temp file then add it to zip at the end.
     with tempfile.TemporaryDirectory(prefix="wechat_chat_export_") as tmp_dir:
         tmp_path = Path(tmp_dir) / "messages.json"
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as tw:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as tw, ExitStack() as writer_handles:
+            if contact_conn is not None:
+                writer_handles.callback(contact_conn.close)
             tw.write("{\n")
             tw.write("  \"schemaVersion\": 1,\n")
             tw.write(f"  \"exportedAt\": {json.dumps(_now_iso(), ensure_ascii=False)},\n")
@@ -5584,14 +4794,15 @@ def _write_conversation_json(
                 end_time=end_time,
                 local_types=local_types,
                 source=source,
-                rt_conn=rt_conn,
                 checkpoint=lambda: _raise_if_job_cancelled(
                     job,
-                    "json.realtime_fetch",
+                    "json.snapshot_fetch",
                     trace,
                     conversation=conv_username,
                 ),
             )
+            if prepared_messages is None:
+                writer_handles.callback(source_messages.close)
             for source_message in source_messages:
                 scanned += 1
                 _raise_if_job_cancelled(
@@ -5691,6 +4902,7 @@ def _write_conversation_json(
                         allow_process_key_extract=allow_process_key_extract,
                         media_db_path=media_db_path,
                         media_index=media_index,
+                        resource_conn=resource_conn,
                         lock=lock,
                         job=job,
                     )
@@ -5783,6 +4995,8 @@ def _write_conversation_excel(**kwargs: Any) -> int:
             if str(message.get("renderType") or "") == "voice" and message.get("voiceTranscriptStatus") == "success":
                 transcript = str(message.get("voiceTranscript") or "").strip() or "[未识别到文字]"
                 content = f"{message.get('content') or '[语音]'} 转写：{transcript}"
+            elif str(message.get("renderType") or "") == "voice" and message.get("voiceTranscriptStatus") == "error":
+                content = f"{message.get('content') or '[语音]'} 转写失败：{message['voiceTranscriptError']}"
             else:
                 content = str(
                     message.get("content")
@@ -5852,7 +5066,6 @@ def _write_conversation_txt(
     want_types: Optional[set[str]],
     local_types: Optional[set[int]],
     source: str = "decrypted",
-    rt_conn: Any | None = None,
     resource_conn: Optional[sqlite3.Connection],
     resource_chat_id: Optional[int],
     head_image_conn: Optional[sqlite3.Connection],
@@ -5895,7 +5108,7 @@ def _write_conversation_txt(
     phase_started = time.perf_counter()
     if conv_is_group:
         try:
-            contact_db_path = account_dir / "contact.db"
+            contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
             if contact_db_path.exists():
                 contact_conn = sqlite3.connect(str(contact_db_path))
         except Exception:
@@ -5933,7 +5146,9 @@ def _write_conversation_txt(
     # Same as JSON: write to temp file first to avoid zip interleaving writes.
     with tempfile.TemporaryDirectory(prefix="wechat_chat_export_") as tmp_dir:
         tmp_path = Path(tmp_dir) / "messages.txt"
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as tw:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as tw, ExitStack() as writer_handles:
+            if contact_conn is not None:
+                writer_handles.callback(contact_conn.close)
             if privacy_mode:
                 tw.write("会话: 已隐藏\n")
                 tw.write("账号: hidden\n")
@@ -5961,14 +5176,15 @@ def _write_conversation_txt(
                 end_time=end_time,
                 local_types=local_types,
                 source=source,
-                rt_conn=rt_conn,
                 checkpoint=lambda: _raise_if_job_cancelled(
                     job,
-                    "txt.realtime_fetch",
+                    "txt.snapshot_fetch",
                     trace,
                     conversation=conv_username,
                 ),
             )
+            if prepared_messages is None:
+                writer_handles.callback(source_messages.close)
             for source_message in source_messages:
                 scanned += 1
                 _raise_if_job_cancelled(
@@ -6067,6 +5283,7 @@ def _write_conversation_txt(
                         allow_process_key_extract=allow_process_key_extract,
                         media_db_path=media_db_path,
                         media_index=media_index,
+                        resource_conn=resource_conn,
                         lock=lock,
                         job=job,
                     )
@@ -6218,7 +5435,6 @@ def _write_conversation_html(
     want_types: Optional[set[str]],
     local_types: Optional[set[int]],
     source: str = "decrypted",
-    rt_conn: Any | None = None,
     resource_conn: Optional[sqlite3.Connection],
     resource_chat_id: Optional[int],
     head_image_conn: Optional[sqlite3.Connection],
@@ -6261,15 +5477,11 @@ def _write_conversation_html(
 
     rel_root = "../../"
     html_assets = dict(getattr(job, "options", {}).get("_htmlAssets") or {})
-    css_asset_path = str(html_assets.get("cssPath") or _html_export_asset_paths(job.export_id)[0])
-    js_asset_path = str(html_assets.get("jsPath") or _html_export_asset_paths(job.export_id)[1])
+    css_asset_path = str(html_assets.get("cssPath") or "assets/chat-export.css")
+    js_asset_path = str(html_assets.get("jsPath") or "assets/chat-export.js")
     session_catalog_path = str(html_assets.get("sessionCatalogPath") or "assets/chat-sessions.js")
-    integrity_asset_path = str(html_assets.get("integrityPath") or _html_export_asset_paths(job.export_id)[2])
-    css_integrity = str(html_assets.get("cssIntegrity") or "")
-    js_integrity = str(html_assets.get("jsIntegrity") or "")
     folder_mode = bool(html_assets.get("folderMode"))
     css_href = rel_root + css_asset_path
-    integrity_src = rel_root + integrity_asset_path
     js_src = rel_root + js_asset_path
     session_catalog_src = rel_root + session_catalog_path
 
@@ -6327,10 +5539,8 @@ def _write_conversation_html(
             zf=zf,
             url=u,
             remote_written=remote_written,
-            report=report,
+            job=job,
         )
-        if not arc:
-            return ""
         local = rel_path(arc)
         try:
             page_media_index.setdefault("remote", {})[u] = local
@@ -6361,7 +5571,7 @@ def _write_conversation_html(
             if value:
                 src = rel_path(f"wxemoji/{value}")
                 parts.append(
-                    f'<img class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px" src="{esc_attr(src)}" alt="" />'
+                    f'<img class="inline-block w-[1.25em] h-[1.25em] align-text-bottom mx-px" src="{esc_attr(src)}" alt="{esc_attr(key)}" />'
                 )
             else:
                 parts.append(esc_text(key))
@@ -6542,101 +5752,35 @@ def _write_conversation_html(
         "emojis": {},
         "videos": {},
         "videoThumbs": {},
+        "files": {},
         "serverMd5": {},
         "remote": {},
     }
-    chat_history_md5_done: set[tuple[str, str]] = set()
 
     def _remember_offline_media(message: dict[str, Any]) -> None:
         media = message.get("offlineMedia") or []
         if not isinstance(media, list):
             return
         for item in media:
-            try:
-                kind = str(item.get("kind") or "").strip()
-            except Exception:
-                kind = ""
-            try:
-                md5 = str(item.get("md5") or "").strip().lower()
-            except Exception:
-                md5 = ""
-            try:
-                path0 = str(item.get("path") or "").strip()
-            except Exception:
-                path0 = ""
-            if (not md5) or (not path0):
+            kind = str(item.get("kind") or "").strip()
+            md5 = str(item.get("md5") or "").strip().lower()
+            key = md5 or str(item.get("fileId") or "").strip().lower()
+            path0 = str(item.get("path") or "").strip()
+            if not key or not path0:
                 continue
             url0 = rel_path(path0)
+            if md5 and item.get("serverId"):
+                page_media_index["serverMd5"][str(item["serverId"])] = md5
             if kind == "image":
-                page_media_index["images"][md5] = url0
+                page_media_index["images"][key] = url0
             elif kind == "emoji":
-                page_media_index["emojis"][md5] = url0
+                page_media_index["emojis"][key] = url0
             elif kind == "video":
-                page_media_index["videos"][md5] = url0
+                page_media_index["videos"][key] = url0
             elif kind == "video_thumb":
-                page_media_index["videoThumbs"][md5] = url0
-
-    def _ensure_chat_history_md5(md5: str, media_username: str = "", preferred_kind: str = "") -> str:
-        m = str(md5 or "").strip().lower()
-        if (not m) or (not _is_md5(m)):
-            return ""
-        preferred = str(preferred_kind or "").strip()
-        done_key = (m, preferred)
-        if done_key in chat_history_md5_done:
-            map_names = {
-                "video": ("videos",),
-                "video_thumb": ("videoThumbs", "images"),
-            }.get(preferred, ("images", "emojis", "videos", "videoThumbs"))
-            for k in map_names:
-                try:
-                    hit = str((page_media_index.get(k) or {}).get(m) or "").strip()
-                except Exception:
-                    hit = ""
-                if hit:
-                    return hit
-            return ""
-        chat_history_md5_done.add(done_key)
-
-        arc = ""
-        is_new = False
-
-        try_kinds = [preferred] if preferred in {"video", "video_thumb"} else []
-        try_kinds.extend(kind for kind in ("image", "emoji", "video_thumb", "video") if kind not in try_kinds)
-        for try_kind in try_kinds:
-            arc, is_new = _materialize_media(
-                zf=zf,
-                account_dir=account_dir,
-                conv_username=conv_username,
-                kind=try_kind,  # type: ignore[arg-type]
-                md5=m,
-                file_id="",
-                media_written=media_written,
-                suggested_name="",
-                media_index=media_index,
-            )
-            if arc:
-                break
-
-        if not arc:
-            return ""
-
-        url0 = rel_path(arc)
-        try:
-            if preferred == "video" or arc.lower().endswith(".mp4"):
-                page_media_index["videos"][m] = url0
-            elif preferred == "video_thumb":
-                page_media_index["videoThumbs"][m] = url0
-            else:
-                page_media_index["images"].setdefault(m, url0)
-                page_media_index["emojis"].setdefault(m, url0)
-                page_media_index["videoThumbs"].setdefault(m, url0)
-        except Exception:
-            pass
-
-        if is_new:
-            with lock:
-                job.progress.media_copied += 1
-        return url0
+                page_media_index["videoThumbs"][key] = url0
+            elif kind == "file":
+                page_media_index["files"][key] = url0
 
     chat_title = "已隐藏" if privacy_mode else (conv_name or conv_username or "会话")
     page_title = chat_title
@@ -6675,7 +5819,7 @@ def _write_conversation_html(
         paged_old_page_paths: list[Path] = []
         paged_total_pages = 1
         paged_pad_width = 4
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as hw:
+        with open(tmp_path, "w", encoding="utf-8", newline="\n") as hw, ExitStack() as writer_handles:
             class _WriteProxy:
                 def __init__(self, default_target):
                     self._default = default_target
@@ -6705,18 +5849,11 @@ def _write_conversation_html(
             tw.write('  <meta charset="utf-8" />\n')
             tw.write('  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />\n')
             tw.write(f"  <title>{esc_text(page_title)}</title>\n")
+            tw.write(independent_html.HEAD)
+            tw.write(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_href)}" />\n')
             if folder_mode:
-                tw.write(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_href)}" />\n')
-                tw.write(
-                    f'  <script defer src="{esc_attr(session_catalog_src)}" data-wce-folder-sessions="1"></script>\n'
-                )
-                tw.write(f'  <script defer src="{esc_attr(js_src)}"></script>\n')
-            else:
-                tw.write(_html_export_gate_style())
-                # file:// 下由导出运行时核对 data-wce-sri，不能使用浏览器原生 SRI。
-                tw.write(f'  <link id="wceStyle" rel="stylesheet" href="{esc_attr(css_href)}" data-wce-sri="{esc_attr(css_integrity)}" />\n')
-                tw.write(_html_export_integrity_script_tag(src=integrity_src))
-                tw.write(f'  <script defer src="{esc_attr(js_src)}" data-wce-sri="{esc_attr(js_integrity)}"></script>\n')
+                tw.write(f'  <script defer src="{esc_attr(session_catalog_src)}" data-wce-folder-sessions="1"></script>\n')
+            tw.write(f'  <script defer src="{esc_attr(js_src)}"></script>\n')
             tw.write("</head>\n")
             tw.write("<body>\n")
             tw.write(
@@ -6724,7 +5861,7 @@ def _write_conversation_html(
                 + (
                     "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认导出目录中的运行时文件完整。</div>\n"
                     if folder_mode
-                    else "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认已完整解压导出目录，并检查 assets/_wce/ 下的运行时文件是否完整。</div>\n"
+                    else "提示：此页面需要 JavaScript 才能使用“合并聊天记录”等交互功能。若该提示一直存在，请确认已完整解压导出目录，并检查 assets/ 下的运行时文件是否完整。</div>\n"
                 )
             )
 
@@ -6939,7 +6076,7 @@ def _write_conversation_html(
                 nonlocal page_fp, page_fp_path
                 pages_frag_dir.mkdir(parents=True, exist_ok=True)
                 page_fp_path = pages_frag_dir / f"page_{page_no}.htmlfrag"
-                page_fp = open(page_fp_path, "w", encoding="utf-8", newline="\n")
+                page_fp = writer_handles.enter_context(open(page_fp_path, "w", encoding="utf-8", newline="\n"))
                 return page_fp
 
             def _close_page_fp() -> None:
@@ -6947,14 +6084,7 @@ def _write_conversation_html(
                 if page_fp is None:
                     page_fp_path = None
                     return
-                try:
-                    page_fp.flush()
-                except Exception:
-                    pass
-                try:
-                    page_fp.close()
-                except Exception:
-                    pass
+                page_fp.close()
                 if page_fp_path is not None:
                     page_frag_paths.append(page_fp_path)
                 page_fp = None
@@ -6984,14 +6114,15 @@ def _write_conversation_html(
                 end_time=end_time,
                 local_types=local_types,
                 source=source,
-                rt_conn=rt_conn,
                 checkpoint=lambda: _raise_if_job_cancelled(
                     job,
-                    "html.realtime_fetch",
+                    "html.snapshot_fetch",
                     trace,
                     conversation=conv_username,
                 ),
             )
+            if prepared_messages is None:
+                writer_handles.callback(source_messages.close)
             for source_message in source_messages:
                 scanned += 1
                 _raise_if_job_cancelled(
@@ -7077,6 +6208,7 @@ def _write_conversation_html(
                         allow_process_key_extract=allow_process_key_extract,
                         media_db_path=media_db_path,
                         media_index=media_index,
+                        resource_conn=resource_conn,
                         remote_written=remote_written,
                         lock=lock,
                         job=job,
@@ -7407,7 +6539,7 @@ def _write_conversation_html(
                         preview_url = offline_path(msg, "image")
                         if not preview_url and is_http_url(preview):
                             local = maybe_download_remote_image(preview)
-                            preview_url = local or preview
+                            preview_url = local if download_remote_media else preview
                         variant = str(msg.get("linkStyle") or "").strip().lower()
 
                         from_text = get_link_from_text(msg, url=safe_url)
@@ -7521,16 +6653,13 @@ def _write_conversation_html(
 
                     quote_voice_url = ""
                     if include_media and ("voice" in media_kinds) and quoted_voice and qsid:
-                        try:
-                            arc, is_new = _materialize_voice(
-                                zf=zf,
-                                account_dir=account_dir,
-                                media_db_path=media_db_path,
-                                server_id=int(qsid),
-                                media_written=media_written,
-                            )
-                        except Exception:
-                            arc, is_new = "", False
+                        arc, is_new = _materialize_voice(
+                            zf=zf,
+                            account_dir=account_dir,
+                            media_db_path=media_db_path,
+                            server_id=int(qsid),
+                            media_written=media_written,
+                        )
                         if arc:
                             quote_voice_url = rel_path(arc)
                             if is_new:
@@ -7539,34 +6668,28 @@ def _write_conversation_html(
 
                     quote_image_url = ""
                     if include_media and ("image" in media_kinds) and quoted_image and qsid and resource_conn is not None:
-                        md5_hit = ""
-                        try:
-                            md5_hit = _lookup_resource_md5(
-                                resource_conn,
-                                resource_chat_id,
-                                message_local_type=3,
-                                server_id=int(qsid),
-                                local_id=0,
-                                create_time=0,
-                            )
-                        except Exception:
-                            md5_hit = ""
+                        md5_hit = _lookup_resource_md5(
+                            resource_conn,
+                            resource_chat_id,
+                            message_local_type=3,
+                            server_id=int(qsid),
+                            local_id=0,
+                            create_time=0,
+                        )
 
                         if md5_hit:
-                            try:
-                                arc, is_new = _materialize_media(
-                                    zf=zf,
-                                    account_dir=account_dir,
-                                    conv_username=conv_username,
-                                    kind="image",
-                                    md5=str(md5_hit or "").strip().lower(),
-                                    file_id="",
-                                    media_written=media_written,
-                                    suggested_name="",
-                                    media_index=media_index,
-                                )
-                            except Exception:
-                                arc, is_new = "", False
+                            arc, is_new = _materialize_media(
+                                zf=zf,
+                                account_dir=account_dir,
+                                conv_username=conv_username,
+                                kind="image",
+                                md5=str(md5_hit or "").strip().lower(),
+                                file_id="",
+                                media_written=media_written,
+                                suggested_name="",
+                                media_index=media_index,
+                                checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
+                            )
                             if arc:
                                 quote_image_url = rel_path(arc)
                                 if is_new:
@@ -7576,7 +6699,7 @@ def _write_conversation_html(
                     qthumb_url = ""
                     if is_http_url(qthumb):
                         qthumb_local = maybe_download_remote_image(qthumb) if download_remote_media else ""
-                        qthumb_url = qthumb_local or qthumb
+                        qthumb_url = qthumb_local if download_remote_media else qthumb
 
                     if qt or qc:
                         tw.write(
@@ -7671,55 +6794,9 @@ def _write_conversation_html(
                         except Exception:
                             record_item_b64 = ""
 
-                    if record_item and include_media and (not privacy_mode):
-                        try:
-                            for m, preferred_kind in _iter_chat_history_media_refs(record_item):
-                                _ensure_chat_history_md5(m, media_conv_username, preferred_kind)
-                        except Exception:
-                            pass
-                        if resource_conn is not None:
-                            try:
-                                server_map = page_media_index.get("serverMd5")
-                                if not isinstance(server_map, dict):
-                                    server_map = {}
-                                    page_media_index["serverMd5"] = server_map
-
-                                for sid_raw in _CHAT_HISTORY_SERVER_ID_TAG_RE.findall(record_item):
-                                    sid_text = str(sid_raw or "").strip()
-                                    if not sid_text or sid_text in server_map:
-                                        continue
-                                    if (len(sid_text) > 24) or (not sid_text.isdigit()):
-                                        continue
-                                    sid = int(sid_text)
-                                    if sid <= 0:
-                                        continue
-
-                                    md5_hit = ""
-                                    try:
-                                        md5_hit = _lookup_resource_md5(
-                                            resource_conn,
-                                            None,  # do NOT filter by chat_id: merged-forward records come from other chats
-                                            0,  # do NOT filter by local_type
-                                            int(sid),
-                                            0,
-                                            0,
-                                        )
-                                    except Exception:
-                                        md5_hit = ""
-
-                                    md5_hit = str(md5_hit or "").strip().lower()
-                                    if not _is_md5(md5_hit):
-                                        continue
-                                    if _ensure_chat_history_md5(md5_hit, media_conv_username):
-                                        server_map[sid_text] = md5_hit
-                            except Exception:
-                                pass
-                        if download_remote_media:
-                            try:
-                                for u in _CHAT_HISTORY_URL_TAG_RE.findall(record_item):
-                                    maybe_download_remote_image(u)
-                            except Exception:
-                                pass
+                    if record_item and include_media and not privacy_mode and download_remote_media:
+                        for remote_url in _CHAT_HISTORY_URL_TAG_RE.findall(record_item):
+                            maybe_download_remote_image(remote_url)
 
                     lines = get_chat_history_preview_lines(msg)
                     sent_side_cls = " wechat-special-sent-side" if is_sent else ""
@@ -7819,13 +6896,7 @@ def _write_conversation_html(
                 if page_frag_paths:
                     paged_old_page_paths = list(page_frag_paths[:-1])
                     tw.set_target(hw)
-                    try:
-                        tw.write(page_frag_paths[-1].read_text(encoding="utf-8"))
-                    except Exception:
-                        try:
-                            tw.write(page_frag_paths[-1].read_text(encoding="utf-8", errors="ignore"))
-                        except Exception:
-                            pass
+                    tw.write(page_frag_paths[-1].read_text(encoding="utf-8"))
                 else:
                     paged_old_page_paths = []
                     tw.set_target(hw)
@@ -7903,13 +6974,7 @@ def _write_conversation_html(
                     page=page_no,
                     totalPages=len(paged_old_page_paths),
                 )
-                try:
-                    frag_text = frag_path.read_text(encoding="utf-8")
-                except Exception:
-                    try:
-                        frag_text = frag_path.read_text(encoding="utf-8", errors="ignore")
-                    except Exception:
-                        frag_text = ""
+                frag_text = frag_path.read_text(encoding="utf-8")
                 frag_text = _minify_html_for_export(frag_text)
 
 
@@ -7960,7 +7025,7 @@ def _write_conversation_html_append(
 
     temp_buffer = io.BytesIO()
     with zipfile.ZipFile(temp_buffer, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as temp_archive:
-        temp_writer = _ZipIntegrityWriter(temp_archive, native_integrity=None)
+        temp_writer = _ZipIntegrityWriter(temp_archive)
         added_count = _write_conversation_html(
             zf=temp_writer,
             conv_dir=conv_dir,
@@ -8254,8 +7319,6 @@ def _attach_voice_transcript(
         return
 
     server_id = int(msg.get("serverId") or 0)
-    if server_id <= 0:
-        return
     _raise_if_job_cancelled(job, "voice_transcription.start", serverId=server_id)
 
     stats = report.setdefault(
@@ -8266,8 +7329,10 @@ def _attach_voice_transcript(
         result = get_voice_transcription_service().transcribe_voice(
             account_dir=account_dir,
             server_id=server_id,
+            cancel_event=job.cancel_event,
             cache_generation=job.voice_cache_generation,
         )
+        _raise_if_job_cancelled(job, "voice_transcription.done", serverId=server_id)
         msg["voiceTranscript"] = str(result.get("text") or "").strip()
         msg["voiceTranscriptStatus"] = "success"
         msg["voiceTranscriptError"] = ""
@@ -8276,15 +7341,14 @@ def _attach_voice_transcript(
         stats["success"] = int(stats.get("success") or 0) + 1
         if result.get("cached"):
             stats["cached"] = int(stats.get("cached") or 0) + 1
+    except _VoiceTranscriptionCancelled as exc:
+        raise _JobCancelled() from exc
     except VoiceTranscriptionError as exc:
+        logger.exception("chat export voice transcription failed export_id=%s account=%s server_id=%s code=%s",
+                         job.export_id, account_dir.name, server_id, exc.code)
         msg["voiceTranscript"] = ""
         msg["voiceTranscriptStatus"] = "error"
         msg["voiceTranscriptError"] = exc.user_message
-        stats["failed"] = int(stats.get("failed") or 0) + 1
-    except Exception as exc:
-        msg["voiceTranscript"] = ""
-        msg["voiceTranscriptStatus"] = "error"
-        msg["voiceTranscriptError"] = f"语音识别失败：{type(exc).__name__}"
         stats["failed"] = int(stats.get("failed") or 0) + 1
 
 
@@ -8301,64 +7365,29 @@ def _pending_media_local_repairability(
     ident = str(item.get("id") or "").strip()
     if not kind or not ident:
         return False, "SOURCE_ID_MISSING"
+    if kind == "voice":
+        # Voice blobs are resolved separately by server ID in the media database.
+        return False, "SOURCE_NOT_FOUND"
+    if kind not in {"image", "emoji", "video", "video_thumb", "file"}:
+        return False, "SOURCE_FORMAT_UNSUPPORTED"
     md5 = ident.lower() if _is_md5(ident.lower()) else ""
     file_id = "" if md5 else ident
-    source: Optional[Path] = None
-    if md5:
-        try:
-            source = _try_find_decrypted_resource(account_dir, md5)
-        except Exception:
-            source = None
-    if source is None and media_index is not None:
-        try:
-            source = media_index.resolve(
-                kind=kind,
-                md5=md5,
-                file_id=file_id,
-                username=str(conv_username or "").strip(),
-            )
-        except Exception:
-            source = None
-    if source is None and md5:
-        try:
-            source = _resolve_media_path_for_kind(
-                account_dir,
-                kind=kind,
-                md5=md5,
-                username=conv_username,
-                allow_fallback_scan=False,
-            )
-        except Exception:
-            source = None
-    try:
-        if source is None or not source.is_file():
-            return False, "SOURCE_NOT_FOUND"
-    except Exception:
+    source = _resolve_export_media_source(
+        account_dir=account_dir, conv_username=conv_username, kind=kind,
+        md5=md5, file_id=file_id, media_index=media_index,
+    )
+    if source is None or not source.is_file():
         return False, "SOURCE_NOT_FOUND"
 
     if kind == "file":
-        return True, "LOCAL_SOURCE_READY"
-    if kind == "voice":
-        # 语音需要按 server_id 从媒体库读取，不能只凭待补标识判断可恢复。
-        return False, "SOURCE_NOT_FOUND"
-    try:
-        data, media_type = _read_and_maybe_decrypt_media(source, account_dir=account_dir)
-    except Exception:
-        return False, "SOURCE_DECRYPT_FAILED"
-    media_type = str(media_type or "").strip().lower()
-    if kind in {"image", "emoji", "video_thumb"}:
-        return (
-            (True, "LOCAL_SOURCE_READY")
-            if media_type.startswith("image/") and bool(data)
-            else (False, "SOURCE_DECRYPT_FAILED")
-        )
-    if kind == "video":
-        return (
-            (True, "LOCAL_SOURCE_READY")
-            if media_type == "video/mp4" and bool(data)
-            else (False, "SOURCE_DECRYPT_FAILED")
-        )
-    return False, "SOURCE_FORMAT_UNSUPPORTED"
+        with source.open("rb") as stream:
+            encrypted = stream.read(6) in {b"\x07\x08V1\x08\x07", b"\x07\x08V2\x08\x07"}
+        if not encrypted:
+            return True, "LOCAL_SOURCE_READY"
+    _read_and_maybe_decrypt_media(
+        source, account_dir=account_dir, media_kind=kind, expected_md5=md5
+    )
+    return True, "LOCAL_SOURCE_READY"
 
 
 def _classify_pending_media(
@@ -8399,10 +7428,11 @@ def _attach_offline_media(
     media_db_path: Path,
     media_index: Optional[MediaPathIndex],
     remote_written: Optional[dict[str, str]] = None,
+    resource_conn: Optional[sqlite3.Connection] = None,
     lock: threading.Lock,
     job: ExportJob,
 ) -> None:
-    # allow_process_key_extract is reserved; this project does not extract keys from process (use wx_key instead).
+    # Export uses saved media keys; obtain or enter keys before starting the export.
     _ = allow_process_key_extract
 
     rt = str(msg.get("renderType") or "")
@@ -8426,17 +7456,14 @@ def _attach_offline_media(
             else:
                 # ZIP 全量保留原有按消息引用计数的行为。
                 job.progress.media_missing += 1
-        try:
-            report["missingMedia"].append(
-                {
-                    "kind": kind,
-                    "id": ident,
-                    "conversation": conv_username,
-                    "messageId": msg.get("id"),
-                }
-            )
-        except Exception:
-            pass
+        report["missingMedia"].append(
+            {
+                "kind": kind,
+                "id": ident,
+                "conversation": conv_username,
+                "messageId": msg.get("id"),
+            }
+        )
 
     def try_remote_image(kind: str, ident: str, url: Any) -> tuple[str, bool]:
         if (
@@ -8457,13 +7484,35 @@ def _attach_offline_media(
             zf=zf,
             url=raw,
             remote_written=remote_written,
-            report=report,
+            job=job,
         )
         if arc and ident:
             media_written[f"{kind}:{ident}"] = arc
         return arc, bool(arc and not was_known)
 
     offline: list[dict[str, Any]] = []
+
+    if rt == "chatHistory" and str(msg.get("recordItem") or "").strip():
+        for ref in _iter_chat_history_media_refs(str(msg["recordItem"])):
+            kind = ref["kind"]
+            if kind not in media_kinds:
+                continue
+            server_id = ref.get("serverId", "")
+            if not ref["md5"] and server_id.isdigit() and resource_conn is not None:
+                ref["md5"] = str(_lookup_resource_md5(resource_conn, None, 0, int(server_id), 0, 0) or "").lower()
+            arc, is_new = _materialize_media(
+                zf=zf, account_dir=account_dir, conv_username=conv_username,
+                kind=kind, md5=ref["md5"], file_id=ref["fileId"],
+                media_written=media_written, suggested_name=ref["title"], media_index=media_index,
+                checkpoint=lambda: _raise_if_job_cancelled(job, "video_validation" if kind == "video" else "image_decode"),
+            )
+            if arc:
+                offline.append({**ref, "path": arc})
+                if is_new:
+                    with lock:
+                        job.progress.media_copied += 1
+            else:
+                record_missing(kind, ref["md5"] or ref["fileId"])
 
     if rt == "link" and "image" in media_kinds:
         thumbnail = str(msg.get("thumbUrl") or "").strip()
@@ -8485,6 +7534,7 @@ def _attach_offline_media(
                     kind="image", md5=candidate if _is_md5(candidate) else "", file_id=candidate,
                     media_written=media_written, suggested_name="", media_index=media_index,
                     require_image=True, cache_namespace=conv_username,
+                    checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
                 )
                 if arc:
                     used_id = candidate
@@ -8546,6 +7596,7 @@ def _attach_offline_media(
                 media_written=media_written,
                 suggested_name="",
                 media_index=media_index,
+                checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
             )
             if arc:
                 used_md5 = md5
@@ -8563,6 +7614,7 @@ def _attach_offline_media(
                     media_written=media_written,
                     suggested_name="",
                     media_index=media_index,
+                    checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
                 )
                 if arc:
                     used_file_id = file_id
@@ -8608,6 +7660,7 @@ def _attach_offline_media(
             media_written=media_written,
             suggested_name="",
             media_index=media_index,
+            checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
         )
         if not arc:
             arc, is_new = try_remote_image("emoji", md5 or file_id, msg.get("emojiUrl"))
@@ -8633,6 +7686,7 @@ def _attach_offline_media(
                 media_written=media_written,
                 suggested_name="",
                 media_index=media_index,
+                checkpoint=lambda: _raise_if_job_cancelled(job, "image_decode"),
             )
             if arc:
                 offline.append({"kind": "video_thumb", "path": arc, "md5": md5, "fileId": file_id})
@@ -8655,6 +7709,7 @@ def _attach_offline_media(
                 media_written=media_written,
                 suggested_name="",
                 media_index=media_index,
+                checkpoint=lambda: _raise_if_job_cancelled(job, "video_validation"),
             )
             if arc:
                 offline.append({"kind": "video", "path": arc, "md5": md5, "fileId": file_id})
@@ -8704,19 +7759,18 @@ def _attach_offline_media(
         else:
             record_missing("file", md5 or file_id)
 
-    if offline:
-        msg["offlineMedia"] = offline
-        if str(job.options.get("outputMode") or "") == "folder":
-            owners_by_path = job.options.setdefault("_folderResourceOwners", {})
-            owner = str(owner_username or "").strip()
-            if isinstance(owners_by_path, dict) and owner:
-                for item in offline:
-                    path = str(item.get("path") or "").strip()
-                    if not path:
-                        continue
-                    owners = owners_by_path.setdefault(path, [])
-                    if isinstance(owners, list) and owner not in owners:
-                        owners.append(owner)
+    msg["offlineMedia"] = offline
+    if str(job.options.get("outputMode") or "") == "folder":
+        owners_by_path = job.options.setdefault("_folderResourceOwners", {})
+        owner = str(owner_username or "").strip()
+        if isinstance(owners_by_path, dict) and owner:
+            for item in offline:
+                path = str(item.get("path") or "").strip()
+                if not path:
+                    continue
+                owners = owners_by_path.setdefault(path, [])
+                if isinstance(owners, list) and owner not in owners:
+                    owners.append(owner)
 
 
 def _materialize_avatar(
@@ -8825,10 +7879,15 @@ def _materialize_voice(
         return text.encode("utf-8", "replace")
 
     data = b""
-    if media_db_path.exists():
+    media_paths = (
+        (sorted(path for path in media_db_path.parent.glob("media_*.db") if re.fullmatch(r"media_\d+\.db", path.name)))
+    )
+    for current_media_path in media_paths:
+        if not current_media_path.exists():
+            continue
         conn: Optional[sqlite3.Connection] = None
         try:
-            conn = sqlite3.connect(str(media_db_path))
+            conn = sqlite3.connect(f"{current_media_path.resolve().as_uri()}?mode=ro", uri=True)
             row = conn.execute(
                 "SELECT voice_data FROM VoiceInfo WHERE svr_id = ? ORDER BY create_time DESC LIMIT 1",
                 (int(server_id),),
@@ -8836,38 +7895,13 @@ def _materialize_voice(
             if row:
                 data = coerce_blob(row[0])
         except Exception:
-            data = b""
+            raise
         finally:
             if conn is not None:
                 conn.close()
+        if data:
+            break
 
-    if not data:
-        try:
-            realtime = WCDB_REALTIME.ensure_connected(Path(account_dir))
-            media_dir = Path(realtime.db_storage_dir) / "message"
-            sql = (
-                "SELECT voice_data FROM VoiceInfo "
-                f"WHERE svr_id = {int(server_id)} ORDER BY create_time DESC LIMIT 1"
-            )
-            for realtime_db_path in sorted(media_dir.glob("media_*.db")):
-                if not realtime_db_path.is_file():
-                    continue
-                try:
-                    with realtime.lock:
-                        rows = _wcdb_exec_query(
-                            realtime.handle,
-                            kind="message",
-                            path=str(realtime_db_path),
-                            sql=sql,
-                        )
-                except Exception:
-                    rows = []
-                if rows:
-                    data = coerce_blob(rows[0].get("voice_data"))
-                if data:
-                    break
-        except Exception:
-            data = b""
 
     if not data:
         return "", False
@@ -8875,7 +7909,9 @@ def _materialize_voice(
     try:
         payload, ext, _media_type = _convert_silk_to_browser_audio(data, preferred_format="mp3")
     except Exception:
-        payload, ext = b"", "silk"
+        raise
+    if (not payload or ext == "silk"):
+        raise ValueError(f"Voice media could not be decoded for server_id={server_id}")
     if not payload:
         payload, ext = data, "silk"
 
@@ -8892,46 +7928,29 @@ def _materialize_voice(
     return arc, True
 
 
-def _materialize_media(
-    *,
-    zf: zipfile.ZipFile,
-    account_dir: Path,
-    conv_username: str,
-    kind: MediaKind,
-    md5: str,
-    file_id: str,
-    media_written: dict[str, str],
-    suggested_name: str,
-    media_index: Optional[MediaPathIndex],
-    require_image: bool = False,
-    cache_namespace: str = "",
-) -> tuple[str, bool]:
+def _resolve_export_media_source(
+    *, account_dir: Path, conv_username: str, kind: str, md5: str, file_id: str,
+    media_index: Optional[MediaPathIndex], require_image: bool = False,
+) -> Optional[Path]:
+    """Use the same local lookup sequence for export and pending-media probes."""
     started_at = time.perf_counter()
     ident = md5 or file_id
-    if not ident:
-        return "", False
-    if require_image:
-        # local_id 与时间戳可能跨会话重复；缩略图缓存和文件名都按会话隔离。
-        ident = "thumb_" + hashlib.sha256(f"{cache_namespace}\0{ident}".encode("utf-8")).hexdigest()[:32]
-
-    key = f"{kind}:{ident}"
-    if key in media_written:
-        return media_written.get(key) or "", False
-
     src: Optional[Path] = None
+    emoji_resolved = (kind == "emoji") and (bool(md5))
+    if emoji_resolved:
+        src = _resolve_media_path_for_kind(
+            account_dir, kind=kind, md5=md5, username=conv_username, allow_fallback_scan=False
+        )
     resolved_via_index = False
     backfill_index = False
     known_missing = False
     if media_index is not None:
-        try:
-            known_missing = media_index.is_known_missing(
-                kind=str(kind),
-                md5=str(md5 or "").strip().lower(),
-                file_id=str(file_id or "").strip(),
-                username=str(conv_username or "").strip(),
-            )
-        except Exception:
-            known_missing = False
+        known_missing = media_index.is_known_missing(
+            kind=str(kind),
+            md5=str(md5 or "").strip().lower(),
+            file_id=str(file_id or "").strip(),
+            username=str(conv_username or "").strip(),
+        )
     allow_fallback_scan = kind != "emoji"
     if media_index is not None and kind in {"image", "video", "video_thumb", "file"}:
         allow_fallback_scan = False
@@ -8940,12 +7959,9 @@ def _materialize_media(
     allow_file_id_fallback = bool(file_id) and not known_missing
     if media_index is not None and kind in {"image", "video", "video_thumb", "file"}:
         allow_file_id_fallback = False
-    if md5 and _is_md5(md5):
+    if src is None and md5 and _is_md5(md5):
         cache_lookup_started = time.perf_counter()
-        try:
-            src = _try_find_decrypted_resource(account_dir, md5)
-        except Exception:
-            src = None
+        src = _try_find_decrypted_resource(account_dir, md5)
         _log_export_slow_step(
             "materialize_media_cache_lookup",
             cache_lookup_started,
@@ -8957,16 +7973,13 @@ def _materialize_media(
 
     if src is None and media_index is not None:
         index_lookup_started = time.perf_counter()
-        try:
-            src = media_index.resolve(
-                kind=str(kind),
-                md5=str(md5 or "").strip().lower(),
-                file_id=str(file_id or "").strip(),
-                username=str(conv_username or "").strip(),
-            )
-            resolved_via_index = bool(src)
-        except Exception:
-            src = None
+        src = media_index.resolve(
+            kind=str(kind),
+            md5=str(md5 or "").strip().lower(),
+            file_id=str(file_id or "").strip(),
+            username=str(conv_username or "").strip(),
+        )
+        resolved_via_index = bool(src)
         _log_export_slow_step(
             "materialize_media_index_lookup",
             index_lookup_started,
@@ -8979,18 +7992,15 @@ def _materialize_media(
             knownMissing=bool(known_missing),
         )
 
-    if src is None and md5 and _is_md5(md5):
+    if src is None and md5 and _is_md5(md5) and not emoji_resolved:
         resolve_started = time.perf_counter()
-        try:
-            src = _resolve_media_path_for_kind(
-                account_dir,
-                kind=kind,
-                md5=md5,
-                username=conv_username,
-                allow_fallback_scan=False,
-            )
-        except Exception:
-            src = None
+        src = _resolve_media_path_for_kind(
+            account_dir,
+            kind=kind,
+            md5=md5,
+            username=conv_username,
+            allow_fallback_scan=False,
+        )
         _log_export_slow_step(
             "materialize_media_resolve_md5",
             resolve_started,
@@ -9003,23 +8013,20 @@ def _materialize_media(
 
     if src is None and file_id and media_index is None:
         file_id_lookup_started = time.perf_counter()
-        try:
-            wxid_dir = _resolve_account_wxid_dir(account_dir)
-            db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-            for r in [wxid_dir, db_storage_dir]:
-                if not r:
-                    continue
-                hit = _fallback_search_media_by_file_id(
-                    str(r),
-                    str(file_id),
-                    kind=str(kind),
-                    username=str(conv_username or ""),
-                )
-                if hit:
-                    src = Path(hit)
-                    break
-        except Exception:
-            src = None
+        wxid_dir = _resolve_account_wxid_dir(account_dir)
+        db_storage_dir = _resolve_account_db_storage_dir(account_dir)
+        for r in [wxid_dir, db_storage_dir]:
+            if not r:
+                continue
+            hit = _fallback_search_media_by_file_id(
+                str(r),
+                str(file_id),
+                kind=str(kind),
+                username=str(conv_username or ""),
+            )
+            if hit:
+                src = Path(hit)
+                break
         _log_export_slow_step(
             "materialize_media_resolve_file_id",
             file_id_lookup_started,
@@ -9031,16 +8038,13 @@ def _materialize_media(
 
     if src is None and md5 and _is_md5(md5) and allow_fallback_scan:
         fallback_md5_started = time.perf_counter()
-        try:
-            src = _resolve_media_path_for_kind(
-                account_dir,
-                kind=kind,
-                md5=md5,
-                username=conv_username,
-                allow_fallback_scan=True,
-            )
-        except Exception:
-            src = None
+        src = _resolve_media_path_for_kind(
+            account_dir,
+            kind=kind,
+            md5=md5,
+            username=conv_username,
+            allow_fallback_scan=True,
+        )
         backfill_index = bool(src)
         _log_export_slow_step(
             "materialize_media_resolve_md5_fallback",
@@ -9054,23 +8058,20 @@ def _materialize_media(
 
     if src is None and allow_file_id_fallback:
         file_id_lookup_started = time.perf_counter()
-        try:
-            wxid_dir = _resolve_account_wxid_dir(account_dir)
-            db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-            for r in [wxid_dir, db_storage_dir]:
-                if not r:
-                    continue
-                hit = _fallback_search_media_by_file_id(
-                    str(r),
-                    str(file_id),
-                    kind=str(kind),
-                    username=str(conv_username or ""),
-                )
-                if hit:
-                    src = Path(hit)
-                    break
-        except Exception:
-            src = None
+        wxid_dir = _resolve_account_wxid_dir(account_dir)
+        db_storage_dir = _resolve_account_db_storage_dir(account_dir)
+        for r in [wxid_dir, db_storage_dir]:
+            if not r:
+                continue
+            hit = _fallback_search_media_by_file_id(
+                str(r),
+                str(file_id),
+                kind=str(kind),
+                username=str(conv_username or ""),
+            )
+            if hit:
+                src = Path(hit)
+                break
         backfill_index = bool(src)
         _log_export_slow_step(
             "materialize_media_resolve_file_id",
@@ -9083,14 +8084,11 @@ def _materialize_media(
         )
 
     if src is not None and media_index is not None and backfill_index and not resolved_via_index:
-        try:
-            media_index.remember_path(
-                kind=str(kind),
-                path=src,
-                username=str(conv_username or "").strip(),
-            )
-        except Exception:
-            pass
+        media_index.remember_path(
+            kind=str(kind),
+            path=src,
+            username=str(conv_username or "").strip(),
+        )
 
     if require_image and src is not None and re.fullmatch(r"\d+_\d+", file_id) and conv_username:
         # 同秒本地消息编号不是全局唯一键，禁止索引兜底命中另一会话的附件目录。
@@ -9099,20 +8097,16 @@ def _materialize_media(
             index = parts.index("attach")
             expected = hashlib.md5(conv_username.encode("utf-8")).hexdigest()
             if index + 1 >= len(parts) or parts[index + 1] != expected:
-                return "", False
+                return None
 
     if not src:
         if media_index is not None:
-            try:
-                media_index.mark_missing(
-                    kind=str(kind),
-                    md5=str(md5 or "").strip().lower(),
-                    file_id=str(file_id or "").strip(),
-                    username=str(conv_username or "").strip(),
-                )
-            except Exception:
-                pass
-        media_written[key] = ""
+            media_index.mark_missing(
+                kind=str(kind),
+                md5=str(md5 or "").strip().lower(),
+                file_id=str(file_id or "").strip(),
+                username=str(conv_username or "").strip(),
+            )
         _log_export_slow_step(
             "materialize_media_miss",
             started_at,
@@ -9124,19 +8118,51 @@ def _materialize_media(
             knownMissing=bool(known_missing),
             lookupMode=("md5" if md5 else "file_id"),
         )
+        return None
+
+    return src
+
+
+def _materialize_media(
+    *,
+    zf: zipfile.ZipFile,
+    account_dir: Path,
+    conv_username: str,
+    kind: MediaKind,
+    md5: str,
+    file_id: str,
+    media_written: dict[str, str],
+    suggested_name: str,
+    media_index: Optional[MediaPathIndex],
+    require_image: bool = False,
+    cache_namespace: str = "",
+    checkpoint: Optional[Callable[[], None]] = None,
+) -> tuple[str, bool]:
+    started_at = time.perf_counter()
+    ident = md5 or file_id
+    if not ident:
+        return "", False
+    if require_image:
+        # local_id 与时间戳可能跨会话重复；缩略图缓存和文件名都按会话隔离。
+        ident = "thumb_" + hashlib.sha256(f"{cache_namespace}\0{ident}".encode("utf-8")).hexdigest()[:32]
+
+    key = f"{kind}:{ident}"
+    if key in media_written:
+        return media_written.get(key) or "", False
+
+    src = _resolve_export_media_source(
+        account_dir=account_dir, conv_username=conv_username, kind=kind,
+        md5=md5, file_id=file_id, media_index=media_index, require_image=require_image,
+    )
+    if src is None:
+        media_written[key] = ""
         return "", False
 
-    try:
-        if not src.exists() or (not src.is_file()):
-            return "", False
-    except Exception:
+    if not src.exists() or (not src.is_file()):
         return "", False
 
-    try:
-        with open(src, "rb") as f:
-            head = f.read(64)
-    except Exception:
-        head = b""
+    with open(src, "rb") as f:
+        head = f.read(64)
 
     head_mt = _detect_image_media_type(head[:32])
     looks_like_mp4 = len(head) >= 8 and head[4:8] == b"ftyp"
@@ -9194,22 +8220,13 @@ def _materialize_media(
         should_stream_copy = ext == "mp4" and looks_like_mp4
 
     if should_stream_copy:
-        try:
+        if (kind in {"image", "emoji", "video_thumb", "video"}):
+            data, _ = _read_and_maybe_decrypt_media(src, account_dir=account_dir, media_kind=kind, checkpoint=checkpoint, expected_md5=md5)
+            zf.writestr(arc, data)
+        else:
             zf.write(src, arcname=arc)
-        except Exception:
-            return "", False
     else:
-        try:
-            data, mt = _read_and_maybe_decrypt_media(src, account_dir=account_dir)
-        except Exception:
-            if require_image:
-                return "", False
-            try:
-                zf.write(src, arcname=arc)
-            except Exception:
-                return "", False
-            media_written[key] = arc
-            return arc, True
+        data, mt = _read_and_maybe_decrypt_media(src, account_dir=account_dir, media_kind=kind, checkpoint=checkpoint, expected_md5=md5)
 
         mt = str(mt or "").strip()
         if require_image and _detect_image_media_type(data[:32]) not in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
@@ -9238,16 +8255,10 @@ def _materialize_media(
                 arc_name = arc_name[:160]
             arc = f"media/{folder}/{arc_name}"
 
-        try:
-            zf.writestr(arc, data)
-        except Exception:
-            return "", False
+        zf.writestr(arc, data)
 
     media_written[key] = arc
-    try:
-        src_size = int(src.stat().st_size)
-    except Exception:
-        src_size = 0
+    src_size = int(src.stat().st_size)
     _log_export_slow_step(
         "materialize_media",
         started_at,
@@ -9269,6 +8280,7 @@ def export_prepared_chat_archive(
     *,
     account_dir: Optional[Path] = None,
     account: Optional[str] = None,
+    source: Literal["decrypted"],
     output_dir: Path,
     file_name: str,
     title: str,
@@ -9284,6 +8296,7 @@ def export_prepared_chat_archive(
     resolved_account_dir = Path(account_dir) if account_dir is not None else _resolve_account_dir(account)
     return CHAT_EXPORT_MANAGER.run_prepared_archive(
         account_dir=resolved_account_dir,
+        source=source,
         output_dir=Path(output_dir),
         file_name=file_name,
         title=title,

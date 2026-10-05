@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from ..snapshot_registry import snapshot_cache_dir
 
 
 def wrapped_account_dir(account_dir: Path) -> Path:
@@ -14,7 +15,7 @@ def wrapped_account_dir(account_dir: Path) -> Path:
 
 
 def wrapped_cache_dir(account_dir: Path) -> Path:
-    d = wrapped_account_dir(account_dir) / "cache"
+    d = snapshot_cache_dir(account_dir) / "_wrapped" / "cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

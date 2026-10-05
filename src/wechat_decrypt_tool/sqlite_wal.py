@@ -28,8 +28,11 @@ def merge_wal_snapshot(
 
     A salt mismatch marks the recycled tail of a WAL. Complete frames with a
     bad checksum are rejected rather than silently exporting an older snapshot.
-    Incomplete/uncommitted trailing frames never become part of the output.
+    Incomplete frames are rejected. Complete uncommitted frames and recycled
+    tails never become part of the output.
     """
+    if len(database) % page_size:
+        raise ValueError('主数据库页不完整')
     info = {'wal_bytes': len(wal), 'committed_frames': 0, 'applied_pages': 0,
             'ignored_tail_bytes': 0, 'database_pages': len(database) // page_size}
     if not wal:
@@ -52,10 +55,16 @@ def merge_wal_snapshot(
     base_pages = len(database) // page_size
     size = base_pages
     commit_end = 32
-    for offset in range(32, len(wal) - frame_size + 1, frame_size):
+    for offset in range(32, len(wal), frame_size):
         header = wal[offset:offset + 24]
+        if len(header) < 16:
+            raise ValueError('WAL 帧头不完整，无法识别当前日志代次')
         if header[8:16] != salt:
-            break  # old frames left after WAL reset / preallocated zero tail
+            # Reset invalidates all remaining old bytes; SQLite need not truncate
+            # that physical tail, even when it ends within a frame.
+            break
+        if len(wal) - offset < frame_size:
+            raise ValueError('WAL 帧不完整，请重新获取稳定的数据库副本')
         pgno, db_size = struct.unpack('>II', header[:8])
         if pgno == 0 or pgno > 0xfffffffe:
             raise ValueError('WAL 页号无效')
@@ -63,6 +72,8 @@ def merge_wal_snapshot(
         state = _checksum(page, endian, _checksum(header[:8], endian, state))
         if state != struct.unpack('>II', header[16:24]):
             raise ValueError('WAL 帧校验失败，请重新获取稳定的数据库副本')
+        if verify_page is not None and not verify_page(page, pgno):
+            raise ValueError(f'WAL 第 {pgno} 页 HMAC 校验失败')
         pending[pgno] = page
         if db_size:
             committed.update(pending)
@@ -83,7 +94,5 @@ def merge_wal_snapshot(
     output = bytearray(database[:base_pages * page_size])
     output.extend(b'\0' * (size * page_size - len(output)))
     for pgno, page in committed.items():
-        if verify_page is not None and not verify_page(page, pgno):
-            raise ValueError(f'WAL 第 {pgno} 页 HMAC 校验失败')
         output[(pgno - 1) * page_size:pgno * page_size] = page
     return bytes(output), info

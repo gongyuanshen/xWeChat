@@ -64,8 +64,6 @@ async function main() {
     await capture('d04-image-dark')
 
     await page.goto(values.app+'/chat')
-    const agree=page.getByRole('button',{name:'我已阅读全部内容并同意',exact:true})
-    await agree.click({timeout:35000})
     await page.getByRole('heading',{name:'验收 · 海桥项目',exact:true,level:2}).waitFor()
     await page.getByLabel('AI 助手',{exact:true}).click()
     await page.getByLabel('给 AI 助手的消息').fill('跨群检索草稿保持')

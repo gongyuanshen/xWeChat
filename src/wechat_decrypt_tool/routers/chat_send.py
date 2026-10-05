@@ -23,7 +23,6 @@ from ..ai.service import AIService, get_ai_service
 from ..logging_config import get_logger
 from ..wechat_ui_bridge import (
     FileSendReceipt,
-    ImageSendReceipt,
     SendReceipt,
     WeChatBridge,
     WeChatBridgeError,
@@ -83,6 +82,10 @@ class SendImageResponse(BaseModel):
     image_size_bytes: int
     duration_ms: float
     timestamp: float
+    confirmation: Literal["local_outgoing_image"]
+    server_id: str = Field(..., pattern=r"^[1-9][0-9]*$")
+    match_kind: Literal["exact_bytes", "exact_rgba"]
+    generation: str
 
 
 class SendFileRequest(BaseModel):
@@ -185,22 +188,19 @@ async def send_chat_image(
     req: SendImageRequest,
     bridge: WeChatBridge = Depends(get_wechat_bridge),
 ) -> SendImageResponse:
-    """The bridge validates the file; success confirms local submission only."""
+    """Confirm an exact new local outgoing image, retaining uncertainty on failure."""
     session_title = (
         req.display_name.strip()
         if req.display_name and req.display_name.strip()
         else req.username.strip()
     )
-    receipt: ImageSendReceipt = await bridge.send_image(
-        session_title=session_title, image_path=req.image_path,
-        account=req.account.strip(), username=req.username.strip(),
-    )
-    return SendImageResponse(
-        success=receipt.success, session=receipt.session_title,
+    receipt = await bridge.send_image(session_title=session_title, image_path=req.image_path,
+                                      account=req.account, username=req.username)
+    return SendImageResponse(success=receipt.success, session=receipt.session_title,
         image_name=receipt.image_name, image_format=receipt.image_format,
-        image_size_bytes=receipt.image_size_bytes,
-        duration_ms=receipt.duration_ms, timestamp=receipt.timestamp,
-    )
+        image_size_bytes=receipt.image_size_bytes, duration_ms=receipt.duration_ms, timestamp=receipt.timestamp,
+        confirmation="local_outgoing_image", server_id=receipt.server_id,
+        match_kind=receipt.match_kind, generation=receipt.generation)
 
 
 @router.post("/chat/send/file", response_model=SendFileResponse, summary="向指定微信会话发送单个本地文件")

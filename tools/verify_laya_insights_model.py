@@ -31,8 +31,7 @@ async def run(root):
     output = root / ('insights-' + time.strftime('%Y%m%d-%H%M%S') + '.json')
     report = dict(synthetic_only=True, engine='laya', device='cpu', remote_model_calls=0, cases=[])
     began = time.monotonic()
-    with patch.object(insights, 'source_for_account', lambda account: 'snapshot'), \
-         patch('httpx.AsyncClient.request', side_effect=AssertionError('Network forbidden during offline inference')), \
+    with patch('httpx.AsyncClient.request', side_effect=AssertionError('Network forbidden during offline inference')), \
          patch('httpx.Client.request', side_effect=AssertionError('Network forbidden during offline inference')):
         try:
             for name, username, member in [('single', PEER, ''), ('group', GROUP, ''), ('group_member', GROUP, ALEX)]:

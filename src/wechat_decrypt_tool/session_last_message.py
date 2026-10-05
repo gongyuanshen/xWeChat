@@ -1,4 +1,5 @@
 from __future__ import annotations
+from .snapshot_registry import resolve_account_database_dir, require_legacy_database_write
 
 import hashlib
 import re
@@ -28,7 +29,7 @@ _PREVIEW_MAX_LEN = 400
 
 
 def _session_db_path(account_dir: Path) -> Path:
-    return Path(account_dir) / "session.db"
+    return resolve_account_database_dir(account_dir) / "session.db"
 
 
 def _row_get(row: sqlite3.Row, key: str) -> Any:
@@ -167,6 +168,7 @@ def build_session_last_message_table(
     """
 
     account_dir = Path(account_dir)
+    require_legacy_database_write(account_dir)
     session_db_path = _session_db_path(account_dir)
     if not session_db_path.exists():
         return {

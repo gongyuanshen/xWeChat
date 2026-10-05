@@ -472,15 +472,16 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
   })
 
   it('13. ConversationPane 挂载后包含 MessageInputWorkspace 并透传会话状态', async () => {
-    const state = reactive({
+    const state = {
       selectedAccount: 'wx_user_001',
       selectedContact: { username: 'wxid_test', name: '会话对象' },
       messages: [],
-      searchContext: { active: false },
+      searchContext: ref({ active: false }),
       messageTypeFilterOptions: [],
       privacyMode: false,
       aiSidebarOpen: false,
-      isLoadingMessages: false,
+      isLoadingMessages: ref(false),
+      isRefreshingMessages: ref(false),
       isJumpingToFirst: false,
       isExportCreating: false,
       voiceSidebarOpen: false,
@@ -488,7 +489,7 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
       messageSearchOpen: false,
       timeSidebarOpen: false,
       messageTypeFilter: '',
-      showJumpToBottom: false,
+      showJumpToBottom: ref(false),
       groupAnnouncement: '',
       groupAnnouncementOpen: false,
       openGroupAnnouncement: vi.fn(),
@@ -496,6 +497,7 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
       toggleAiSidebar: vi.fn(),
       jumpToConversationFirst: vi.fn(),
       refreshSelectedMessages: vi.fn(),
+      refreshChatFromWechat: vi.fn(),
       openExportModal: vi.fn(),
       toggleVoiceSidebar: vi.fn(),
       toggleResourceSidebar: vi.fn(),
@@ -503,7 +505,7 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
       toggleTimeSidebar: vi.fn(),
       scrollToBottom: vi.fn(),
       exitSearchContext: vi.fn()
-    })
+    }
 
     const wrapper = mount(ConversationPane, {
       props: { state },
@@ -519,5 +521,44 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
     const textarea = wrapper.find('.chat-input-textarea')
     expect(textarea.exists()).toBe(true)
     expect(textarea.attributes('placeholder')).toContain('Enter 发送')
+    const refresh = wrapper.get('[data-testid="chat-refresh"]')
+    await refresh.trigger('click')
+    expect(state.refreshChatFromWechat).toHaveBeenCalledOnce()
+    expect(state.refreshSelectedMessages).not.toHaveBeenCalled()
+
+    state.isRefreshingMessages.value = true
+    await nextTick()
+    expect(refresh.attributes('disabled')).toBeDefined()
+    expect(refresh.attributes('aria-busy')).toBe('true')
+    expect(refresh.get('svg').classes()).toContain('motion-safe:animate-spin')
+    await refresh.trigger('click')
+    expect(state.refreshChatFromWechat).toHaveBeenCalledOnce()
+
+    state.isRefreshingMessages.value = false
+    state.isLoadingMessages.value = true
+    await nextTick()
+    expect(refresh.attributes('disabled')).toBeUndefined()
+    expect(refresh.attributes('aria-busy')).toBe('false')
+    expect(refresh.get('svg').classes()).not.toContain('motion-safe:animate-spin')
+    await refresh.trigger('click')
+    expect(state.refreshChatFromWechat).toHaveBeenCalledTimes(2)
+
+    expect(wrapper.find('.jump-to-bottom-btn').exists()).toBe(false)
+    state.searchContext.value = { active: true, kind: 'date' }
+    await nextTick()
+    expect(wrapper.find('.chat-context-banner').exists()).toBe(false)
+    await wrapper.get('.jump-to-bottom-btn').trigger('click')
+    expect(state.refreshSelectedMessages).toHaveBeenCalledOnce()
+    expect(state.scrollToBottom).not.toHaveBeenCalled()
+
+    state.searchContext.value = { active: false }
+    await nextTick()
+    expect(wrapper.find('.jump-to-bottom-btn').exists()).toBe(false)
+    state.showJumpToBottom.value = true
+    await nextTick()
+    await wrapper.get('.jump-to-bottom-btn').trigger('click')
+    expect(state.scrollToBottom).toHaveBeenCalledOnce()
+    expect(state.refreshSelectedMessages).toHaveBeenCalledOnce()
+    wrapper.unmount()
   })
 })

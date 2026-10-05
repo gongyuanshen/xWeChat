@@ -5,7 +5,6 @@ import { createEmptySearchContext, useChatSearch } from '../composables/chat/use
 import { useApi } from '../composables/useApi'
 
 vi.mock('~/lib/server-error-logging', () => ({ reportServerError: vi.fn() }))
-vi.mock('~/stores/chatAccounts', () => ({ useChatAccountsStore: () => ({ applySourceResponse: vi.fn() }) }))
 
 const deferred = () => {
   let resolve, reject
@@ -13,7 +12,7 @@ const deferred = () => {
   return { promise, resolve, reject }
 }
 const response = (month = 2, total = 3) => ({
-  status: 'success', source: 'realtime', counts: { [`2020-${String(month).padStart(2, '0')}-01`]: total },
+  status: 'success', source: 'decrypted', counts: { [`2020-${String(month).padStart(2, '0')}-01`]: total },
   total, max: total, scanLimited: false
 })
 let wrapper, originalClient

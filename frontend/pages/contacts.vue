@@ -863,23 +863,7 @@ const writeWebExportFile = async ({ fileName, content, seal = true }) => {
   await writable.write(sealed?.protectedContentBase64 ? exportContentFromBase64(sealed.protectedContentBase64) : content)
   await writable.close()
   if (sealed) {
-    if (sealed.integrityFileName) {
-      await writeWebExportFile({ fileName: sealed.integrityFileName, content: sealed.integrity, seal: false })
-    }
-    await writeWebExportFile({ fileName: sealed.manifestFileName, content: sealed.manifest, seal: false })
-    await writeWebExportFile({ fileName: sealed.signatureFileName, content: sealed.signature, seal: false })
-    if (sealed.nativeManifestFileName && sealed.nativeSignatureFileName && sealed.nativeSignatureBase64) {
-      await writeWebExportFile({
-        fileName: sealed.nativeManifestFileName,
-        content: sealed.nativeManifest,
-        seal: false,
-      })
-      await writeWebExportFile({
-        fileName: sealed.nativeSignatureFileName,
-        content: exportContentFromBase64(sealed.nativeSignatureBase64),
-        seal: false,
-      })
-    }
+    await writeWebExportFile({ fileName: sealed.checksumsFileName, content: sealed.checksums, seal: false })
   }
 }
 

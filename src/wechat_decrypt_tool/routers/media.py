@@ -266,7 +266,7 @@ async def decrypt_all_media(request: MediaDecryptRequest):
     if xor_key_int is None:
         raise HTTPException(
             status_code=400,
-            detail="未找到XOR密钥，请先使用 wx_key 获取并通过前端填写（或调用 /api/media/keys 保存）",
+            detail="未找到XOR密钥，请先在密钥页面获取或手动填写有效图片密钥（也可调用 /api/media/keys 保存）",
         )
 
     # 收集所有.dat文件
@@ -459,7 +459,7 @@ async def decrypt_all_media_stream(
             )
 
             if xor_key_int is None:
-                yield sse({"type": "error", "message": "未找到XOR密钥，请先使用 wx_key 获取并保存/填写"})
+                yield sse({"type": "error", "message": "未找到XOR密钥，请先在密钥页面获取或手动填写有效图片密钥"})
                 return
 
             scan_started_at = time.perf_counter()

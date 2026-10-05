@@ -82,7 +82,7 @@ class PlannedWork:
         """仅记录程序实际返回的资料；旧版本证据和仅选择范围不能充当前期工作。"""
         if parent.get('parent_run_id') or parent.get('subtask_plan_version') != REVISION:
             return None
-        if action not in {'read_messages', 'list_files', 'search_messages', 'search_live_messages', 'read_context', 'count_messages', 'read_material', 'search_material', 'read_results'}:
+        if action not in {'read_messages', 'list_files', 'search_messages', 'read_context', 'count_messages', 'read_material', 'search_material', 'read_results'}:
             return None
         sources = [m['source'] for m in body.get('messages', body.get('sources', [])) if isinstance(m, dict) and m.get('source')]
         if action == 'read_results':
@@ -381,7 +381,7 @@ class PlannedWork:
         if len(analysis.strip()) < 12 or analysis.strip() in (plan['preliminary_analysis'].strip(), plan['main']['description'].strip()):
             raise ValueError('主线成果需要新的具体分析，不能复制计划或初步发现')
         no_hit_work = [o for o in self.rows(parent, 'work_observation') if o['created'] > plan['created']
-            and o['args'].get('scope_handle') == scope['handle'] and o['action'] in ('read_messages', 'search_messages', 'search_live_messages', 'count_messages')]
+            and o['args'].get('scope_handle') == scope['handle'] and o['action'] in ('read_messages', 'search_messages', 'count_messages')]
         if (not sources and not no_hit_work) or any(s not in observed or s not in evidence or not gateway.permits(scope, evidence[s]) for s in sources):
             raise ValueError('主线成果须引用主模型实际读取且属于保留工作的原文')
         if plan['main']['source_ids'] and not set(sources) <= set(plan['main']['source_ids']):

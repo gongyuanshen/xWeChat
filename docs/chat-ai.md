@@ -45,9 +45,9 @@ AI 对话历史显示当前聊天的已保存对话。从顶部左侧历史按�
 
 模型发现参考 [Codex++ 的模型目录获取逻辑](https://github.com/BigPizzaV3/CodexPlusPlus/blob/48d43158688f5096c7059c690f8cd1daab340681/crates/codex-plus-core/src/model_catalog.rs)：统一接口地址，兼容数组和 `data/models/items` 包装、`id/model/name` 标识并去重。本项目另外处理 Claude 的分页及图片能力元数据，不根据模型名字猜测能力。切换凭据时清空旧列表，并忽略迟到响应。
 
-运行依赖通过 `uv sync --extra build --extra voice-transcription` 安装。前端需使用符合当前 Nuxt/Vite 要求的 Node 版本；Node 18 无法构建当前依赖。
+运行依赖通过 `uv sync --locked --extra voice-transcription` 安装。前端需使用符合当前 Nuxt/Vite 要求的 Node 版本；Node 18 无法构建当前依赖。安装包与免安装压缩包已暂停后续发行，当前运行方式见 [Windows 源码开发说明](development-windows.md)。
 
-Windows 源码启动使用 `desktop/resources/native-core-source-windows.json` 固定的 2.4.0 官方安装包：首次下载并校验整个安装包，只提取三个只读原生组件，不执行安装程序。组件再次校验摘要、有效期、只读能力和源码运行身份后缓存复用。这样避免旧的独立源码运行时缺少只读声明导致启动失败。先在 `desktop` 安装 npm 依赖，再以 Node 22.12 以上运行 `node scripts/dev.cjs`；Nuxt 子进程复用同一个 Node。
+Windows 源码启动只使用项目内的独立数据实现，不下载或加载旧 client／broker。先在 `desktop` 安装 npm 依赖，再以 Node 22.12 以上运行 `node scripts/dev.cjs`；Nuxt 子进程复用同一个 Node。旧模式删除后的运行验证暂未执行，见[本轮清理范围](plans/2026-10-04-remove-legacy-mode.md)。
 
 模型测试均可使用模拟服务，不需要真实密钥：
 

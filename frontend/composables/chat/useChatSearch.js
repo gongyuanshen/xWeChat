@@ -46,7 +46,10 @@ export const useChatSearch = ({
   highlightMessageId,
   searchContext,
   selectContact,
-  loadMoreMessages
+  loadMoreMessages,
+  refreshSelectedMessages,
+  invalidateSnapshotMessages,
+  onSnapshotChanged
 }) => {
 const isDesktopRenderer = () => {
 if (!process.client || typeof window === 'undefined') return false
@@ -610,19 +613,6 @@ if (existing) return existing
 if (String(selectedContact.value?.username || '').trim() === u) return selectedContact.value
 return buildTransientSearchTargetContact({ username: u, displayName, avatar, isGroup })
 }
-const searchContextBannerText = computed(() => {
-if (!searchContext.value?.active) return ''
-const kind = String(searchContext.value.kind || 'search')
-if (kind === 'date') {
-  const label = String(searchContext.value.label || '').trim()
-  return label ? `已定位到 ${label}（上下文模式）` : '已定位到指定日期（上下文模式）'
-}
-if (kind === 'first') {
-  return '已从第一条消息开始阅读（上下文模式）'
-}
-return '已定位到搜索结果（上下文模式）'
-})
-
 // 回到最新按钮
 const showJumpToBottom = ref(false)
 
@@ -1283,6 +1273,8 @@ if (!hit?.id) {
 }
 
 const targetUsername = String(hit?.username || selectedContact.value?.username || '').trim()
+const account = selectedAccount.value
+const version = ++anchorNavigationVersion
 if (!targetUsername) {
   logSearchPhase('locateSearchHit:skip:missing-target-username', {
     hitId: String(hit?.id || '').trim(),
@@ -1333,6 +1325,7 @@ if (searchContext.value?.active && searchContext.value.username !== targetUserna
   })
 }
 
+if (account !== selectedAccount.value || version !== anchorNavigationVersion) return
 if (!searchContext.value?.active) {
   searchContext.value = {
     active: true,
@@ -1357,6 +1350,8 @@ if (!searchContext.value?.active) {
   searchContext.value.loadingBefore = false
   searchContext.value.loadingAfter = false
 }
+const context = searchContext.value
+const current = () => account === selectedAccount.value && version === anchorNavigationVersion && searchContext.value === context && context.active
 logSearchPhase('locateSearchHit:search-context:ready', {
   hitId: String(hit?.id || '').trim(),
   targetUsername,
@@ -1372,18 +1367,19 @@ try {
     after: 35
   })
   const resp = await api.getChatMessagesAround({
-    account: selectedAccount.value,
+    account,
     username: targetUsername,
     anchor_id: String(hit.id),
     before: 35,
     after: 35,
     source: DEFAULT_CHAT_SOURCE
   })
+  if (!current()) return
 
   const raw = resp?.messages || []
   const mapped = raw.map(normalizeMessage)
   allMessages.value = { ...allMessages.value, [targetUsername]: mapped }
-  messagesMeta.value = { ...messagesMeta.value, [targetUsername]: { total: mapped.length, hasMore: false } }
+  messagesMeta.value = { ...messagesMeta.value, [targetUsername]: { total: mapped.length, hasMore: false, snapshotGeneration: resp.snapshotGeneration } }
   logSearchPhase('locateSearchHit:messagesAround:end', {
     hitId: String(hit?.id || '').trim(),
     targetUsername,
@@ -1410,6 +1406,7 @@ try {
   })
   if (ok) flashMessage(searchContext.value.anchorId)
 } catch (e) {
+  if (!current()) return
   logSearchPhase('locateSearchHit:error', {
     hitId: String(hit?.id || '').trim(),
     targetUsername,
@@ -1440,7 +1437,7 @@ const prepareAnchorContext = ({ targetUsername, anchorId } = {}) => {
   }
   return anchorContextCache.read(anchorParams(account, username, anchor))
 }
-const locateByAnchorId = async ({ targetUsername, anchorId, kind, label, throwOnError = false } = {}) => {
+const locateByAnchorId = async ({ targetUsername, anchorId, kind, label, throwOnError = false, signal } = {}) => {
 if (!process.client) return false
 if (!selectedAccount.value) {
   if (throwOnError) throw new Error('请先选择聊天账号')
@@ -1453,7 +1450,7 @@ if (!u || !anchor) {
   return false
 }
 const account = selectedAccount.value, navigationVersion = ++anchorNavigationVersion
-const stillCurrent = () => navigationVersion === anchorNavigationVersion && selectedAccount.value === account && selectedContact.value?.username === u
+const stillCurrent = () => !signal?.aborted && navigationVersion === anchorNavigationVersion && selectedAccount.value === account && selectedContact.value?.username === u
 
 // 已显示的消息直接滚动并高亮，避免相同引用反复读取数据库。
 if (kind === 'ai' && selectedContact.value?.username === u && allMessages.value[u]?.some(message => String(message.id) === anchor)) {
@@ -1519,7 +1516,7 @@ if (!searchContext.value?.active) {
 let applied = false
 const context = searchContext.value
 try {
-  const params = anchorParams(account, u, anchor)
+  const params = { ...anchorParams(account, u, anchor), signal }
   const resp = await (kindNorm === 'ai' ? anchorContextCache.read(params) : api.getChatMessagesAround(params))
   // 切换账号、会话或退出定位后，旧请求不得覆盖当前聊天。
   if (!stillCurrent() || searchContext.value !== context || !context.active || context.anchorId !== anchor) return false
@@ -1528,7 +1525,7 @@ try {
   if (!raw.length) throw new Error('未找到原消息，记录可能已更新或移除')
   const mapped = raw.map(normalizeMessage)
   allMessages.value = { ...allMessages.value, [u]: mapped }
-  messagesMeta.value = { ...messagesMeta.value, [u]: { total: mapped.length, hasMore: false } }
+  messagesMeta.value = { ...messagesMeta.value, [u]: { total: mapped.length, hasMore: false, snapshotGeneration: resp.snapshotGeneration } }
   applied = true
 
   searchContext.value.anchorId = String(resp?.anchorId || anchor)
@@ -1555,6 +1552,29 @@ try {
   showErrorAlert(e?.message || '定位失败')
   return false
 }
+}
+
+const refreshSnapshotWindow = async ({ signal } = {}) => {
+  const username = selectedContact.value?.username
+  ++anchorNavigationVersion
+  ++messageSearchReqId
+  messageSearchLoading.value = false
+  messageSearchTotal.value = 0
+  messageSearchSelectedIndex.value = -1
+  messageSearchIndexInfo.value = null
+  messageSearchBackendStatus.value = ''
+  messageSearchTicket.value = ''
+  messageSearchCoverage.value = ''
+  stopMessageSearchIndexPolling()
+  anchorContextCache.clear()
+  timeSidebarCache.clear()
+  searchContext.value = createEmptySearchContext()
+  messageSearchResults.value = []
+  messageSearchHasMore.value = false
+  messageSearchOffset.value = 0
+  invalidateSnapshotMessages()
+  if (!username) return
+  await refreshSelectedMessages({ throwOnError: true, signal })
 }
 
 const locateByDate = async (dateStr) => {
@@ -1633,6 +1653,7 @@ const prevMeta = messagesMeta.value[u] || null
 messagesMeta.value = {
   ...messagesMeta.value,
   [u]: {
+    snapshotGeneration: prevMeta?.snapshotGeneration,
     total: Math.max(Number(prevMeta?.total || 0), list.length),
     hasMore: false
   }
@@ -1657,10 +1678,13 @@ if (!anchorId) {
 }
 
 const ctxUsername = u
+const context = searchContext.value, account = selectedAccount.value, version = anchorNavigationVersion
+const generation = messagesMeta.value[u]?.snapshotGeneration
+const current = () => searchContext.value === context && context.active && selectedAccount.value === account && version === anchorNavigationVersion
 searchContext.value.loadingAfter = true
 try {
   const resp = await api.getChatMessagesAround({
-    account: selectedAccount.value,
+    account,
     username: ctxUsername,
     anchor_id: anchorId,
     before: 0,
@@ -1668,7 +1692,11 @@ try {
     source: DEFAULT_CHAT_SOURCE
   })
 
-  if (!searchContext.value?.active || String(searchContext.value.username || '').trim() !== ctxUsername) return
+  if (!current()) return
+  if (resp.snapshotGeneration !== generation) {
+    await onSnapshotChanged()
+    return
+  }
 
   const raw = resp?.messages || []
   const mapped = raw.map(normalizeMessage)
@@ -1690,9 +1718,10 @@ try {
 
   _mergeContextMessages(ctxUsername, [...existing, ...appended])
 } catch (e) {
+  if (!current()) return
   showErrorAlert(e?.message || '加载更多消息失败')
 } finally {
-  if (searchContext.value?.active && String(searchContext.value.username || '').trim() === ctxUsername) {
+  if (current()) {
     searchContext.value.loadingAfter = false
   }
 }
@@ -1720,10 +1749,13 @@ const beforeScrollHeight = c ? c.scrollHeight : 0
 const beforeScrollTop = c ? c.scrollTop : 0
 
 const ctxUsername = u
+const context = searchContext.value, account = selectedAccount.value, version = anchorNavigationVersion
+const generation = messagesMeta.value[u]?.snapshotGeneration
+const current = () => searchContext.value === context && context.active && selectedAccount.value === account && version === anchorNavigationVersion
 searchContext.value.loadingBefore = true
 try {
   const resp = await api.getChatMessagesAround({
-    account: selectedAccount.value,
+    account,
     username: ctxUsername,
     anchor_id: anchorId,
     before: messagePageSize,
@@ -1731,7 +1763,11 @@ try {
     source: DEFAULT_CHAT_SOURCE
   })
 
-  if (!searchContext.value?.active || String(searchContext.value.username || '').trim() !== ctxUsername) return
+  if (!current()) return
+  if (resp.snapshotGeneration !== generation) {
+    await onSnapshotChanged()
+    return
+  }
 
   const raw = resp?.messages || []
   const mapped = raw.map(normalizeMessage)
@@ -1760,9 +1796,10 @@ try {
     c2.scrollTop = beforeScrollTop + (afterScrollHeight - beforeScrollHeight)
   }
 } catch (e) {
+  if (!current()) return
   showErrorAlert(e?.message || '加载更多消息失败')
 } finally {
-  if (searchContext.value?.active && String(searchContext.value.username || '').trim() === ctxUsername) {
+  if (current()) {
     searchContext.value.loadingBefore = false
   }
 }
@@ -2220,7 +2257,6 @@ if (c.scrollTop <= 240 && autoLoadReady.value && hasMoreMessages.value && !isLoa
     messageSearchSelectedSenderInitial,
     messageSearchSenderLabel,
     filteredMessageSearchSenderOptions,
-    searchContextBannerText,
     timeSidebarOpen,
     timeSidebarYear,
     timeSidebarMonth,
@@ -2262,6 +2298,7 @@ if (c.scrollTop <= 240 && autoLoadReady.value && hasMoreMessages.value && !isLoa
     exitSearchContext,
     locateSearchHit,
     locateByAnchorId,
+    refreshSnapshotWindow,
     prepareAnchorContext,
     locateByDate,
     jumpToConversationFirst,

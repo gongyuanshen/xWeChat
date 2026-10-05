@@ -13,9 +13,11 @@ import hashlib
 import hmac
 import os
 import json
+import sqlite3
 import struct
 import time
 import tempfile
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .app_paths import get_output_databases_dir
 from .database_filters import should_skip_source_database
-from .sqlite_diagnostics import collect_sqlite_diagnostics, sqlite_diagnostics_status, repair_sqlite_indexes
+from .sqlite_diagnostics import collect_sqlite_diagnostics, sqlite_diagnostics_status
 from .sqlite_wal import merge_wal_snapshot
 
 # 注意：不再支持默认密钥，所有密钥必须通过参数传入
@@ -452,7 +454,9 @@ def _build_decrypt_failure_message(result: dict) -> str:
     diagnostics = dict(result.get("diagnostics") or {})
 
     detail = (
-        diagnostics.get("quick_check_error")
+        diagnostics.get("integrity_check_error")
+        or (diagnostics.get("integrity_check") if diagnostics.get("integrity_check_ok") is False else None)
+        or diagnostics.get("quick_check_error")
         or diagnostics.get("connect_error")
         or diagnostics.get("table_list_error")
         or diagnostics.get("page_count_error")
@@ -682,13 +686,15 @@ class WeChatDatabaseDecryptor:
         参数:
             key_hex: 64位十六进制密钥
         """
-        if len(key_hex) != 64:
+        if not isinstance(key_hex, str) or len(key_hex) != 64:
             raise ValueError("密钥必须是64位十六进制字符串")
         
         try:
             self.key_bytes = bytes.fromhex(key_hex)
         except ValueError:
             raise ValueError("密钥必须是有效的十六进制字符串")
+        if len(self.key_bytes) != KEY_SIZE:
+            raise ValueError("密钥必须是64位十六进制字符串，不允许空白字符")
         self.last_result: dict = {}
     
     def decrypt_database(self, db_path: str, output_path: str) -> bool:
@@ -761,14 +767,6 @@ class WeChatDatabaseDecryptor:
                 item["error"] = err[:200]
             result["failed_page_samples"].append(item)
 
-        def _append_hmac_warning_page(page_num: int) -> None:
-            # 非首页 HMAC 异常不再直接丢弃页面：部分微信 4.x 大库在 1GiB 边界会出现
-            # 单页 HMAC 不匹配，但页面本身仍可正常解密。丢页会导致后续页号整体错位。
-            result["hmac_warning_pages"] = int(result.get("hmac_warning_pages") or 0) + 1
-            if len(result["hmac_warning_samples"]) >= 8:
-                return
-            result["hmac_warning_samples"].append({"page": int(page_num), "reason": "hmac"})
-
         def _finalize(success: bool, error: str = "") -> bool:
             normalized_success = bool(success)
             result["success"] = normalized_success
@@ -776,23 +774,22 @@ class WeChatDatabaseDecryptor:
                 result["error"] = " ".join(str(error).split()).strip()
 
             output_file = working_output
-            if output_file is not None and output_file.exists():
-                try:
-                    result["output_size"] = int(output_file.stat().st_size)
-                except Exception:
-                    pass
-
+            if normalized_success and output_file is not None:
                 diagnostics = collect_sqlite_diagnostics(output_file, quick_check=True)
-                if (normalized_success and diagnostics.get("quick_check_ok") is False
-                        and result["key_authenticated"] and result["failed_pages"] == 0
-                        and result["hmac_warning_pages"] == 0):
-                    result["index_repair"] = repair_sqlite_indexes(output_file)
-                    if result["index_repair"].get("success"):
-                        diagnostics = collect_sqlite_diagnostics(output_file, quick_check=True)
+                try:
+                    with closing(sqlite3.connect(output_file.resolve().as_uri() + "?mode=ro&immutable=1", uri=True)) as conn:
+                        checks = [row[0] for row in conn.execute("PRAGMA integrity_check")]
+                    diagnostics["integrity_check"] = checks
+                    diagnostics["integrity_check_ok"] = checks == ["ok"]
+                except sqlite3.Error as exc:
+                    diagnostics["integrity_check_error"] = f"{type(exc).__name__}: {exc}"
+                    diagnostics["integrity_check_ok"] = False
                 result["output_size"] = output_file.stat().st_size
                 diagnostics["path"] = str(output_path)
                 result["diagnostics"] = diagnostics
                 result["diagnostic_status"] = sqlite_diagnostics_status(diagnostics)
+                if not diagnostics["integrity_check_ok"]:
+                    result["diagnostic_status"] = "integrity_check_failed"
                 result["output_header_debug"] = _read_plain_sqlite_header_debug(output_file)
                 result["output_header_debug"]["path"] = str(output_path)
 
@@ -861,12 +858,18 @@ class WeChatDatabaseDecryptor:
         logger.info(f"开始解密数据库: {db_path}")
         
         try:
-            if Path(db_path).resolve() == Path(output_path).resolve() or (
-                Path(output_path).exists() and os.path.samefile(db_path, output_path)
-            ):
-                raise ValueError("解密输出不能覆盖源数据库")
+            for suffix in ("", "-wal", "-shm", "-journal"):
+                source_file = Path(str(db_path) + suffix)
+                if source_file.resolve() == Path(output_path).resolve() or (
+                    source_file.exists() and Path(output_path).exists()
+                    and os.path.samefile(source_file, output_path)
+                ):
+                    raise ValueError("解密输出不能覆盖源数据库或其日志文件")
             source_snapshot_before = _safe_file_snapshot(db_path)
             result["source_snapshot_before"] = source_snapshot_before
+            for snapshot in (source_snapshot_before, *source_snapshot_before["siblings"].values()):
+                if snapshot.get("stat_error"):
+                    raise OSError(f"源数据库快照状态读取失败: {snapshot['stat_error']}")
             logger.info(
                 "[decrypt.pipeline] source_snapshot_before %s",
                 json.dumps(
@@ -898,6 +901,9 @@ class WeChatDatabaseDecryptor:
 
             source_snapshot_after = _safe_file_snapshot(db_path)
             result["source_snapshot_after"] = source_snapshot_after
+            for snapshot in (source_snapshot_after, *source_snapshot_after["siblings"].values()):
+                if snapshot.get("stat_error"):
+                    raise OSError(f"源数据库快照状态读取失败: {snapshot['stat_error']}")
             before_size = int(source_snapshot_before.get("size") or 0)
             after_size = int(source_snapshot_after.get("size") or 0)
             before_mtime = int(source_snapshot_before.get("mtime_ns") or 0)
@@ -935,6 +941,8 @@ class WeChatDatabaseDecryptor:
 
             if source_changed:
                 return _finalize(False, "源数据库或 WAL 在读取期间发生变化，请退出微信后重试")
+            if len(encrypted_data) != before_size or len(wal_data) != source_snapshot_before["siblings"]["-wal"].get("size", 0):
+                raise OSError("源数据库或 WAL 读取不完整，请重新获取稳定的数据库副本")
 
             logger.info(f"读取文件大小: {len(encrypted_data)} bytes")
             result["input_size"] = int(len(encrypted_data))
@@ -962,10 +970,6 @@ class WeChatDatabaseDecryptor:
                 ),
             )
 
-            if len(encrypted_data) < 4096:
-                logger.warning(f"文件太小，跳过解密: {db_path}")
-                return _finalize(False, "file_too_small")
-
             # 检查是否已经是解密的数据库
             if encrypted_data.startswith(SQLITE_HEADER):
                 logger.info(f"文件已是SQLite格式，直接复制: {db_path}")
@@ -982,6 +986,9 @@ class WeChatDatabaseDecryptor:
                 _write_output(encrypted_data)
                 result["copied_as_sqlite"] = True
                 return _finalize(True)
+
+            if len(encrypted_data) < PAGE_SIZE or len(encrypted_data) % PAGE_SIZE:
+                raise ValueError("加密数据库页不完整，文件大小必须是 4096 字节的整数倍")
             
             page1 = encrypted_data[:PAGE_SIZE]
             resolved_key_material = _resolve_page1_key_material(self.key_bytes, page1)
@@ -1011,114 +1018,37 @@ class WeChatDatabaseDecryptor:
                 ),
             )
 
+            # Authenticate every source page before applying WAL frames; no damaged
+            # source page is silently hidden by a later WAL replacement.
+            result["total_pages"] = len(encrypted_data) // PAGE_SIZE
+            for page_num in range(1, result["total_pages"] + 1):
+                page = encrypted_data[(page_num - 1) * PAGE_SIZE:page_num * PAGE_SIZE]
+                if not hmac.compare_digest(page[-HMAC_SIZE:], _compute_page_hmac(mac_key, page, page_num)):
+                    result["failed_pages"] = 1
+                    _append_failed_page(page_num, "hmac")
+                    raise ValueError(f"数据库第 {page_num} 页 HMAC 校验失败")
+
             encrypted_data, result["wal"] = merge_wal_snapshot(
                 encrypted_data, wal_data, PAGE_SIZE,
                 verify_page=lambda page, pgno: hmac.compare_digest(
                     page[-HMAC_SIZE:], _compute_page_hmac(mac_key, page, pgno)),
             )
             decrypted_data = bytearray()
-            total_pages = (len(encrypted_data) + PAGE_SIZE - 1) // PAGE_SIZE
-            successful_pages = 0
-            failed_pages = 0
-            result["total_pages"] = int(total_pages)
-            result["expected_output_size"] = int(total_pages * PAGE_SIZE)
-            logger.info(
-                "[decrypt.pipeline] page_loop_start db=%s total_pages=%s expected_output_size=%s",
-                result["db_name"],
-                int(total_pages),
-                int(result["expected_output_size"]),
-            )
-
-            for cur_page in range(total_pages):
-                page_num = cur_page + 1
-                start = cur_page * PAGE_SIZE
-                page = encrypted_data[start:start + PAGE_SIZE]
-                if not page:
-                    break
-                if len(page) < PAGE_SIZE:
-                    logger.warning(
-                        "Page %s is short: %s bytes; padding to %s bytes",
-                        page_num,
-                        len(page),
-                        PAGE_SIZE,
-                    )
-                    page = page + (b"\x00" * (PAGE_SIZE - len(page)))
-
-                stored_hmac = page[PAGE_SIZE - HMAC_SIZE: PAGE_SIZE]
-                expected_hmac = _compute_page_hmac(mac_key, page, page_num)
-                if not hmac.compare_digest(stored_hmac, expected_hmac):
-                    logger.warning("Page %s HMAC verification failed; decrypting page anyway", page_num)
-                    _append_hmac_warning_page(page_num)
-                    anomaly_debug = _build_page_anomaly_debug(
-                        enc_key,
-                        mac_key,
-                        page,
-                        page_num,
-                        stored_hmac=stored_hmac,
-                        expected_hmac=expected_hmac,
-                        reason="hmac",
-                    )
-                    if len(result["hmac_debug_samples"]) < 8:
-                        result["hmac_debug_samples"].append(anomaly_debug)
-                    logger.warning(
-                        "[decrypt.page_anomaly] %s",
-                        json.dumps(
-                            {
-                                "db_name": result["db_name"],
-                                "anomaly": anomaly_debug,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                    )
-
+            total_pages = len(encrypted_data) // PAGE_SIZE
+            result["total_pages"] = total_pages
+            result["expected_output_size"] = len(encrypted_data)
+            for page_num in range(1, total_pages + 1):
+                page = encrypted_data[(page_num - 1) * PAGE_SIZE:page_num * PAGE_SIZE]
                 try:
                     decrypted_data.extend(_decrypt_page(enc_key, page, page_num))
-                    successful_pages += 1
-                except Exception as e:
-                    logger.error("Page %s AES decryption failed: %s", page_num, e)
-                    failed_pages += 1
-                    _append_failed_page(page_num, "aes", str(e))
-                    aes_debug = _build_page_anomaly_debug(
-                        enc_key,
-                        mac_key,
-                        page,
-                        page_num,
-                        stored_hmac=stored_hmac,
-                        expected_hmac=expected_hmac,
-                        reason="aes",
-                    )
-                    if len(result["aes_debug_samples"]) < 8:
-                        result["aes_debug_samples"].append(aes_debug)
-                    logger.error(
-                        "[decrypt.page_anomaly] %s",
-                        json.dumps(
-                            {
-                                "db_name": result["db_name"],
-                                "anomaly": aes_debug,
-                            },
-                            ensure_ascii=False,
-                            sort_keys=True,
-                        ),
-                    )
-                    # 保留页占位，避免后续页整体错位导致 SQLite 必然损坏。
-                    decrypted_data.extend(b"\x00" * PAGE_SIZE)
-                    continue
-
+                except Exception as exc:
+                    result["failed_pages"] = 1
+                    _append_failed_page(page_num, "aes", str(exc))
+                    raise ValueError(f"数据库第 {page_num} 页 AES 解密失败: {exc}") from exc
+                result["successful_pages"] += 1
                 if total_pages >= 100000 and page_num % 50000 == 0:
-                    logger.info(
-                        "[decrypt.pipeline] page_loop_progress db=%s page=%s/%s successful_pages=%s failed_pages=%s hmac_warning_pages=%s output_bytes=%s",
-                        result["db_name"],
-                        int(page_num),
-                        int(total_pages),
-                        int(successful_pages),
-                        int(failed_pages),
-                        int(result.get("hmac_warning_pages") or 0),
-                        int(len(decrypted_data)),
-                    )
-
-            result["successful_pages"] = int(successful_pages)
-            result["failed_pages"] = int(failed_pages)
+                    logger.info("[decrypt.pipeline] page_loop_progress db=%s page=%s/%s",
+                                result["db_name"], page_num, total_pages)
 
             # WAL commit size is authoritative even if page 1 was not in the WAL.
             if result["wal"]["committed_frames"]:
@@ -1127,35 +1057,12 @@ class WeChatDatabaseDecryptor:
             _write_output(decrypted_data)
 
             logger.info(f"解密文件大小: {len(decrypted_data)} bytes")
-            if int(len(decrypted_data)) != int(result["expected_output_size"]):
-                logger.warning(
-                    "[decrypt.pipeline] output_size_mismatch db=%s output_size=%s expected_output_size=%s delta=%s",
-                    result["db_name"],
-                    int(len(decrypted_data)),
-                    int(result["expected_output_size"]),
-                    int(len(decrypted_data)) - int(result["expected_output_size"]),
-                )
-            if failed_pages > 0:
-                logger.warning(
-                    "解密输出包含页失败: db=%s total_pages=%s failed_pages=%s failure_reasons=%s samples=%s",
-                    result["db_name"],
-                    int(total_pages),
-                    int(failed_pages),
-                    json.dumps(result["failure_reasons"], ensure_ascii=False, sort_keys=True),
-                    json.dumps(result["failed_page_samples"], ensure_ascii=False),
-                )
-            if int(result.get("hmac_warning_pages") or 0) > 0:
-                logger.warning(
-                    "解密输出包含HMAC告警页但已保留页内容: db=%s total_pages=%s hmac_warning_pages=%s samples=%s",
-                    result["db_name"],
-                    int(total_pages),
-                    int(result.get("hmac_warning_pages") or 0),
-                    json.dumps(result["hmac_warning_samples"], ensure_ascii=False),
-                )
+            if len(decrypted_data) != result["expected_output_size"]:
+                raise ValueError("解密输出大小与完整数据库页数不匹配")
             return _finalize(True)
 
         except Exception as e:
-            logger.error(f"解密失败: {db_path}, 错误: {e}")
+            logger.exception("解密失败: %s, 错误: %s", db_path, e)
             return _finalize(False, str(e))
         finally:
             if working_output is not None:
@@ -1296,107 +1203,109 @@ def decrypt_wechat_databases(db_storage_path: str = None, key: str = None) -> di
 
         # 为每个账号创建专门的输出目录
         account_output_dir = base_output_dir / account_name
-        account_output_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"账号 {account_name} 输出目录: {account_output_dir}")
+        from .snapshot_registry import legacy_database_write
+        with legacy_database_write(account_output_dir):
+            account_output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"账号 {account_name} 输出目录: {account_output_dir}")
 
-        try:
-            source_info = account_sources.get(account_name, {})
-            source_db_storage_path = str(source_info.get("db_storage_path") or db_storage_path or "")
-            wxid_dir = str(source_info.get("wxid_dir") or "")
-            (account_output_dir / "_source.json").write_text(
-                json.dumps(
-                    {
-                        "db_storage_path": source_db_storage_path,
-                        "wxid_dir": wxid_dir,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
-
-        account_success = 0
-        account_processed = []
-        account_failed = []
-        account_db_diagnostics = {}
-        account_diagnostic_warning_count = 0
-
-        for db_info in databases:
-            db_path = db_info['path']
-            db_name = db_info['name']
-
-            # 生成输出文件名（保持原始文件名，不添加前缀）
-            output_path = account_output_dir / db_name
-
-            # 解密数据库
-            logger.info(f"解密 {account_name}/{db_name}")
-            ok = decryptor.decrypt_database(db_path, str(output_path))
-            db_diagnostic = dict(getattr(decryptor, "last_result", {}) or {})
-            if not db_diagnostic:
-                db_diagnostic = {
-                    "db_path": str(db_path),
-                    "db_name": str(db_name),
-                    "output_path": str(output_path),
-                    "success": bool(ok),
-                }
-            db_diagnostic["account"] = str(account_name)
-            account_db_diagnostics[db_name] = db_diagnostic
-
-            if (
-                (not bool(db_diagnostic.get("success", ok)))
-                or int(db_diagnostic.get("failed_pages") or 0) > 0
-                or int(db_diagnostic.get("hmac_warning_pages") or 0) > 0
-                or str(db_diagnostic.get("diagnostic_status") or "") != "ok"
-            ):
-                account_diagnostic_warning_count += 1
-
-            if ok:
-                account_success += 1
-                success_count += 1
-                account_processed.append(str(output_path))
-                processed_files.append(str(output_path))
-                logger.info(f"解密成功: {account_name}/{db_name}")
-            else:
-                account_failed.append(db_path)
-                failed_files.append(db_path)
-                logger.error(f"解密失败: {account_name}/{db_name}")
-
-        # 记录账号解密结果
-        account_results[account_name] = {
-            "total": len(databases),
-            "success": account_success,
-            "failed": len(databases) - account_success,
-            "output_dir": str(account_output_dir),
-            "source_db_storage_path": str(source_db_storage_path),
-            "source_wxid_dir": str(wxid_dir),
-            "processed_files": account_processed,
-            "failed_files": account_failed,
-            "db_diagnostics": account_db_diagnostics,
-            "diagnostic_warning_count": int(account_diagnostic_warning_count),
-        }
-        diagnostic_warning_count += int(account_diagnostic_warning_count)
-
-        # 构建“会话最后一条消息”缓存表：把耗时挪到解密阶段，后续会话列表直接查表
-        if os.environ.get("WECHAT_TOOL_BUILD_SESSION_LAST_MESSAGE", "1") != "0":
             try:
-                from .session_last_message import build_session_last_message_table
-
-                account_results[account_name]["session_last_message"] = build_session_last_message_table(
-                    account_output_dir,
-                    rebuild=True,
-                    include_hidden=True,
-                    include_official=True,
+                source_info = account_sources.get(account_name, {})
+                source_db_storage_path = str(source_info.get("db_storage_path") or db_storage_path or "")
+                wxid_dir = str(source_info.get("wxid_dir") or "")
+                (account_output_dir / "_source.json").write_text(
+                    json.dumps(
+                        {
+                            "db_storage_path": source_db_storage_path,
+                            "wxid_dir": wxid_dir,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
                 )
-            except Exception as e:
-                logger.warning(f"构建会话最后一条消息缓存表失败: {account_name}: {e}")
-                account_results[account_name]["session_last_message"] = {
-                    "status": "error",
-                    "message": str(e),
-                }
+            except Exception:
+                pass
 
-        logger.info(f"账号 {account_name} 解密完成: 成功 {account_success}/{len(databases)}")
+            account_success = 0
+            account_processed = []
+            account_failed = []
+            account_db_diagnostics = {}
+            account_diagnostic_warning_count = 0
+
+            for db_info in databases:
+                db_path = db_info['path']
+                db_name = db_info['name']
+
+                # 生成输出文件名（保持原始文件名，不添加前缀）
+                output_path = account_output_dir / db_name
+
+                # 解密数据库
+                logger.info(f"解密 {account_name}/{db_name}")
+                ok = decryptor.decrypt_database(db_path, str(output_path))
+                db_diagnostic = dict(getattr(decryptor, "last_result", {}) or {})
+                if not db_diagnostic:
+                    db_diagnostic = {
+                        "db_path": str(db_path),
+                        "db_name": str(db_name),
+                        "output_path": str(output_path),
+                        "success": bool(ok),
+                    }
+                db_diagnostic["account"] = str(account_name)
+                account_db_diagnostics[db_name] = db_diagnostic
+
+                if (
+                    (not bool(db_diagnostic.get("success", ok)))
+                    or int(db_diagnostic.get("failed_pages") or 0) > 0
+                    or int(db_diagnostic.get("hmac_warning_pages") or 0) > 0
+                    or str(db_diagnostic.get("diagnostic_status") or "") != "ok"
+                ):
+                    account_diagnostic_warning_count += 1
+
+                if ok:
+                    account_success += 1
+                    success_count += 1
+                    account_processed.append(str(output_path))
+                    processed_files.append(str(output_path))
+                    logger.info(f"解密成功: {account_name}/{db_name}")
+                else:
+                    account_failed.append(db_path)
+                    failed_files.append(db_path)
+                    logger.error(f"解密失败: {account_name}/{db_name}")
+
+            # 记录账号解密结果
+            account_results[account_name] = {
+                "total": len(databases),
+                "success": account_success,
+                "failed": len(databases) - account_success,
+                "output_dir": str(account_output_dir),
+                "source_db_storage_path": str(source_db_storage_path),
+                "source_wxid_dir": str(wxid_dir),
+                "processed_files": account_processed,
+                "failed_files": account_failed,
+                "db_diagnostics": account_db_diagnostics,
+                "diagnostic_warning_count": int(account_diagnostic_warning_count),
+            }
+            diagnostic_warning_count += int(account_diagnostic_warning_count)
+
+            # 构建“会话最后一条消息”缓存表：把耗时挪到解密阶段，后续会话列表直接查表
+            if os.environ.get("WECHAT_TOOL_BUILD_SESSION_LAST_MESSAGE", "1") != "0":
+                try:
+                    from .session_last_message import build_session_last_message_table
+
+                    account_results[account_name]["session_last_message"] = build_session_last_message_table(
+                        account_output_dir,
+                        rebuild=True,
+                        include_hidden=True,
+                        include_official=True,
+                    )
+                except Exception as e:
+                    logger.warning(f"构建会话最后一条消息缓存表失败: {account_name}: {e}")
+                    account_results[account_name]["session_last_message"] = {
+                        "status": "error",
+                        "message": str(e),
+                    }
+
+            logger.info(f"账号 {account_name} 解密完成: 成功 {account_success}/{len(databases)}")
 
     # 返回结果
     result = {

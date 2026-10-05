@@ -116,6 +116,9 @@ def init_anti_revoke_db(db_path: Path) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_revoked_server_id ON revoked_messages(server_id)"
             )
             columns = {row[1] for row in conn.execute("PRAGMA table_info(revoked_messages)")}
+            for name in ("source_db", "source_table"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE revoked_messages ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if "revoke_xml" not in columns:
                 conn.execute("ALTER TABLE revoked_messages ADD COLUMN revoke_xml TEXT NOT NULL DEFAULT ''")
                 # Older builds guessed the latest sent message on every replay.
@@ -341,7 +344,10 @@ def save_messages_to_archive(
     self_candidates_set = set(candidates)
 
     effective_my_rowid = my_rowid
-    if effective_my_rowid is None:
+    if effective_my_rowid is None and any(
+        (r.get("real_sender_id") or r.get("realSenderId")) if isinstance(r, dict)
+        else getattr(r, "real_sender_id", None) for r in rows
+    ):
         effective_my_rowid = resolve_self_rowid_cached(account_dir)
 
     conn = get_anti_revoke_connection(account_dir)
@@ -363,6 +369,8 @@ def save_messages_to_archive(
                 packed_info_data = r.get("packed_info_data") or r.get("packedInfoData")
                 row_user = str(r.get("username") or username).strip()
                 real_sender_id = r.get("real_sender_id") or r.get("realSenderId")
+                source_db = str(r.get("source_db") or r.get("db") or "")
+                source_table = str(r.get("source_table") or r.get("table") or "")
             else:
                 local_id = int(getattr(r, "local_id", 0) or 0)
                 server_id = str(getattr(r, "server_id", "0") or "0").strip()
@@ -376,7 +384,11 @@ def save_messages_to_archive(
                 packed_info_data = getattr(r, "packed_info_data", None) or getattr(r, "packedInfoData", None)
                 row_user = username
                 real_sender_id = getattr(r, "real_sender_id", None)
+                source_db = str(getattr(r, "db_stem", ""))
+                source_table = str(getattr(r, "table_name", ""))
 
+            if bool(source_db) != bool(source_table):
+                raise ValueError("Archive source identity requires both database and table")
             raw_text = _decode_message_content(compress_content, message_content).strip()
             if not raw_text and isinstance(r, dict):
                 raw_text = str(r.get("content") or "").strip()
@@ -388,6 +400,7 @@ def save_messages_to_archive(
                         username=row_user, xml_text=raw_text,
                         revoke_time=create_time or int(time.time()),
                         server_id=server_id, local_id=local_id,
+                        source_db=source_db, source_table=source_table,
                     ))
                 continue
 
@@ -447,12 +460,18 @@ def save_messages_to_archive(
                 ).fetchone()
             if existing is None and local_id > 0:
                 existing = conn.execute(
-                    "SELECT id, is_revoked, revoke_time FROM revoked_messages WHERE account = ? AND username = ? AND local_id = ? AND server_id = '0' LIMIT 1",
-                    (account_name, row_user, local_id),
+                    "SELECT id, is_revoked, revoke_time FROM revoked_messages WHERE account = ? AND username = ? AND local_id = ? AND server_id = '0' AND source_db = ? AND source_table = ? LIMIT 1",
+                    (account_name, row_user, local_id, source_db, source_table),
                 ).fetchone()
 
             if existing is not None:
                 row_id = existing["id"]
+                if source_db and source_table:
+                    conn.execute(
+                        "UPDATE revoked_messages SET source_db = ?, source_table = ? "
+                        "WHERE id = ? AND source_db = '' AND source_table = ''",
+                        (source_db, source_table, row_id),
+                    )
                 conn.execute(
                     """
                     UPDATE revoked_messages
@@ -498,8 +517,8 @@ def save_messages_to_archive(
                         account, username, server_id, local_id, create_time,
                         revoke_time, is_revoked, sort_seq, sender_username,
                         is_sent, local_type, content, compress_content,
-                        packed_info_data, extra_json
-                    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                        packed_info_data, extra_json, source_db, source_table
+                    ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_name,
@@ -515,6 +534,8 @@ def save_messages_to_archive(
                         compress_content if isinstance(compress_content, bytes) else None,
                         packed_info_data if isinstance(packed_info_data, bytes) else None,
                         extra_json_str,
+                        source_db,
+                        source_table,
                     ),
                 )
                 saved_count += 1
@@ -651,6 +672,10 @@ def process_revocation_event(
     revoke_time: Optional[int] = None,
     server_id: Optional[str] = None,
     local_id: Optional[int] = None,
+    *,
+    source_db: str = "",
+    source_table: str = "",
+    recover_missing: bool = True,
 ) -> Optional[dict[str, Any]]:
     parsed = parse_revoke_xml(xml_text)
     if not parsed:
@@ -691,11 +716,16 @@ def process_revocation_event(
     self_u = resolve_account_self_username(account_dir)
     query = f"SELECT * FROM revoked_messages WHERE account = ? AND username = ? AND {identity_sql} AND local_type != 10000"
     parameters = (account_name, target_session, identity_value)
+    if newmsgid in ("", "0") and msgid in ("", "0") and target_server in ("", "0") and (source_db or source_table):
+        query += " AND source_db = ? AND source_table = ?"
+        parameters += (source_db, source_table)
     conn = get_anti_revoke_connection(account_dir)
     try:
         conn.execute("BEGIN IMMEDIATE")
         matched_rows = conn.execute(query, parameters).fetchall()
         if not matched_rows:
+            if not recover_missing:
+                return None
             # Recovery writes through the regular archive path. Release this
             # transaction, then resolve again under the write lock before updating.
             conn.rollback()
@@ -772,10 +802,12 @@ def get_revoked_messages_map(
             if s_id and s_id != "0":
                 res_map[f"server:{s_id}"] = d
             if l_id > 0:
+                source_db, source_table = str(d.get("source_db") or ""), str(d.get("source_table") or "")
+                identity = f"{source_db}:{source_table}:{l_id}" if source_db and source_table else str(l_id)
                 if username:
-                    res_map[f"local:{l_id}"] = d
+                    res_map[f"local:{identity}"] = d
                 if u:
-                    res_map[f"local:{u}:{l_id}"] = d
+                    res_map[f"local:{u}:{identity}"] = d
     finally:
         conn.close()
     return res_map
@@ -925,8 +957,12 @@ def format_revoked_message_as_chat_item(
     if not content_text:
         content_text = _infer_message_brief_by_local_type(local_type)
 
+    source_db, source_table = str(rev_row.get("source_db") or ""), str(rev_row.get("source_table") or "")
+    source_id = f"{source_db}:{source_table}:{local_id}" if source_db and source_table else str(local_id)
     return {
-        "id": f"anti_revoke:{username}:{server_id_str or local_id}",
+        "id": f"anti_revoke:{username}:{server_id_str if server_id else source_id}",
+        "db": source_db,
+        "table": source_table,
         "localId": local_id,
         "serverId": server_id,
         "serverIdStr": server_id_str if server_id else "",

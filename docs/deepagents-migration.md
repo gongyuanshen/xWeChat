@@ -117,6 +117,6 @@ MiMo 的扩展字段通过官方 OpenAI SDK 完整透传，不把思考字段显
 
 SSE 使用持久化事件 ID、记录 ID 和修订号支持断线重连；正文增量直接投影，正文生成结束后保存答案并发布完成状态。保留来源定位、人物胶囊、复制、滚动和模型选择交互。
 
-`desktop/scripts/ai-packaging.cjs` 收集 DeepAgents、LangChain 及其动态依赖；`tools/build_ai_smoke.cjs` 验证冻结后的真实图和检查点运行。Windows/macOS 继续使用 `.github/workflows/ai-cross-platform.yml`。安装包发布不属于本次工作。
+`.github/workflows/ai-cross-platform.yml` 保留 AI、检索、前端及桌面通知和启动的源码检查。安装包与免安装压缩包已暂停后续发行，冻结 AI 程序的打包脚本及专用测试已移除；此前冻结环境的验收属于历史记录，不代表当前发行能力。
 
 官方框架接口参考：[概览](https://docs.langchain.com/oss/python/deepagents/overview)、[后端](https://docs.langchain.com/oss/python/deepagents/backends)、[上下文](https://docs.langchain.com/oss/python/deepagents/context-engineering)、[子 Agent](https://docs.langchain.com/oss/python/deepagents/subagents)。没有修改依赖包源码。

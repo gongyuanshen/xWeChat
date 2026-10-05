@@ -15,16 +15,9 @@ const normalizeWeFlowAccountDirectory = (value) => {
 
 export const resolveAccountSelfUsername = (account, info = null) => {
   const source = info && typeof info === 'object' ? info : {}
-  const realtime = source.realtime && typeof source.realtime === 'object'
-    ? source.realtime
-    : {}
   const explicit = [
     source.selfUsername,
     source.self_username,
-    source.nativeWxid,
-    source.native_wxid,
-    realtime.nativeWxid,
-    realtime.native_wxid,
   ].map(clean).find(Boolean)
 
   return explicit || normalizeWeFlowAccountDirectory(account)

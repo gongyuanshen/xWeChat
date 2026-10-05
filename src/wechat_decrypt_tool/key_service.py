@@ -3,15 +3,9 @@
 
 from .platform_support import is_windows
 
-try:
-    import wx_key
-except ImportError:
-    if is_windows():
-        print('[!] 环境中未安装wx_key依赖，可能无法自动获取数据库密钥')
-    wx_key = None
-    # sys.exit(1)
 
 import time
+import threading
 import psutil
 import subprocess
 import hashlib
@@ -24,8 +18,8 @@ import asyncio
 import importlib
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from dataclasses import dataclass
-from packaging import version as pkg_version  # 建议使用 packaging 库处理版本比较
+
+  # 建议使用 packaging 库处理版本比较
 from .wechat_detection import detect_wechat_installation, parse_global_config
 from .dll_key_scan import extract_xor_keys_from_dll
 from .image_key_resolver import (
@@ -37,27 +31,22 @@ from .image_key_resolver import (
     scan_v2_templates,
     verify_key_pair,
 )
-from .image_key_memory_scan import scan_image_key_from_memory
+from .image_key_memory_scan import scan_image_key_from_memory, raise_if_image_key_scan_cancelled
 from .key_store import (
     get_account_keys_from_store,
     normalize_key_store_path,
     upsert_account_keys_in_store,
 )
 from .media_helpers import _resolve_account_dir, _resolve_account_wxid_dir
+from .media_helpers import _load_media_keys
+from .chat_accounts import resolve_chat_account_context
+from .account_source_policy import source_metadata_is_imported_snapshot
 
 logger = logging.getLogger(__name__)
 
+
 WECHAT_EXECUTABLE_NAMES = ("Weixin.exe", "WeChat.exe")
 KEY_SIZE = 32
-V4_DB_NAME_PRIORITY = (
-    "msg0.db",
-    "msg.db",
-    "micromsg.db",
-    "favorite.db",
-    "mediamsg0.db",
-    "media_msg0.db",
-    "sns.db",
-)
 
 
 def _key_payload_log_metadata(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -77,7 +66,7 @@ def _image_key_account_match_variants(value: Any) -> set[str]:
     """Return account names that should be considered equivalent for image key matching.
 
     Windows WeChat 4.x stores account data under a folder such as
-    ``wxid_testuser000001_a001`` while wx_key may report the account as
+    ``wxid_testuser000001_a001`` while its logical account ID is
     ``wxid_testuser000001``.  The trailing four-hex folder suffix is not part
     of the logical account id, so both names must match.  Do not strip
     arbitrary suffixes: names like ``wxid_demo_extra`` may be a distinct
@@ -325,28 +314,6 @@ def _normalize_internal_db_key(value: Any) -> bytes:
         raise RuntimeError("internal_db_key 格式无效：无法解析为十六进制") from e
 
 
-def _load_internal_db_key_candidates(wechat_install_path: Optional[str] = None) -> list[bytes]:
-    """自动扫描 Weixin.dll，提取 scan.py 需要的 internal_db_key 候选。"""
-    dll_path = _resolve_wechat_dll_path(wechat_install_path)
-    logger.info("[db_key_v4] 准备扫描 DLL key: dll_path=%s", str(dll_path))
-
-    candidates = extract_xor_keys_from_dll(dll_path)
-    keys: list[bytes] = []
-    for item in candidates:
-        hex_value = str(item.get("key_hex") or "").strip()
-        if not hex_value:
-            continue
-        try:
-            key_bytes = bytes.fromhex(re.sub(r"[^0-9a-fA-F]", "", hex_value))
-        except Exception:
-            continue
-        if len(key_bytes) == KEY_SIZE and key_bytes not in keys:
-            keys.append(key_bytes)
-
-    logger.info("[db_key_v4] DLL key 扫描完成: dll_path=%s candidate_count=%s", str(dll_path), len(keys))
-    return keys
-
-
 def _xor_hex_key_with_internal_db_key(db_key: Any, internal_db_key: bytes) -> str:
     normalized_key = _normalize_db_key(db_key)
     key_bytes = bytes.fromhex(normalized_key)
@@ -357,314 +324,89 @@ def _xor_hex_key_with_internal_db_key(db_key: Any, internal_db_key: bytes) -> st
     return bytes(a ^ b for a, b in zip(key_bytes, internal_db_key)).hex()
 
 
-def _sort_key_for_v4_probe(path: Path) -> tuple[int, int, str]:
-    name = path.name.lower()
-    try:
-        priority = V4_DB_NAME_PRIORITY.index(name)
-    except ValueError:
-        priority = len(V4_DB_NAME_PRIORITY)
-    depth = len(path.parts)
-    return priority, depth, str(path).lower()
+# ======================  数据库密钥内存扫描  =====================================
 
 
-def _resolve_v4_probe_db_file(db_storage_path: Optional[str]) -> Path:
-    """从用户填写的 db_storage_path 中选一个用于 key_v4 校验的加密 DB。"""
-    raw_path = _normalize_user_path(db_storage_path)
-    if not raw_path:
-        raise RuntimeError("未提供 db_storage_path，无法使用 V4 内存扫描模式")
+def _get_db_key_with_pure_memory(db_storage_path, *, wechat_install_path=None,
+                                internal_db_key=None, cancel_event=None, timeout_seconds=120.0):
+    """Read the running client and authenticate its candidate against this account only."""
+    from . import key_v4
+    from .wechat_decrypt import scan_account_databases_from_path, validate_realtime_database_key
 
-    candidate = Path(raw_path).expanduser()
-    min_size = 4096
-    if candidate.is_file():
-        if candidate.suffix.lower() != ".db":
-            raise RuntimeError(f"V4 模式需要 .db 文件或 db_storage 目录: {candidate}")
-        if candidate.stat().st_size < min_size:
-            raise RuntimeError(f"数据库文件过小，无法用于密钥校验: {candidate}")
-        return candidate
-
-    if not candidate.exists() or not candidate.is_dir():
-        raise RuntimeError(f"db_storage_path 不存在或不是目录: {candidate}")
-
-    db_candidates: list[Path] = []
-    try:
-        from .wechat_decrypt import scan_account_databases_from_path
-
-        scan_result = scan_account_databases_from_path(str(candidate))
-        if scan_result.get("status") == "success":
-            for databases in (scan_result.get("account_databases") or {}).values():
-                for item in databases or []:
-                    db_path = Path(str(item.get("path") or ""))
-                    if db_path.is_file() and db_path.stat().st_size >= min_size:
-                        db_candidates.append(db_path)
-        else:
-            logger.info("[db_key_v4] 数据库扫描未命中: %s", scan_result.get("message") or "")
-    except Exception as e:
-        logger.info("[db_key_v4] 数据库扫描异常，将尝试直接枚举: %s", e)
-
-    # 兜底：允许传入具体 wxid 目录，或 scan 对新目录结构暂时不认识时仍可尝试。
-    if not db_candidates:
-        for db_path in candidate.rglob("*.db"):
-            try:
-                if db_path.name.lower() == "key_info.db":
-                    continue
-                if db_path.is_file() and db_path.stat().st_size >= min_size:
-                    db_candidates.append(db_path)
-            except Exception:
-                continue
-
-    if not db_candidates:
-        raise RuntimeError(f"未在路径中找到可用于 V4 校验的数据库文件: {candidate}")
-
-    db_candidates = sorted(set(db_candidates), key=_sort_key_for_v4_probe)
-    return db_candidates[0]
-
-
-def _get_db_key_with_v4(
-        db_storage_path: Optional[str],
-        internal_db_key: Optional[str] = None,
-        *,
-        wechat_install_path: Optional[str] = None,
-) -> Dict[str, Any]:
-    probe_db_path = _resolve_v4_probe_db_file(db_storage_path)
-    normalized_internal_db_key = _normalize_internal_db_key(internal_db_key)
-    logger.info(
-        "[db_key_v4] 开始 V4 内存扫描: probe_db=%s manual_internal_db_key_present=%s manual_internal_db_key_len=%s",
-        str(probe_db_path),
-        bool(normalized_internal_db_key),
-        len(normalized_internal_db_key) if normalized_internal_db_key else 0,
-    )
-
-    scan_candidate_count = 0
-    candidate_plan: list[tuple[bytes, str]] = []
-    if normalized_internal_db_key:
-        candidate_plan.append((normalized_internal_db_key, "manual"))
-    else:
-        logger.info("[db_key_v4] 未提供手动 DLL key，先自动扫描微信 DLL 辅助 key")
-        try:
-            scan_candidates = _load_internal_db_key_candidates(wechat_install_path)
-        except Exception as e:
-            raise RuntimeError(f"V4 预处理失败：自动扫描微信 DLL 辅助 key 失败：{e}") from e
-
-        scan_candidate_count = len(scan_candidates)
-        if not scan_candidates:
-            raise RuntimeError("V4 预处理失败：未从微信 DLL 中扫描到可用的辅助 key")
-
-        candidate_plan.extend((candidate, "scan.py") for candidate in scan_candidates)
-
-    try:
-        key_v4_module = importlib.import_module(".key_v4", __package__)
-    except Exception as e:
-        raise RuntimeError(f"包内 key_v4.py 加载失败: {e}") from e
-
-    if not hasattr(key_v4_module, "recover_key"):
-        raise RuntimeError("包内 key_v4.py 缺少 recover_key 函数")
-
-    try:
-        import pymem as _pymem
-    except Exception as e:
-        raise RuntimeError("pymem 模块未安装，无法执行 V4 内存扫描") from e
-
-    errors: list[str] = []
-    pid = None
-    process_name_used = ""
-    for process_name in WECHAT_EXECUTABLE_NAMES:
-        try:
-            pm = _pymem.Pymem(process_name)
-            pid = pm.process_id
-            process_name_used = process_name
+    deadline = time.monotonic() + timeout_seconds
+    key_v4._check_scan_budget(deadline, cancel_event)
+    if not db_storage_path:
+        raise ValueError('请指定账号的 db_storage_path 后再扫描数据库密钥')
+    scan = scan_account_databases_from_path(db_storage_path)
+    if scan['status'] != 'success':
+        raise ValueError(scan['message'])
+    account, source = next(iter(scan['account_sources'].items()))
+    db_root = Path(source['db_storage_path']).resolve()
+    probe_paths = sorted((Path(item['path']) for item in scan['account_databases'][account]),
+                         key=lambda path: (path.name.lower() != 'session.db', _sort_probe_database(path)))
+    probe_db = None
+    for path in probe_paths:
+        with path.open('rb') as stream:
+            page = stream.read(key_v4.PAGE_SIZE)
+        if len(page) == key_v4.PAGE_SIZE and not page.startswith(b'SQLite format 3\0'):
+            probe_db = path
             break
-        except Exception as e:
-            errors.append(f"{process_name}: {e}")
+    if probe_db is None:
+        raise ValueError('账号目录中没有可用于 HMAC 验真的完整加密数据库首页')
 
-    if not pid:
-        raise RuntimeError("未找到运行中的微信进程：" + "; ".join(errors))
-
-    logger.info(
-        "[db_key_v4] 调用单文件扫描器: module=%s process=%s pid=%s probe_db=%s",
-        getattr(key_v4_module, "__file__", "key_v4"),
-        process_name_used,
-        pid,
-        str(probe_db_path),
-    )
-
-    last_errors: list[str] = []
-    recovered_key = ""
-    used_internal_db_key_source = ""
-
-    def _try_recover(candidate_internal_db_key: bytes, source: str) -> str:
-        if hasattr(key_v4_module, "finish_flag"):
-            try:
-                key_v4_module.finish_flag = False
-            except Exception:
-                pass
-        if candidate_internal_db_key:
-            current_raw_key = key_v4_module.recover_key(pid, str(probe_db_path), candidate_internal_db_key)
-        else:
-            current_raw_key = key_v4_module.recover_key(pid, str(probe_db_path))
-        logger.info(
-            "[db_key_v4] 单文件扫描器返回结果: type=%s has_value=%s candidate_internal_db_key_len=%s source=%s",
-            type(current_raw_key).__name__,
-            bool(current_raw_key),
-            len(candidate_internal_db_key),
-            source or "raw",
-        )
-        current_key = _normalize_db_key(current_raw_key)
-        if candidate_internal_db_key:
-            current_key = _xor_hex_key_with_internal_db_key(current_key, candidate_internal_db_key)
-            logger.info("[db_key_v4] 已应用 internal_db_key 对候选 key 解掩码")
-        else:
-            logger.info("[db_key_v4] 未使用 internal_db_key，直接验证原始候选 key")
-        return current_key
-
-    tried: list[str] = []
-    for candidate_internal_db_key, source in candidate_plan:
-        try:
-            tried.append(f"{source}:len={len(candidate_internal_db_key)}")
-            recovered_key = _try_recover(candidate_internal_db_key, source)
-            used_internal_db_key_source = source if candidate_internal_db_key else ""
-            break
-        except Exception as e:
-            last_errors.append(str(e))
-            recovered_key = ""
+    manual_exe = _resolve_manual_wechat_exe_path(wechat_install_path) if wechat_install_path else ''
+    processes = [process for process in psutil.process_iter(['pid', 'name', 'exe'])
+                 if str(process.info['name']).lower() in {'weixin.exe', 'wechat.exe'}]
+    if not processes:
+        raise RuntimeError('未找到运行中的微信进程，请先自行启动并登录微信')
+    scanned = []
+    for process in processes:
+        key_v4._check_scan_budget(deadline, cancel_event)
+        pid = process.info['pid']
+        exe = process.info['exe']
+        if not exe:
+            raise PermissionError(f'无法读取微信进程 PID {pid} 的可执行路径')
+        if manual_exe and Path(manual_exe).resolve() != Path(exe).resolve():
             continue
-
-    if not recovered_key:
-        raise RuntimeError("V4 内存扫描失败：" + ("; ".join(last_errors) if last_errors else "未找到有效密钥"))
-
-    logger.info("[db_key_v4] V4 内存扫描成功: probe_db=%s", str(probe_db_path))
-    return {
-        "db_key": recovered_key,
-        "method": "key_v4",
-        "db_key_probe_path": str(probe_db_path),
-        "internal_db_key_source": used_internal_db_key_source,
-        "internal_db_key_candidate_count": scan_candidate_count,
-    }
-
-
-# ======================  以下是hook逻辑  ======================================
-
-class WeChatKeyFetcher:
-    def __init__(self):
-        self.process_names = {name.lower() for name in WECHAT_EXECUTABLE_NAMES}
-        self.timeout_seconds = 60
-
-    def _is_wechat_process(self, name: Any) -> bool:
-        return str(name or "").strip().lower() in self.process_names
-
-    def kill_wechat(self):
-        """检测并查杀微信进程"""
-        killed = False
-        for proc in psutil.process_iter(['pid', 'name']):
-            try:
-                if self._is_wechat_process(proc.info['name']):
-                    logger.info(f"Killing WeChat process: {proc.info['pid']}")
-                    proc.terminate()
-                    killed = True
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-
-        if killed:
-            time.sleep(1)  # 等待完全退出
-
-    def launch_wechat(self, exe_path: str) -> int:
-        """启动微信并返回 PID"""
-        try:
-            normalized_exe_path = _normalize_user_path(exe_path)
-            process = subprocess.Popen(normalized_exe_path)
-            time.sleep(2)
-            candidates = []
-
-            for proc in psutil.process_iter(['pid', 'name', 'exe', 'cmdline']):
-                try:
-                    p_name = proc.info.get('name')
-                    if p_name and p_name.lower() in self.process_names:
-                        cmdline_list = proc.info.get('cmdline') or []
-                        cmdline_str = " ".join(cmdline_list).lower()
-
-                        if any(target.lower() in cmdline_str for target in WECHAT_EXECUTABLE_NAMES):
-                            candidates.append({
-                                "pid": proc.info['pid'],
-                                "cmd_len": len(cmdline_str)
-                            })
-                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                    continue
-
-            if candidates:
-                # 选择命令行最短的一个作为主进程
-                main_proc = min(candidates, key=lambda x: x['cmd_len'])
-                target_pid = main_proc["pid"]
-                return target_pid
-
-            return process.pid
-
-        except Exception as e:
-            logger.error(f"启动微信失败: {e}")
-            raise RuntimeError(f"无法启动微信: {e}")
-
-    def fetch_db_key(self, wechat_install_path: Optional[str] = None) -> dict:
-        """调用 wx_key 仅获取数据库密钥 (Hook 模式)"""
-        if wx_key is None:
-            raise RuntimeError("wx_key 模块未安装或加载失败")
-
-        manual_path = _normalize_user_path(wechat_install_path)
-        if manual_path:
-            exe_path = _resolve_manual_wechat_exe_path(manual_path)
-            version = _read_wechat_version_from_exe(exe_path)
-            logger.info(
-                "[db_key] 使用手动指定的微信安装路径: input=%s exe_path=%s version=%s",
-                manual_path,
-                exe_path,
-                version or "unknown",
-            )
+        dlls = {Path(module.path) for module in process.memory_maps()
+                if Path(module.path).name.lower() in {'weixin.dll', 'wechat.dll'}}
+        if not dlls:
+            continue  # Chromium helper processes do not load the database module.
+        if len(dlls) != 1:
+            raise RuntimeError(f'PID {pid} 加载了多个微信数据库 DLL，无法确定扫描目标')
+        dll_path = dlls.pop()
+        version = _read_wechat_version_from_exe(exe)
+        if not version:
+            raise RuntimeError(f'无法读取微信版本: {exe}')
+        logger.info('[db_key_pure] process=%s version=%s dll=%s account=%s', pid, version, dll_path, account)
+        if internal_db_key:
+            masks = [_normalize_internal_db_key(internal_db_key)]
         else:
-            install_info = detect_wechat_installation()
-            exe_path = _normalize_user_path(install_info.get('wechat_exe_path'))
-            version = str(install_info.get('wechat_version') or "").strip()
-
-        if not exe_path:
-            raise RuntimeError("无法自动定位微信安装路径，请手动填写微信安装目录")
-        if not Path(exe_path).is_file():
-            raise RuntimeError(f"微信可执行文件不存在: {exe_path}")
-
-        logger.info(f"Detect WeChat: {version or 'unknown'} at {exe_path}")
-
-        self.kill_wechat()
-        pid = self.launch_wechat(exe_path)
-        logger.info(f"WeChat launched, PID: {pid}")
-
-        # 仅传入 PID，触发数据库密钥自动 Hook
-        if not wx_key.initialize_hook(pid):
-            err = wx_key.get_last_error_msg()
-            raise RuntimeError(f"数据库 Hook 初始化失败: {err}")
-
-        start_time = time.time()
-        found_db_key = None
-
-        try:
-            while True:
-                if time.time() - start_time > self.timeout_seconds:
-                    raise TimeoutError("获取数据库密钥超时 (60s)，请确保在弹出的微信中完成登录。")
-
-                key_data = wx_key.poll_key_data()
-                if key_data and 'key' in key_data:
-                    found_db_key = key_data['key']
-                    break
-
-                while True:
-                    msg, level = wx_key.get_status_message()
-                    if msg is None:
-                        break
-                    if level == 2:
-                        logger.error(f"[Hook Error] {msg}")
-
-                time.sleep(0.1)
-        finally:
-            logger.info("Cleaning up hook...")
-            wx_key.cleanup_hook()
-
-        return {
-            "db_key": found_db_key
-        }
+            masks = list(dict.fromkeys(bytes.fromhex(item['key_hex'])
+                                       for item in extract_xor_keys_from_dll(dll_path, max_workers=1)))
+        key_v4._check_scan_budget(deadline, cancel_event)
+        if not masks:
+            raise RuntimeError(f'当前微信版本 {version} DLL 不匹配源码辅助密钥签名: {dll_path}')
+        if any(len(mask) != KEY_SIZE for mask in masks):
+            raise ValueError('DLL scanner returned an invalid internal key length')
+        scanned.append(pid)
+        for mask in masks:
+            key_v4._check_scan_budget(deadline, cancel_event)
+            raw = key_v4.recover_key(pid, str(probe_db), mask,
+                                     timeout_seconds=deadline - time.monotonic(), cancel_event=cancel_event)
+            if raw is None:
+                continue
+            candidate = _xor_hex_key_with_internal_db_key(raw, mask)
+            verification = validate_realtime_database_key(db_root, candidate)
+            key_v4._check_scan_budget(deadline, cancel_event)
+            if not verification['valid']:
+                raise RuntimeError(f'扫描候选未通过账号跨库 HMAC 验真: account={account} verified_roles={verification["verified_roles"]}')
+            return {'db_key': candidate, 'method': 'pure_memory', 'pid': pid,
+                    'account': account, 'db_key_probe_path': str(probe_db),
+                    'db_storage_path': str(db_root), 'wechat_version': version,
+                    'wechat_dll_path': str(dll_path), 'verified_roles': verification['verified_roles'],
+                    'verified': True, 'internal_db_key_candidate_count': len(masks)}
+    raise RuntimeError(f'源码内存扫描未找到匹配账号的数据库密钥: account={account} scanned_pids={scanned}')
 
 
 def get_db_key_workflow(
@@ -680,92 +422,14 @@ def get_db_key_workflow(
         raise RuntimeError("当前平台不支持自动获取数据库密钥，请使用同类工具获取后手动填写。")
 
     mode = str(key_mode or "auto").strip().lower()
-    if mode in {"v4", "key_v4", "memory", "memory_scan"}:
-        return _get_db_key_with_v4(
-            db_storage_path,
-            internal_db_key=internal_db_key,
-            wechat_install_path=wechat_install_path,
-        )
-
-    if mode == "hook":
-        fetcher = WeChatKeyFetcher()
-        result = fetcher.fetch_db_key(wechat_install_path=wechat_install_path)
-        result["method"] = "hook"
-        return result
-
-    if mode != "auto":
-        raise RuntimeError(f"未知密钥获取模式: {key_mode}")
-
-    v4_error = ""
-    try:
-        return _get_db_key_with_v4(
-            db_storage_path,
-            internal_db_key=internal_db_key,
-            wechat_install_path=wechat_install_path,
-        )
-    except Exception as e:
-        v4_error = str(e)
-        logger.warning("[db_key] V4 内存扫描失败，准备回退 Hook: %s", v4_error)
-
-    fetcher = WeChatKeyFetcher()
-    try:
-        result = fetcher.fetch_db_key(wechat_install_path=wechat_install_path)
-    except TimeoutError as e:
-        if v4_error:
-            raise TimeoutError(f"V4 内存扫描失败: {v4_error}; Hook 获取超时: {e}") from e
-        raise
-    except Exception as e:
-        if v4_error:
-            raise RuntimeError(f"V4 内存扫描失败: {v4_error}; Hook 获取失败: {e}") from e
-        raise
-
-    result["method"] = "hook"
-    if v4_error:
-        result["fallback_from"] = "key_v4"
-        result["key_v4_error"] = v4_error
-    return result
+    if mode not in {'auto', 'v4', 'key_v4', 'memory', 'memory_scan', 'pure_memory'}:
+        raise ValueError(f'未知密钥获取模式: {key_mode}')
+    return _get_db_key_with_pure_memory(db_storage_path, wechat_install_path=wechat_install_path,
+                                       internal_db_key=internal_db_key, cancel_event=cancel_event,
+                                       timeout_seconds=timeout_seconds)
 
 
 # ==============================   以下是图片密钥逻辑  =====================================
-
-
-
-def try_get_local_image_keys() -> List[Dict[str, Any]]:
-    """尝试通过本地算法提取图片密钥 (无需 Hook)"""
-    if wx_key is None or not hasattr(wx_key, 'get_image_key'):
-        logger.info("[image_key] 本地算法不可用：wx_key.get_image_key 缺失")
-        return []
-
-    try:
-        res_json = wx_key.get_image_key()
-        if not res_json:
-            logger.info("[image_key] 本地算法返回空结果")
-            return []
-
-        data = json.loads(res_json)
-        accounts = data.get('accounts', [])
-        results = []
-        for acc in accounts:
-            wxid = acc.get('wxid')
-            keys = acc.get('keys', [])
-            for k in keys:
-                xor_key = k.get('xorKey')
-                aes_key = k.get('aesKey')
-                if xor_key is not None:
-                    results.append({
-                        "wxid": wxid,
-                        "xor_key": f"0x{int(xor_key):02X}",
-                        "aes_key": aes_key
-                    })
-        logger.info(
-            "[image_key] 本地算法完成：accounts=%s results=%s",
-            len(accounts),
-            [_key_payload_log_metadata(item) for item in results],
-        )
-        return results
-    except Exception as e:
-        logger.error(f"本地提取图片密钥失败: {e}")
-        return []
 
 
 def _parse_image_xor_key(value: Any) -> Optional[int]:
@@ -986,6 +650,19 @@ def _persist_verified_image_keys(
     if normalized is None:
         raise RuntimeError("拒绝保存不完整的图片密钥")
     normalized_xor, normalized_aes = normalized
+    if code is None and source == "memory_v2_verified":
+        saved = get_account_keys_from_store(canonical_account)
+        if (
+            saved.get("image_key_verified") is True
+            and saved.get("image_key_code") is not None
+            and normalize_key_store_path(saved.get("image_key_source_wxid_dir"))
+            == normalize_key_store_path(str(source_wxid_dir))
+            and clean_wxid(saved.get("image_key_derived_wxid")) == clean_wxid(matched_wxid)
+            and _normalize_complete_image_key_payload(saved) == normalized
+        ):
+            derived = derive_image_keys(saved["image_key_code"], matched_wxid)
+            if (derived.xor_key, derived.aes_key) == normalized:
+                code = saved["image_key_code"]
     alias_values: list[str] = []
     if _is_trusted_image_key_alias(
         request_account,
@@ -1006,6 +683,7 @@ def _persist_verified_image_keys(
         image_key_source_wxid_dir=str(source_wxid_dir),
         image_key_derived_wxid=matched_wxid,
         image_key_code=code,
+        raise_on_write_error=True,
     )
 
 
@@ -1046,7 +724,7 @@ async def get_image_key_integrated_workflow(
             db_storage_path=db_storage_path,
         )
     except Exception as error:
-        logger.info("[image_key] 无法预先解析目标账号目录，将保留远端兜底: %s", str(error))
+        logger.info("[image_key] 无法解析本地目标账号目录: %s", str(error))
 
     canonical_account = (
         resolved_wxid_dir.name if resolved_wxid_dir is not None else str(account or "").strip()
@@ -1077,16 +755,12 @@ async def get_image_key_integrated_workflow(
                 cached.get("cached_source"),
             )
 
-    local_keys: List[Dict[str, Any]] = []
     local_native_wxids: list[str] = []
-    trusted_native_aliases = set(_image_key_account_match_variants(canonical_account))
-    trusted_native_aliases.update(_image_key_account_match_variants(account))
     if resolved_wxid_dir is not None:
         global_info = await asyncio.to_thread(parse_global_config, str(resolved_wxid_dir.parent))
         if isinstance(global_info, dict) and str(global_info.get("wxid") or "").strip():
             global_wxid = str(global_info["wxid"]).strip()
             local_native_wxids.append(global_wxid)
-            trusted_native_aliases.update(_image_key_account_match_variants(global_wxid))
         try:
             siblings = await asyncio.to_thread(lambda: list(resolved_wxid_dir.parent.iterdir()))
             local_native_wxids.extend(
@@ -1109,36 +783,6 @@ async def get_image_key_integrated_workflow(
             logger.warning("[image_key] WeFlow 本地派生失败: %s", str(error))
             resolution = None
 
-        if resolution is None and template_scan.templates:
-            local_keys = await asyncio.to_thread(try_get_local_image_keys)
-            known_wxids = {
-                clean_wxid(value).casefold()
-                for value in local_native_wxids
-                if clean_wxid(value)
-            }
-            additional_native_wxids: list[str] = []
-            for item in local_keys:
-                native_wxid = str(item.get("wxid") or "").strip()
-                cleaned_native_wxid = clean_wxid(native_wxid)
-                if not cleaned_native_wxid or cleaned_native_wxid.casefold() in known_wxids:
-                    continue
-                known_wxids.add(cleaned_native_wxid.casefold())
-                additional_native_wxids.append(native_wxid)
-
-            if additional_native_wxids:
-                local_native_wxids.extend(additional_native_wxids)
-                try:
-                    resolution = await asyncio.to_thread(
-                        _resolve_local_image_key_from_kvcomm_candidates,
-                        account_dir=resolved_wxid_dir,
-                        target_wxid=canonical_account,
-                        account=account,
-                        local_native_wxids=local_native_wxids,
-                        template_scan=template_scan,
-                    )
-                except Exception as error:
-                    logger.warning("[image_key] 使用原生 wxid 补充派生失败: %s", str(error))
-                    resolution = None
 
         if resolution is not None and resolution.verified is True:
             _persist_verified_image_keys(
@@ -1166,44 +810,6 @@ async def get_image_key_integrated_workflow(
                 template_path=resolution.template_path,
             )
 
-        if template_scan.templates:
-            for candidate in local_keys:
-                normalized = _normalize_complete_image_key_payload(candidate)
-                if normalized is None:
-                    continue
-                xor_key, aes_key = normalized
-                if not verify_key_pair(
-                    xor_key,
-                    aes_key,
-                    template_scan,
-                    require_xor_match=True,
-                ):
-                    continue
-                matched_wxid = str(candidate.get("wxid") or canonical_account).strip()
-                _persist_verified_image_keys(
-                    canonical_account=canonical_account,
-                    request_account=account,
-                    source_wxid_dir=resolved_wxid_dir,
-                    matched_wxid=matched_wxid,
-                    xor_key=xor_key,
-                    aes_key=aes_key,
-                    source="native_v2_verified",
-                    trust_matched_alias=bool(
-                        _image_key_account_match_variants(matched_wxid) & trusted_native_aliases
-                    ),
-                )
-                logger.info(
-                    "[image_key] 原生候选通过 V2 验真: account=%s matched_wxid=%s key_pair_verified=true",
-                    canonical_account,
-                    matched_wxid,
-                )
-                return _verified_image_key_result(
-                    canonical_account=canonical_account,
-                    matched_wxid=matched_wxid,
-                    xor_key=xor_key,
-                    aes_key=aes_key,
-                    source="native_v2_verified",
-                )
 
     raise RuntimeError(
         "未能在本地获取并验证图片密钥，请使用内存扫描或手动填写有效密钥。"
@@ -1216,8 +822,11 @@ async def get_image_key_memory_workflow(
         wxid_dir: Optional[str] = None,
         db_storage_path: Optional[str] = None,
         timeout: float = 60,
+        cancel_event: threading.Event | None = None,
 ) -> Dict[str, Any]:
     """Scan WeChat process memory and persist only a V2-verified image key pair."""
+    cancel_event = cancel_event if cancel_event is not None else threading.Event()
+    raise_if_image_key_scan_cancelled(cancel_event)
     resolved_wxid_dir = _resolve_wxid_dir_for_image_key(
         account,
         wxid_dir=wxid_dir,
@@ -1238,16 +847,22 @@ async def get_image_key_memory_workflow(
                 scan_image_key_from_memory,
                 resolved_wxid_dir,
                 timeout_seconds,
+                cancel_event=cancel_event,
             ),
             timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
+        cancel_event.set()
         resolution = None
+    except BaseException:
+        cancel_event.set()
+        raise
     if resolution is None or resolution.verified is not True:
         raise RuntimeError(
             f"{int(timeout_seconds)} 秒内未在微信进程内存中找到可通过 V2 图片验真的 AES 密钥"
         )
 
+    raise_if_image_key_scan_cancelled(cancel_event)
     _persist_verified_image_keys(
         canonical_account=canonical_account,
         request_account=account,
@@ -1274,3 +889,69 @@ async def get_image_key_memory_workflow(
     )
     result.update({"pid": resolution.pid, "encoding": resolution.encoding})
     return result
+
+
+def prepare_export_image_keys(account_dir: Path, *, cancel_event: threading.Event) -> str:
+    """Prepare one source-bound key pair for an explicitly opted-in export."""
+    deadline = time.monotonic() + 60.0
+
+    def checkpoint() -> None:
+        raise_if_image_key_scan_cancelled(cancel_event)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("导出前图片密钥获取超时（60 秒，包含样本扫描）")
+
+    checkpoint()
+    context = resolve_chat_account_context(account_dir.name)
+    if context.account_dir.resolve() != account_dir.resolve():
+        raise ValueError("导出账号目录与媒体密钥账号不一致")
+    if source_metadata_is_imported_snapshot(context.source_info):
+        raise RuntimeError("导入的历史记录不能从本机微信获取媒体密钥")
+    source = _resolve_wxid_dir_for_image_key(
+        wxid_dir=context.wxid_dir, db_storage_path=context.db_storage_path,
+    )
+    templates = scan_v2_templates(source, checkpoint=checkpoint)
+    checkpoint()
+    cached = _load_verified_image_key_cache(source.name, context.name, source)
+    if cached is not None and _verified_image_key_cache_matches_templates(cached, templates):
+        checkpoint()
+        return "verified_cache"
+    if not templates.templates:
+        raise RuntimeError("未找到可验证媒体密钥的 V2 图片样本，无法执行导出前密钥获取")
+
+    media_keys = _load_media_keys(account_dir)
+    pair = _normalize_complete_image_key_payload({"xor_key": media_keys.get("xor"), "aes_key": media_keys.get("aes")})
+    if pair is not None and verify_key_pair(*pair, templates):
+        checkpoint()
+        _persist_verified_image_keys(
+            canonical_account=source.name, request_account=context.name,
+            source_wxid_dir=source, matched_wxid=context.name,
+            xor_key=pair[0], aes_key=pair[1], source="local_v2_verified",
+        )
+        return "local_v2_verified"
+
+    checkpoint()
+    result = asyncio.run(get_image_key_memory_workflow(
+        account=context.name, wxid_dir=str(source), cancel_event=cancel_event,
+        timeout=deadline - time.monotonic(),
+    ))
+    return result["source"]
+
+
+def _sort_probe_database(path: Path) -> tuple[int, int, str]:
+    name = path.name.lower()
+    try:
+        priority = DB_PROBE_NAME_PRIORITY.index(name)
+    except ValueError:
+        priority = len(DB_PROBE_NAME_PRIORITY)
+    depth = len(path.parts)
+    return priority, depth, str(path).lower()
+
+DB_PROBE_NAME_PRIORITY = (
+    "msg0.db",
+    "msg.db",
+    "micromsg.db",
+    "favorite.db",
+    "mediamsg0.db",
+    "media_msg0.db",
+    "sns.db",
+)

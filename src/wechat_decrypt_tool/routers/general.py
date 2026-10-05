@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -25,8 +25,7 @@ from ..chat_helpers import (
     _resolve_msg_table_name_by_map,
 )
 from ..sqlite_diagnostics import is_usable_sqlite_db
-from ..source_fallback import build_source_fallback_meta
-from ..wcdb_realtime import WCDB_REALTIME, exec_query as _wcdb_exec_query, get_display_names as _wcdb_get_display_names
+from ..snapshot_registry import resolve_account_database_dir
 
 router = APIRouter()
 
@@ -53,14 +52,10 @@ def _clamp_offset(value: int | None) -> int:
 
 def _general_context(account: Optional[str]):
     ctx = resolve_chat_account_context(account)
-    db_path = ctx.account_dir / "general.db"
+    db_path = resolve_account_database_dir(ctx.account_dir) / "general.db"
     if not db_path.exists():
-        if _account_has_realtime_source(ctx):
-            return ctx, db_path
         raise HTTPException(status_code=404, detail=f"general.db not found for account: {ctx.name}")
     if not is_usable_sqlite_db(db_path):
-        if _account_has_realtime_source(ctx):
-            return ctx, db_path
         raise HTTPException(status_code=400, detail="general.db is not a usable SQLite database.")
     return ctx, db_path
 
@@ -80,60 +75,28 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 
 def _source_requested(value: Any = "auto") -> str:
-    source = str(value or "auto").strip().lower()
-    return source if source in {"auto", "realtime", "decrypted"} else "auto"
+    value = str(value or "auto").strip().lower()
+    if value in {"auto", "default", "decrypted", "local", "sqlite"}:
+        return "decrypted"
+    raise HTTPException(status_code=400, detail="Invalid source; only decrypted snapshots are supported.")
 
 
-def _account_has_realtime_source(ctx: Any) -> bool:
-    return bool(
-        getattr(ctx, "db_key_present", False)
-        and (str(getattr(ctx, "db_storage_path", "") or "").strip() or str(getattr(ctx, "wxid_dir", "") or "").strip())
-    )
 
 
 def _quote_ident(ident: str) -> str:
     return '"' + str(ident or "").replace('"', '""') + '"'
 
 
-class _DictRow(dict):
-    """Small sqlite3.Row-like wrapper for WCDB exec_query rows."""
-
-    def __init__(self, data: dict[str, Any]) -> None:
-        super().__init__(data or {})
-        self._ordered_keys = list((data or {}).keys())
-
-    def __getitem__(self, key: Any) -> Any:
-        if isinstance(key, int):
-            return dict.__getitem__(self, self._ordered_keys[key])
-        return dict.__getitem__(self, key)
 
 
-class _RowsCursor:
-    def __init__(self, rows: list[dict[str, Any]]) -> None:
-        self._rows = [_DictRow(row) for row in rows if isinstance(row, dict)]
-
-    def fetchall(self) -> list[_DictRow]:
-        return list(self._rows)
-
-    def fetchone(self) -> _DictRow | None:
-        return self._rows[0] if self._rows else None
 
 
 class _SQLiteSource:
     source = "decrypted"
 
-    def __init__(
-        self,
-        db_path: Path,
-        *,
-        requested_source: str = "decrypted",
-        fallback_reason: str = "",
-        retry_after_seconds: int = 0,
-    ) -> None:
+    def __init__(self, db_path: Path, *, requested_source: str = "decrypted") -> None:
         self.db_path = Path(db_path)
-        self.requested_source = str(requested_source or "decrypted")
-        self.fallback_reason = str(fallback_reason or "")
-        self.retry_after_seconds = max(0, int(retry_after_seconds or 0))
+        self.requested_source = requested_source
         self._conn = _connect(self.db_path)
 
     def __enter__(self) -> "_SQLiteSource":
@@ -149,98 +112,25 @@ class _SQLiteSource:
         self._conn.close()
 
 
-class _WCDBDatabaseSource:
-    source = "realtime"
-
-    def __init__(self, rt_conn: Any, db_path: Path) -> None:
-        self.rt_conn = rt_conn
-        self.db_path = Path(db_path)
-
-    def __enter__(self) -> "_WCDBDatabaseSource":
-        return self
-
-    def __exit__(self, *_args: Any) -> None:
-        return None
-
-    def execute(self, sql: str, params: Any = None) -> _RowsCursor:
-        if params:
-            raise WCDBRealtimeHTTPError("WCDB realtime general query does not support bound parameters.")
-        with self.rt_conn.lock:
-            rows = _wcdb_exec_query(
-                self.rt_conn.handle,
-                # The bundled native API accepts an explicit absolute path for
-                # arbitrary db_storage DBs through this exec path.  `general`
-                # is not a native enum, so keep the proven generic kind.
-                kind="message",
-                path=str(self.db_path),
-                sql=str(sql or ""),
-            )
-        return _RowsCursor(rows)
-
-    def close(self) -> None:
-        return None
 
 
-class WCDBRealtimeHTTPError(RuntimeError):
-    pass
 
 
-def _open_realtime_db_source(ctx: Any, *, db_group: str, db_name: str) -> _WCDBDatabaseSource:
-    rt_conn = WCDB_REALTIME.ensure_connected(ctx.account_dir)
-    db_path = Path(rt_conn.db_storage_dir) / db_group / db_name
-    if not db_path.exists() or not db_path.is_file():
-        raise FileNotFoundError(f"realtime db not found: {db_path}")
-    return _WCDBDatabaseSource(rt_conn, db_path)
 
 
 def _open_db_source(
-    ctx: Any,
-    *,
-    source: str = "auto",
-    db_group: str,
-    db_name: str,
-    decrypted_name: str,
-) -> _SQLiteSource | _WCDBDatabaseSource:
+    ctx: Any, *, source: str = "auto", db_group: str, db_name: str, decrypted_name: str,
+) -> _SQLiteSource:
     source_norm = _source_requested(source)
-    realtime_capable = _account_has_realtime_source(ctx)
-    if source_norm == "auto" and bool(getattr(ctx, "prefers_decrypted_snapshot", False)):
-        realtime_capable = False
-    fallback_reason = ""
-    retry_after_seconds = 0
-    if source_norm in {"auto", "realtime"} and realtime_capable:
-        try:
-            return _open_realtime_db_source(ctx, db_group=db_group, db_name=db_name)
-        except Exception as exc:
-            fallback_reason = str(exc)
-            try:
-                failure = WCDB_REALTIME.get_recent_failure(ctx.name)
-                retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-            except Exception:
-                retry_after_seconds = 0
-
-    if source_norm == "realtime" and not realtime_capable:
-        fallback_reason = "实时模式不可用：缺少数据库密钥或 db_storage 路径。"
-
-    db_path = ctx.account_dir / decrypted_name
-    if db_path.exists() and is_usable_sqlite_db(db_path):
-        return _SQLiteSource(
-            db_path,
-            requested_source=source_norm,
-            fallback_reason=fallback_reason,
-            retry_after_seconds=retry_after_seconds,
-        )
-
-    if fallback_reason:
-        raise HTTPException(
-            status_code=503,
-            detail=f"实时读取 {db_group}/{db_name} 失败，且没有可用的已解密数据库：{fallback_reason}",
-        )
+    db_path = resolve_account_database_dir(ctx.account_dir) / decrypted_name
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"{decrypted_name} not found for account: {ctx.name}")
-    raise HTTPException(status_code=400, detail=f"{decrypted_name} is not a usable SQLite database.")
+    if not is_usable_sqlite_db(db_path):
+        raise HTTPException(status_code=400, detail=f"{decrypted_name} is not a usable SQLite database.")
+    return _SQLiteSource(db_path, requested_source=source_norm)
 
 
-def _open_general_source(ctx: Any, source: str = "auto") -> _SQLiteSource | _WCDBDatabaseSource:
+def _open_general_source(ctx: Any, source: str = "auto") -> _SQLiteSource:
     return _open_db_source(
         ctx,
         source=source,
@@ -251,17 +141,7 @@ def _open_general_source(ctx: Any, source: str = "auto") -> _SQLiteSource | _WCD
 
 
 def _source_meta(conn: Any) -> dict[str, Any]:
-    active_source = str(getattr(conn, "source", "decrypted") or "decrypted")
-    return {
-        "dataSource": active_source,
-        "database": str(getattr(conn, "db_path", "") or ""),
-        **build_source_fallback_meta(
-            requested_source=getattr(conn, "requested_source", active_source),
-            active_source=active_source,
-            reason=getattr(conn, "fallback_reason", ""),
-            retry_after_seconds=getattr(conn, "retry_after_seconds", 0),
-        ),
-    }
+    return {"source": conn.source}
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -700,19 +580,10 @@ def _load_finder_sns_maps(ctx: Any, *, source: str = "decrypted") -> tuple[dict[
     by_username: dict[str, dict[str, Any]] = {}
     by_live_id: dict[int, dict[str, Any]] = {}
     try:
-        if source == "realtime":
-            conn_cm = _open_db_source(
-                ctx,
-                source="realtime",
-                db_group="sns",
-                db_name="sns.db",
-                decrypted_name="sns.db",
-            )
-        else:
-            sns_path = ctx.account_dir / "sns.db"
-            if not sns_path.exists() or not is_usable_sqlite_db(sns_path):
-                return {}, {}
-            conn_cm = _SQLiteSource(sns_path)
+        sns_path = resolve_account_database_dir(ctx.account_dir) / "sns.db"
+        if not sns_path.exists() or not is_usable_sqlite_db(sns_path):
+            return {}, {}
+        conn_cm = _SQLiteSource(sns_path)
 
         with conn_cm as conn:
             rows = conn.execute(
@@ -863,20 +734,6 @@ def _page(items: list[dict[str, Any]], *, limit: int, offset: int) -> tuple[list
     return items[offset:offset + limit], offset + limit < len(items)
 
 
-def _load_wcdb_display_names_best_effort(account_dir: Path, usernames: list[str]) -> dict[str, str]:
-    targets = list(dict.fromkeys([_text(u) for u in usernames if _text(u)]))
-    if not targets:
-        return {}
-    try:
-        status = WCDB_REALTIME.get_status(account_dir)
-        can_connect = bool(status.get("dll_present")) and bool(status.get("key_present")) and bool(status.get("session_db_path"))
-        if not can_connect:
-            return {}
-        conn = WCDB_REALTIME.ensure_connected(account_dir)
-        with conn.lock:
-            return _wcdb_get_display_names(conn.handle, targets) or {}
-    except Exception:
-        return {}
 
 
 def _resolve_general_contacts(
@@ -890,7 +747,7 @@ def _resolve_general_contacts(
     if not uniq:
         return {}
 
-    contact_rows = _load_contact_rows(account_dir / "contact.db", uniq)
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", uniq)
     unresolved_names: list[str] = []
     preliminary_names: dict[str, str] = {}
     for username in uniq:
@@ -899,14 +756,10 @@ def _resolve_general_contacts(
         if (not display_name) or display_name == username:
             unresolved_names.append(username)
 
-    wcdb_names = _load_wcdb_display_names_best_effort(account_dir, unresolved_names)
     base = str(base_url or "").rstrip("/")
     out: dict[str, dict[str, Any]] = {}
     for username in uniq:
         display_name = preliminary_names.get(username) or username
-        wcdb_name = _text(wcdb_names.get(username))
-        if (not display_name or display_name == username) and wcdb_name and wcdb_name != username:
-            display_name = wcdb_name
         avatar_path = _build_avatar_url(account_name, username)
         out[username] = {
             "username": username,
@@ -930,16 +783,9 @@ def _load_friend_verification_contact_memberships(
         return {}, True
 
     try:
-        if str(source or "").strip().lower() == "realtime":
-            conn = _open_realtime_db_source(ctx, db_group="contact", db_name="contact.db")
-        else:
-            conn = _open_db_source(
-                ctx,
-                source="decrypted",
-                db_group="contact",
-                db_name="contact.db",
-                decrypted_name="contact.db",
-            )
+        conn = _open_db_source(
+            ctx, source=source, db_group="contact", db_name="contact.db", decrypted_name="contact.db",
+        )
         with conn:
             names_sql = ",".join("'" + username.replace("'", "''") + "'" for username in targets)
             rows = conn.execute(
@@ -1107,104 +953,8 @@ def _message_lookup_key(username: str, *, server_id: Any = 0, local_id: Any = 0)
     return f"{u}|s:{sid}|l:{lid}"
 
 
-def _iter_realtime_message_db_paths(rt_conn: Any) -> list[Path]:
-    message_dir = Path(rt_conn.db_storage_dir) / "message"
-    try:
-        return sorted(
-            [p for p in message_dir.glob("message_*.db") if p.is_file()],
-            key=lambda p: p.name.lower(),
-        )
-    except Exception:
-        return []
 
 
-def _lookup_messages_for_requests_realtime(
-    account_dir: Path,
-    requests: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    try:
-        rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-    except Exception:
-        return {}
-
-    normalized: list[dict[str, Any]] = []
-    for req in requests:
-        username = _text(req.get("username"))
-        if not username:
-            continue
-        server_id = _safe_int(req.get("serverId"), 0)
-        local_id = _safe_int(req.get("localId"), 0)
-        if server_id <= 0 and local_id <= 0:
-            continue
-        normalized.append({"username": username, "serverId": server_id, "localId": local_id, "key": _message_lookup_key(username, server_id=server_id, local_id=local_id)})
-    if not normalized:
-        return {}
-
-    pending = {req["key"]: req for req in normalized}
-    out: dict[str, dict[str, Any]] = {}
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for req in normalized:
-        grouped.setdefault(req["username"], []).append(req)
-
-    for db_path in _iter_realtime_message_db_paths(rt_conn):
-        if not pending:
-            break
-        try:
-            with rt_conn.lock:
-                table_rows = _wcdb_exec_query(
-                    rt_conn.handle,
-                    kind="message",
-                    path=str(db_path),
-                    sql="SELECT name FROM sqlite_master WHERE type='table'",
-                )
-        except Exception:
-            continue
-        lower_to_actual: dict[str, str] = {}
-        for row in table_rows:
-            name = _text((row or {}).get("name"))
-            if name:
-                lower_to_actual[name.lower()] = name
-
-        for username, reqs in grouped.items():
-            active_reqs = [req for req in reqs if req["key"] in pending]
-            if not active_reqs:
-                continue
-            table_name = _resolve_msg_table_name_by_map(lower_to_actual, username)
-            if not table_name:
-                continue
-            server_ids = sorted({int(req["serverId"]) for req in active_reqs if int(req["serverId"]) > 0})
-            local_ids = sorted({int(req["localId"]) for req in active_reqs if int(req["localId"]) > 0})
-            where_parts: list[str] = []
-            if server_ids:
-                where_parts.append("server_id IN (" + ",".join(str(int(x)) for x in server_ids) + ")")
-            if local_ids:
-                where_parts.append("local_id IN (" + ",".join(str(int(x)) for x in local_ids) + ")")
-            if not where_parts:
-                continue
-            sql = (
-                "SELECT local_id, server_id, local_type, create_time, message_content, compress_content "
-                f"FROM {_quote_ident(table_name)} WHERE " + " OR ".join(where_parts)
-            )
-            try:
-                with rt_conn.lock:
-                    rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(db_path), sql=sql)
-            except Exception:
-                continue
-            summarized = [_summarize_message_row(_DictRow(row)) for row in rows if isinstance(row, dict)]
-            for req in active_reqs:
-                if req["key"] not in pending:
-                    continue
-                sid = int(req["serverId"])
-                lid = int(req["localId"])
-                match = None
-                if sid > 0:
-                    match = next((m for m in summarized if int(m.get("serverId") or 0) == sid), None)
-                if match is None and lid > 0:
-                    match = next((m for m in summarized if int(m.get("localId") or 0) == lid), None)
-                if match is not None:
-                    out[req["key"]] = match
-                    pending.pop(req["key"], None)
-    return out
 
 
 def _lookup_messages_for_requests(
@@ -1213,8 +963,6 @@ def _lookup_messages_for_requests(
     *,
     source: str = "decrypted",
 ) -> dict[str, dict[str, Any]]:
-    if source == "realtime":
-        return _lookup_messages_for_requests_realtime(account_dir, requests)
 
     normalized: list[dict[str, Any]] = []
     for req in requests:
@@ -1416,7 +1164,7 @@ def _attach_revoke_message_details(account_dir: Path, items: list[dict[str, Any]
 @router.get("/api/general/overview", summary="general.db 概览")
 def get_general_overview(
     account: Optional[str] = None,
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
 ):
     ctx, _db_path = _general_context(account)
     account_name = ctx.name
@@ -1437,7 +1185,7 @@ def list_friend_verifications(
     request: Request,
     account: Optional[str] = None,
     q: str = "",
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(80, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
     pendingOnly: bool = False,
@@ -1573,7 +1321,7 @@ def _extract_weapp_summary(external_info: Any) -> dict[str, Any]:
 def list_mini_programs(
     account: Optional[str] = None,
     q: str = "",
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(80, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -1625,7 +1373,7 @@ def list_finder_records(
     request: Request,
     account: Optional[str] = None,
     q: str = "",
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(100, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -1783,7 +1531,7 @@ def list_payment_records(
     q: str = "",
     kind: str = Query("all", pattern="^(all|transfer|redpacket)$"),
     status: str = Query("all", pattern="^(all|pending|received|returned|expired|unknown)$"),
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(120, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -1923,7 +1671,7 @@ def list_revoke_records(
     request: Request,
     account: Optional[str] = None,
     q: str = "",
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(100, ge=1, le=_MAX_LIMIT),
     offset: int = Query(0, ge=0),
 ):
@@ -2026,7 +1774,7 @@ def list_revoke_records(
 def list_search_records(
     request: Request,
     account: Optional[str] = None,
-    source: str = Query("auto", pattern="^(auto|realtime|decrypted)$"),
+    source: str = Query("auto", pattern="^(auto|decrypted)$"),
     limit: int = Query(30, ge=1, le=100),
 ):
     ctx, db_path = _general_context(account)

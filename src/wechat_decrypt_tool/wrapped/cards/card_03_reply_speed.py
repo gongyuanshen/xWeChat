@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ...snapshot_registry import resolve_account_database_dir
 
 import heapq
 import math
@@ -592,7 +593,7 @@ def compute_reply_speed_stats(*, account_dir: Path, year: int) -> dict[str, Any]
             seen.add(u)
             uniq_usernames.append(u)
 
-    contact_rows = _load_contact_rows(account_dir / "contact.db", uniq_usernames) if uniq_usernames else {}
+    contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", uniq_usernames) if uniq_usernames else {}
 
     def conv_to_obj(score: float | None, agg: _ConvAgg) -> dict[str, Any]:
         row = contact_rows.get(agg.username)
@@ -808,7 +809,7 @@ def compute_reply_speed_stats(*, account_dir: Path, year: int) -> dict[str, Any]
                     # sqlite has a default var limit; query in chunks.
                     CHUNK = 900
                     for i in range(0, len(extra_usernames), CHUNK):
-                        contact_rows.update(_load_contact_rows(account_dir / "contact.db", extra_usernames[i : i + CHUNK]))
+                        contact_rows.update(_load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", extra_usernames[i : i + CHUNK]))
                 except Exception:
                     pass
 
@@ -866,7 +867,7 @@ def compute_reply_speed_stats(*, account_dir: Path, year: int) -> dict[str, Any]
     # Load all contacts for lottery animation (up to 50 random contacts)
     all_contacts_list: list[dict[str, Any]] = []
     try:
-        contact_db_path = account_dir / "contact.db"
+        contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
         if contact_db_path.exists():
             conn = sqlite3.connect(str(contact_db_path))
             conn.row_factory = sqlite3.Row

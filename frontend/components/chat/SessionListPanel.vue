@@ -57,6 +57,7 @@
               <option v-for="acc in availableAccounts" :key="acc" :value="acc">{{ acc }}</option>
             </select>
           </div>
+          <SnapshotRefreshControl v-if="state.snapshotRefresh && selectedAccount" :state="state.snapshotRefresh" />
         </div>
 
         <!-- 联系人列表 -->
@@ -247,9 +248,11 @@
 import { computed, defineComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useApi } from '~/composables/useApi'
 import { formatSessionListTime } from '~/lib/chat/formatters'
+import SnapshotRefreshControl from '~/components/chat/SnapshotRefreshControl.vue'
 
 export default defineComponent({
   name: 'SessionListPanel',
+  components: { SnapshotRefreshControl },
   props: {
     state: { type: Object, required: true }
   },

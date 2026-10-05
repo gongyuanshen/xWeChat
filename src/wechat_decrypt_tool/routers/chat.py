@@ -1,3 +1,6 @@
+from ..account_identity import resolve_account_username
+from ..snapshot_registry import resolve_account_database_dir
+from ..account_workers import account_to_thread
 import os
 import re
 import sqlite3
@@ -20,7 +23,6 @@ from ..account_identity import (
     resolve_account_self_rowid,
     resolve_account_self_username,
 )
-from ..account_source_policy import account_prefers_decrypted_snapshot
 from ..logging_config import get_logger
 from ..chat_search_index import (
     get_chat_search_index_db_path,
@@ -79,13 +81,6 @@ from ..chat_helpers import (
 )
 from ..media_helpers import _resolve_account_db_storage_dir, _try_find_decrypted_resource
 from ..app_paths import get_output_dir
-from ..chat_realtime_reader import (
-    fetch_daily_counts_via_exec as _shared_fetch_realtime_daily_counts_via_exec,
-    fetch_anchor_via_exec as _shared_fetch_realtime_anchor_via_exec,
-    fetch_context_via_exec as _shared_fetch_realtime_context_via_exec,
-    fetch_rows_via_cursor as _shared_fetch_realtime_rows_via_cursor,
-    fetch_rows_via_exec as _shared_fetch_realtime_rows_via_exec,
-)
 from ..database_filters import list_countable_database_names
 from ..key_store import remove_account_family_keys_from_store
 from ..path_fix import PathFixRoute
@@ -95,9 +90,7 @@ from ..session_last_message import (
     get_session_last_message_status,
     load_session_last_messages,
 )
-from ..sns_realtime_autosync import SNS_REALTIME_AUTOSYNC
 from ..sqlite_diagnostics import collect_sqlite_diagnostics, format_sqlite_diagnostics
-from ..source_fallback import build_source_fallback_meta
 from ..anti_revoke import (
     format_revoked_message_as_chat_item,
     get_revoked_messages_list,
@@ -107,22 +100,6 @@ from ..anti_revoke import (
     save_messages_to_archive,
 )
 from .chat_contacts import _load_enterprise_contact_info
-from ..wcdb_realtime import (
-    WCDBRealtimeError,
-    WCDB_REALTIME,
-    close_message_cursor as _wcdb_close_message_cursor,
-    exec_query as _wcdb_exec_query,
-    fetch_message_batch as _wcdb_fetch_message_batch,
-    get_avatar_urls as _wcdb_get_avatar_urls,
-    get_contact as _wcdb_get_contact,
-    get_display_names as _wcdb_get_display_names,
-    get_group_members as _wcdb_get_group_members,
-    get_group_nicknames as _wcdb_get_group_nicknames,
-    get_messages as _wcdb_get_messages,
-    get_sessions as _wcdb_get_sessions,
-    open_message_cursor as _wcdb_open_message_cursor,
-    resolve_account_native_wxid as _wcdb_resolve_account_native_wxid,
-)
 
 logger = get_logger(__name__)
 
@@ -130,49 +107,10 @@ _DEBUG_SESSIONS = os.environ.get("WECHAT_TOOL_DEBUG_SESSIONS", "0") == "1"
 
 router = APIRouter(route_class=PathFixRoute)
 
-_REALTIME_SYNC_MU = threading.Lock()
-_REALTIME_SYNC_LOCKS: dict[tuple[str, str], threading.Lock] = {}
-_REALTIME_SYNC_ALL_LOCKS: dict[str, threading.Lock] = {}
-_REALTIME_STATUS_PROBE_WAIT_SECONDS = 5.25
-_REALTIME_STATUS_PROBE_TASKS: set[asyncio.Task[Any]] = set()
 
 
-def _track_realtime_status_probe(task: asyncio.Task[Any]) -> None:
-    """Keep a timed-out to_thread task alive and consume its eventual result."""
-
-    _REALTIME_STATUS_PROBE_TASKS.add(task)
-
-    def _done(done_task: asyncio.Task[Any]) -> None:
-        _REALTIME_STATUS_PROBE_TASKS.discard(done_task)
-        try:
-            done_task.result()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.info("[realtime] background status probe finished with error: %s", exc)
-
-    task.add_done_callback(_done)
 
 
-async def _await_realtime_status_worker(
-    func,
-    /,
-    *args,
-    wait_timeout: float,
-    **kwargs,
-):
-    if wait_timeout <= 0:
-        raise asyncio.TimeoutError
-
-    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=wait_timeout)
-    except asyncio.TimeoutError:
-        _track_realtime_status_probe(task)
-        raise
-    except asyncio.CancelledError:
-        _track_realtime_status_probe(task)
-        raise
 
 
 def _is_hex_md5(value: Any) -> bool:
@@ -264,152 +202,10 @@ def _table_exists_case_insensitive(conn: sqlite3.Connection, table_name: str) ->
         return False
 
 
-def _ensure_output_name2id_table(conn: sqlite3.Connection) -> bool:
-    if _table_exists_case_insensitive(conn, "Name2Id"):
-        return True
-    try:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS Name2Id (
-                user_name TEXT,
-                is_session INTEGER DEFAULT 1
-            )
-            """
-        )
-        conn.commit()
-        return True
-    except Exception:
-        return False
 
 
-def _best_effort_upsert_output_name2id_rows(
-    conn: sqlite3.Connection,
-    *,
-    account_name: str,
-    rows: list[dict[str, Any]],
-) -> bool:
-    if not rows:
-        return _table_exists_case_insensitive(conn, "Name2Id")
-    if not _ensure_output_name2id_table(conn):
-        return False
-    try:
-        conn.execute(
-            "INSERT OR IGNORE INTO Name2Id(user_name, is_session) VALUES (?, ?)",
-            (str(account_name or "").strip(), 1),
-        )
-    except Exception:
-        pass
-
-    wrote = False
-    for row in rows:
-        try:
-            rid = int(row.get("real_sender_id") or 0)
-        except Exception:
-            rid = 0
-        username = str(row.get("sender_username") or "").strip()
-        if rid <= 0 or not username:
-            continue
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
-                (rid, username, 1),
-            )
-            wrote = True
-        except Exception:
-            continue
-
-    if wrote:
-        try:
-            conn.commit()
-        except Exception:
-            return False
-    return True
 
 
-def _sync_output_name2id_from_live(
-    conn: sqlite3.Connection,
-    *,
-    rt_conn: Any,
-    msg_db_path_real: Path,
-) -> dict[str, Any]:
-    if not _ensure_output_name2id_table(conn):
-        return {"status": "missing_local_table", "rows": 0}
-
-    local_row = conn.execute("SELECT COUNT(1) AS c, COALESCE(MAX(rowid), 0) AS mx FROM Name2Id").fetchone()
-    try:
-        local_count = int((local_row["c"] if isinstance(local_row, sqlite3.Row) else local_row[0]) or 0)
-    except Exception:
-        local_count = 0
-    try:
-        local_max = int((local_row["mx"] if isinstance(local_row, sqlite3.Row) else local_row[1]) or 0)
-    except Exception:
-        local_max = 0
-
-    sql_stats = "SELECT COUNT(1) AS c, COALESCE(MAX(rowid), 0) AS mx FROM Name2Id"
-    with rt_conn.lock:
-        live_stats_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_stats)
-
-    live_stats = live_stats_rows[0] if live_stats_rows and isinstance(live_stats_rows[0], dict) else {}
-    try:
-        live_count = int(_pick_case_insensitive_value(live_stats, "c", "count") or 0)
-    except Exception:
-        live_count = 0
-    try:
-        live_max = int(_pick_case_insensitive_value(live_stats, "mx", "max_rowid", "max") or 0)
-    except Exception:
-        live_max = 0
-
-    if local_count == live_count and local_max == live_max:
-        return {
-            "status": "up_to_date",
-            "rows": int(local_count),
-            "localCount": int(local_count),
-            "liveCount": int(live_count),
-            "localMax": int(local_max),
-            "liveMax": int(live_max),
-        }
-
-    sql_rows = "SELECT rowid AS rowid, user_name AS user_name, COALESCE(is_session, 1) AS is_session FROM Name2Id ORDER BY rowid ASC"
-    with rt_conn.lock:
-        live_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_rows)
-
-    values: list[tuple[int, str, int]] = []
-    seen_rowids: set[int] = set()
-    for item in live_rows:
-        if not isinstance(item, dict):
-            continue
-        try:
-            rid = int(_pick_case_insensitive_value(item, "rowid") or 0)
-        except Exception:
-            rid = 0
-        username = str(_pick_case_insensitive_value(item, "user_name", "username") or "").strip()
-        try:
-            is_session = int(_pick_case_insensitive_value(item, "is_session") or 0)
-        except Exception:
-            is_session = 0
-        if rid <= 0 or not username or rid in seen_rowids:
-            continue
-        seen_rowids.add(rid)
-        values.append((rid, username, is_session))
-
-    if live_count > 0 and not values:
-        raise ValueError("Live Name2Id rows could not be decoded.")
-
-    conn.execute("DELETE FROM Name2Id")
-    if values:
-        conn.executemany(
-            "INSERT INTO Name2Id(rowid, user_name, is_session) VALUES (?, ?, ?)",
-            values,
-        )
-    conn.commit()
-    return {
-        "status": "refreshed",
-        "rows": int(len(values)),
-        "localCount": int(local_count),
-        "liveCount": int(live_count),
-        "localMax": int(local_max),
-        "liveMax": int(live_max),
-    }
 
 
 def _avatar_url_unified(
@@ -425,181 +221,37 @@ def _avatar_url_unified(
     return _build_avatar_url(str(account_dir.name or ""), u)
 
 
-def _load_group_nickname_map_from_wcdb(
-    *,
-    account_dir: Path,
-    chatroom_id: str,
-    sender_usernames: list[str],
-    rt_conn=None,
-) -> dict[str, str]:
-    chatroom = str(chatroom_id or "").strip()
-    if not chatroom.endswith("@chatroom"):
-        return {}
-    if account_prefers_decrypted_snapshot(account_dir):
-        return {}
 
-    targets = list(dict.fromkeys([str(x or "").strip() for x in sender_usernames if str(x or "").strip()]))
-    if not targets:
-        return {}
-
-    try:
-        wcdb_conn = rt_conn or WCDB_REALTIME.ensure_connected(account_dir)
-    except Exception:
-        return {}
-
-    target_set = set(targets)
-    out: dict[str, str] = {}
-
-    try:
-        with wcdb_conn.lock:
-            nickname_map = _wcdb_get_group_nicknames(wcdb_conn.handle, chatroom)
-        for username, nickname in (nickname_map or {}).items():
-            su = str(username or "").strip()
-            nn = str(nickname or "").strip()
-            if su and nn and su in target_set:
-                out[su] = nn
-    except Exception:
-        pass
-
-    unresolved = [u for u in targets if u not in out]
-    if not unresolved:
-        return out
-
-    try:
-        with wcdb_conn.lock:
-            members = _wcdb_get_group_members(wcdb_conn.handle, chatroom)
-    except Exception:
-        return out
-
-    if not members:
-        return out
-
-    unresolved_set = set(unresolved)
-    for member in members:
-        try:
-            username = str(member.get("username") or "").strip()
-        except Exception:
-            username = ""
-        if (not username) or (username not in unresolved_set):
-            continue
-
-        nickname = ""
-        for key in ("nickname", "displayName", "remark", "originalName"):
-            try:
-                candidate = str(member.get(key) or "").strip()
-            except Exception:
-                candidate = ""
-            if candidate:
-                nickname = candidate
-                break
-        if nickname:
-            out[username] = nickname
-
-    return out
 
 
 def _load_group_nickname_map(
-    *,
-    account_dir: Path,
-    contact_db_path: Path,
-    chatroom_id: str,
+    *, account_dir: Path, contact_db_path: Path, chatroom_id: str,
     sender_usernames: list[str],
-    rt_conn=None,
-    allow_native_fallback: bool = True,
 ) -> dict[str, str]:
-    """Resolve group member nickname (group card) via WCDB and contact.db ext_buffer (best-effort)."""
-
-    contact_map: dict[str, str] = {}
-    try:
-        contact_map = _load_group_nickname_map_from_contact_db(
-            contact_db_path,
-            chatroom_id,
-            sender_usernames,
-        )
-    except Exception:
-        contact_map = {}
-
-    targets = list(dict.fromkeys(str(value or "").strip() for value in sender_usernames if str(value or "").strip()))
-    unresolved = [username for username in targets if username not in contact_map]
-    wcdb_map: dict[str, str] = {}
-    if unresolved and allow_native_fallback:
-        try:
-            wcdb_map = _load_group_nickname_map_from_wcdb(
-                account_dir=account_dir,
-                chatroom_id=chatroom_id,
-                sender_usernames=unresolved,
-                rt_conn=rt_conn,
-            )
-        except Exception:
-            wcdb_map = {}
-
-    if not contact_map and not wcdb_map:
-        return {}
-
-    # Merge: WCDB wins (newer DLLs may provide higher-quality group nicknames).
-    merged: dict[str, str] = {}
-    merged.update(contact_map)
-    merged.update(wcdb_map)
-    return merged
+    """Read group cards from the account's contact database."""
+    return _load_group_nickname_map_from_contact_db(contact_db_path, chatroom_id, sender_usernames)
 
 
-def _resolve_sender_display_name(
-    *,
-    sender_username: str,
-    sender_contact_rows: dict[str, sqlite3.Row],
-    wcdb_display_names: dict[str, str],
-    group_nicknames: Optional[dict[str, str]] = None,
-) -> str:
-    su = str(sender_username or "").strip()
-    if not su:
+def _resolve_sender_display_name(*, sender_username: str, sender_contact_rows: dict[str, sqlite3.Row], group_nicknames: Optional[dict[str, str]] = None) -> str:
+    username = str(sender_username or "").strip()
+    if not username:
         return ""
-
-    gn = str((group_nicknames or {}).get(su) or "").strip()
-    if gn:
-        return gn
-
-    row = sender_contact_rows.get(su)
-    display_name = _pick_display_name(row, su)
-    if display_name == su:
-        wd = str(wcdb_display_names.get(su) or "").strip()
-        if wd and wd != su:
-            display_name = wd
-    return display_name
+    group_name = str((group_nicknames or {}).get(username) or "").strip()
+    return group_name or _pick_display_name(sender_contact_rows.get(username), username)
 
 
-def _resolve_system_message_display_name(
-    *,
-    sender_username: str,
-    fallback_display_name: str,
-    sender_contact_rows: dict[str, sqlite3.Row],
-    wcdb_display_names: dict[str, str],
-) -> str:
-    su = str(sender_username or "").strip()
+def _resolve_system_message_display_name(*, sender_username: str, fallback_display_name: str, sender_contact_rows: dict[str, sqlite3.Row]) -> str:
+    username = str(sender_username or "").strip()
     fallback = str(fallback_display_name or "").strip()
-    if not su:
-        return fallback or "有人"
-
-    row = sender_contact_rows.get(su)
-    display_name = _pick_display_name(row, su)
-    if display_name != su:
+    if not username:
+        return fallback or "你"
+    display_name = _pick_display_name(sender_contact_rows.get(username), username)
+    if display_name != username:
         return display_name
-
-    if fallback and fallback != su:
-        return fallback
-
-    wd = str(wcdb_display_names.get(su) or "").strip()
-    if wd and wd != su:
-        return wd
-
-    return fallback or wd or su
+    return fallback or username
 
 
-def _postprocess_special_message_content(
-    *,
-    message: dict[str, Any],
-    sender_contact_rows: dict[str, sqlite3.Row],
-    wcdb_display_names: dict[str, str],
-) -> None:
+def _postprocess_special_message_content(*, message: dict[str, Any], sender_contact_rows: dict[str, sqlite3.Row]) -> None:
     raw = str(message.get("_rawText") or "")
     if not raw:
         message.pop("_rawText", None)
@@ -615,7 +267,7 @@ def _postprocess_special_message_content(
                 sender_username=sender_username,
                 fallback_display_name=fallback_display_name,
                 sender_contact_rows=sender_contact_rows,
-                wcdb_display_names=wcdb_display_names,
+
             ),
         )
 
@@ -666,107 +318,29 @@ def _extract_at_usernames_from_source(value: Any) -> list[str]:
     return out
 
 
-def _realtime_sync_lock(account: str, username: str) -> threading.Lock:
-    key = (str(account or "").strip(), str(username or "").strip())
-    with _REALTIME_SYNC_MU:
-        lock = _REALTIME_SYNC_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _REALTIME_SYNC_LOCKS[key] = lock
-        return lock
 
 
-def _realtime_sync_all_lock(account: str) -> threading.Lock:
-    key = str(account or "").strip()
-    with _REALTIME_SYNC_MU:
-        lock = _REALTIME_SYNC_ALL_LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _REALTIME_SYNC_ALL_LOCKS[key] = lock
-        return lock
 
 
 def _normalize_chat_source(value: Optional[str]) -> str:
-    v = str(value or "").strip().lower()
-    if not v:
-        return "auto"
-    if v in {"decrypted", "local", "sqlite"}:
+    value = str(value or "").strip().lower()
+    if value in {"", "auto", "default", "wechat", "decrypted", "local", "sqlite"}:
         return "decrypted"
-    if v in {"auto", "default", "wechat"}:
-        return "auto"
-    if v in {"realtime", "real-time", "wcdb"}:
-        return "realtime"
-    raise HTTPException(status_code=400, detail="Invalid source, use 'auto', 'decrypted' or 'realtime'.")
+    raise HTTPException(status_code=400, detail="Invalid source; only decrypted snapshots are supported.")
 
 
-def _is_chat_realtime_available(account_dir: Path) -> bool:
-    """Best-effort capability check for reading the live WeChat WCDB store."""
-
-    try:
-        info = WCDB_REALTIME.get_status(account_dir)
-    except Exception:
-        return False
-    return bool(info.get("dll_present") and info.get("key_present") and info.get("db_storage_dir"))
 
 
-def _resolve_chat_source_for_account(source_norm: str, account_dir: Path) -> str:
-    """Resolve `source=auto` to the direct WCDB reader.
-
-    Legacy decrypted SQLite is now opt-in via `source=decrypted`; this avoids silently
-    showing stale output/databases snapshots when direct mode is misconfigured.
-    """
-
-    if source_norm == "auto" and account_prefers_decrypted_snapshot(account_dir):
-        return "decrypted"
-    if source_norm == "auto":
-        return "realtime"
-    return source_norm
 
 
-def _chat_source_fallback_meta(
-    *,
-    account_dir: Path,
-    requested_source: str,
-    active_source: str,
-    reason: Any = "",
-) -> dict[str, Any]:
-    retry_after_seconds = 0
-    if str(reason or "").strip():
-        try:
-            failure = WCDB_REALTIME.get_recent_failure(account_dir.name)
-            retry_after_seconds = int(failure.get("retry_after_seconds") or 0)
-        except Exception:
-            retry_after_seconds = 0
-    return build_source_fallback_meta(
-        requested_source=requested_source,
-        active_source=active_source,
-        reason=reason,
-        retry_after_seconds=retry_after_seconds,
-    )
 
 
-def _decrypted_sessions_available(account_dir: Path) -> bool:
-    try:
-        return (Path(account_dir) / "session.db").is_file()
-    except Exception:
-        return False
 
 
-def _decrypted_messages_available(account_dir: Path) -> bool:
-    try:
-        return bool(_iter_message_db_paths(Path(account_dir)))
-    except Exception:
-        return False
 
 
-def _realtime_message_table_name(username: str) -> str:
-    import hashlib
-
-    return f"msg_{hashlib.md5(str(username or '').strip().encode('utf-8')).hexdigest()}"
 
 
-def _realtime_message_db_path(account_dir: Path) -> Path:
-    return Path(f"realtime_{account_dir.name}.db")
 
 
 def _lookup_contact_alias(
@@ -796,273 +370,12 @@ def _lookup_contact_alias(
     return alias
 
 
-def _scan_db_storage_mtime_ns(db_storage_dir: Path, *, scope: str = "all") -> int:
-    try:
-        base = str(db_storage_dir)
-    except Exception:
-        return 0
-
-    scope_norm = "chat" if str(scope or "").strip().lower() == "chat" else "all"
-    chat_only = scope_norm == "chat"
-    allowed_buckets = {"message", "session"} if chat_only else {
-        "message",
-        "session",
-        "contact",
-        "head_image",
-        "bizchat",
-        "sns",
-        "general",
-        "favorite",
-    }
-    max_ns = 0
-    try:
-        for root, dirs, files in os.walk(base):
-            if root == base:
-                dirs[:] = [d for d in dirs if str(d or "").lower() in allowed_buckets]
-
-            for fn in files:
-                name = str(fn or "").lower()
-                # WAL and database mtimes represent writes. SHM can change when this app
-                # merely reads a database and must not trigger a self-refresh loop.
-                if not name.endswith((".db", ".db-wal")):
-                    continue
-                if (not chat_only) and not (
-                    ("message" in name)
-                    or ("session" in name)
-                    or ("contact" in name)
-                    or ("name2id" in name)
-                    or ("head_image" in name)
-                    or ("general" in name)
-                    or ("favorite" in name)
-                    or ("sns" in name)
-                ):
-                    continue
-
-                try:
-                    st = os.stat(os.path.join(root, fn))
-                    m_ns = int(getattr(st, "st_mtime_ns", 0) or 0)
-                    if m_ns <= 0:
-                        m_ns = int(float(getattr(st, "st_mtime", 0.0) or 0.0) * 1_000_000_000)
-                    if m_ns > max_ns:
-                        max_ns = m_ns
-                except Exception:
-                    continue
-    except Exception:
-        return 0
-
-    return max_ns
 
 
-@router.get("/api/chat/realtime/status", summary="实时模式状态")
-async def get_chat_realtime_status(account: Optional[str] = None):
-    """检查实时模式前置条件，并实际打开 WCDB 账号连接。"""
-    account_dir = _resolve_account_dir(account)
-    if account_prefers_decrypted_snapshot(account_dir):
-        return {
-            "status": "success",
-            "account": account_dir.name,
-            "available": False,
-            "realtime": {
-                "account": account_dir.name,
-                "snapshot_preferred": True,
-                "connected": False,
-                "probe_attempted": False,
-                "probe_succeeded": False,
-                "probe_error": "",
-                "error": "",
-            },
-        }
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _REALTIME_STATUS_PROBE_WAIT_SECONDS
-
-    def remaining_seconds() -> float:
-        return max(0.0, deadline - loop.time())
-
-    probe_attempted = False
-    probe_error = ""
-    try:
-        info = await _await_realtime_status_worker(
-            WCDB_REALTIME.get_status,
-            account_dir,
-            wait_timeout=remaining_seconds(),
-        )
-    except asyncio.TimeoutError:
-        info = {"account": account_dir.name}
-        probe_error = (
-            "WCDB realtime status inspection timed out after "
-            f"{_REALTIME_STATUS_PROBE_WAIT_SECONDS:g}s."
-        )
-
-    prerequisites_ready = bool(
-        not probe_error
-        and info.get("dll_present")
-        and info.get("key_present")
-        and info.get("db_storage_dir")
-        and info.get("session_db_path")
-    )
-
-    if prerequisites_ready:
-        probe_attempted = True
-        connection_timeout = min(5.0, remaining_seconds())
-        try:
-            await _await_realtime_status_worker(
-                WCDB_REALTIME.ensure_connected,
-                account_dir,
-                wait_timeout=remaining_seconds(),
-                timeout=connection_timeout,
-            )
-        except asyncio.TimeoutError:
-            probe_error = (
-                "WCDB realtime connection probe timed out after "
-                f"{_REALTIME_STATUS_PROBE_WAIT_SECONDS:g}s."
-            )
-        except Exception as exc:
-            probe_error = str(exc or "WCDB realtime connection failed.").strip()
-        refresh_timeout = remaining_seconds()
-        if refresh_timeout > 0:
-            try:
-                info = await _await_realtime_status_worker(
-                    WCDB_REALTIME.get_status,
-                    account_dir,
-                    wait_timeout=refresh_timeout,
-                )
-            except asyncio.TimeoutError:
-                if not probe_error:
-                    probe_error = (
-                        "WCDB realtime status refresh timed out after "
-                        f"{_REALTIME_STATUS_PROBE_WAIT_SECONDS:g}s."
-                    )
-        elif not probe_error:
-            probe_error = (
-                "WCDB realtime status refresh timed out after "
-                f"{_REALTIME_STATUS_PROBE_WAIT_SECONDS:g}s."
-            )
-
-    info = dict(info or {})
-    probe_succeeded = bool(probe_attempted and not probe_error and info.get("connected"))
-    info["probe_attempted"] = probe_attempted
-    info["probe_succeeded"] = probe_succeeded
-    info["probe_error"] = probe_error
-    if probe_error and not str(info.get("error") or "").strip():
-        info["error"] = probe_error
-
-    return {
-        "status": "success",
-        "account": account_dir.name,
-        "available": probe_succeeded,
-        "realtime": info,
-    }
 
 
-@router.get("/api/chat/realtime/stream", summary="实时模式数据库变更事件（SSE）")
-async def stream_chat_realtime_events(
-    request: Request,
-    account: Optional[str] = None,
-    interval_ms: int = 500,
-    scope: str = "all",
-):
-    """监听 db_storage 目录的变更，通过 SSE 推送事件（用于前端触发增量刷新）。"""
-    if interval_ms < 100:
-        interval_ms = 100
-    if interval_ms > 5000:
-        interval_ms = 5000
-
-    account_dir = _resolve_account_dir(account)
-    info = WCDB_REALTIME.get_status(account_dir)
-    db_storage_dir = Path(str(info.get("db_storage_dir") or "").strip())
-    if not db_storage_dir.exists() or not db_storage_dir.is_dir():
-        raise HTTPException(status_code=400, detail="db_storage directory not found for this account.")
-
-    scope_norm = "chat" if str(scope or "").strip().lower() == "chat" else "all"
-    logger.info(
-        "[realtime] SSE stream open account=%s scope=%s interval_ms=%s db_storage=%s",
-        account_dir.name,
-        scope_norm,
-        int(interval_ms),
-        str(db_storage_dir),
-    )
-
-    async def gen():
-        try:
-            last_mtime_ns = await asyncio.to_thread(
-                _scan_db_storage_mtime_ns,
-                db_storage_dir,
-                scope=scope_norm,
-            )
-        except Exception:
-            last_mtime_ns = 0
-        last_heartbeat = 0.0
-
-        # initial snapshot
-        initial = {
-            "type": "ready",
-            "account": account_dir.name,
-            "dbStorageDir": str(db_storage_dir),
-            "scope": scope_norm,
-            "mtimeNs": int(last_mtime_ns),
-            "ts": int(time.time() * 1000),
-        }
-        yield f"data: {json.dumps(initial, ensure_ascii=False)}\n\n"
-
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-
-                # Avoid blocking the event loop on a potentially large directory walk.
-                scan_t0 = time.perf_counter()
-                try:
-                    mtime_ns = await asyncio.to_thread(
-                        _scan_db_storage_mtime_ns,
-                        db_storage_dir,
-                        scope=scope_norm,
-                    )
-                except Exception:
-                    mtime_ns = 0
-                scan_ms = (time.perf_counter() - scan_t0) * 1000.0
-                if scan_ms > 1000:
-                    logger.warning("[realtime] SSE scan slow account=%s ms=%.1f", account_dir.name, scan_ms)
-
-                if mtime_ns and mtime_ns != last_mtime_ns:
-                    last_mtime_ns = mtime_ns
-                    payload = {
-                        "type": "change",
-                        "account": account_dir.name,
-                        "scope": scope_norm,
-                        "mtimeNs": int(mtime_ns),
-                        "ts": int(time.time() * 1000),
-                    }
-                    logger.info("[realtime] SSE change account=%s mtime_ns=%s", account_dir.name, int(mtime_ns))
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-                now = time.time()
-                if now - last_heartbeat > 15:
-                    last_heartbeat = now
-                    yield ": ping\n\n"
-
-                await asyncio.sleep(interval_ms / 1000.0)
-        finally:
-            logger.info("[realtime] SSE stream closed account=%s", account_dir.name)
-
-    headers = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
-    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
 
 
-def _resolve_decrypted_message_table(account_dir: Path, username: str) -> Optional[tuple[Path, str]]:
-    db_paths = _iter_message_db_paths(account_dir)
-    if not db_paths:
-        return None
-
-    for db_path in db_paths:
-        conn = sqlite3.connect(str(db_path))
-        try:
-            table_name = _resolve_msg_table_name(conn, username)
-            if table_name:
-                return db_path, table_name
-        finally:
-            conn.close()
-
-    return None
 
 
 def _local_month_range_epoch_seconds(*, year: int, month: int) -> tuple[int, int]:
@@ -1092,344 +405,20 @@ def _local_day_range_epoch_seconds(*, date_str: str) -> tuple[int, int, str]:
     return int(d0.timestamp()), int(d1.timestamp()), d0.strftime("%Y-%m-%d")
 
 
-def _pick_message_db_for_new_table(account_dir: Path, username: str) -> Optional[Path]:
-    """Pick a target decrypted sqlite db to place a new Msg_<md5> table.
-
-    Some accounts have both `message_*.db` and `biz_message_*.db`. For normal users we prefer
-    `message*.db`; for official accounts (`gh_`) we prefer `biz_message*.db`.
-    """
-
-    db_paths = _iter_message_db_paths(account_dir)
-    if not db_paths:
-        return None
-
-    uname = str(username or "").strip()
-    want_biz = bool(uname and uname.startswith("gh_"))
-
-    msg_paths: list[Path] = []
-    biz_paths: list[Path] = []
-    other_paths: list[Path] = []
-    for p in db_paths:
-        ln = p.name.lower()
-        if re.match(r"^message(_\d+)?\.db$", ln):
-            msg_paths.append(p)
-        elif re.match(r"^biz_message(_\d+)?\.db$", ln):
-            biz_paths.append(p)
-        else:
-            other_paths.append(p)
-
-    if want_biz and biz_paths:
-        return biz_paths[0]
-    if msg_paths:
-        return msg_paths[0]
-    if biz_paths:
-        return biz_paths[0]
-    return other_paths[0] if other_paths else db_paths[0]
 
 
-def _ensure_decrypted_message_table(account_dir: Path, username: str) -> tuple[Path, str]:
-    """Ensure the decrypted sqlite has a Msg_<md5(username)> table for this conversation.
-
-    Why:
-    - The decrypted snapshot can miss newly created sessions, so WCDB realtime can show messages
-      while the decrypted message_*.db has no table -> `/api/chat/messages` returns empty.
-    - Realtime sync should be able to create the missing conversation table and then insert rows.
-    """
-
-    uname = str(username or "").strip()
-    if not uname:
-        raise HTTPException(status_code=400, detail="Missing username.")
-
-    resolved = _resolve_decrypted_message_table(account_dir, uname)
-    if resolved:
-        return resolved
-
-    target_db = _pick_message_db_for_new_table(account_dir, uname)
-    if target_db is None:
-        raise HTTPException(status_code=404, detail="No message databases found for this account.")
-
-    # Use the conventional WeChat naming (`Msg_<md5>`). Resolution is case-insensitive.
-    import hashlib
-
-    md5_hex = hashlib.md5(uname.encode("utf-8")).hexdigest()
-    table_name = f"Msg_{md5_hex}"
-    quoted_table = _quote_ident(table_name)
-
-    conn = sqlite3.connect(str(target_db))
-    try:
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {quoted_table}(
-                local_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                server_id INTEGER,
-                local_type INTEGER,
-                sort_seq INTEGER,
-                real_sender_id INTEGER,
-                create_time INTEGER,
-                status INTEGER,
-                upload_status INTEGER,
-                download_status INTEGER,
-                server_seq INTEGER,
-                origin_source INTEGER,
-                source TEXT,
-                message_content TEXT,
-                compress_content TEXT,
-                packed_info_data BLOB,
-                WCDB_CT_message_content INTEGER DEFAULT NULL,
-                WCDB_CT_source INTEGER DEFAULT NULL
-            )
-            """
-        )
-
-        # Match the common indexes we observe on existing Msg_* tables for query performance.
-        idx_sender = _quote_ident(f"{table_name}_SENDERID")
-        idx_server = _quote_ident(f"{table_name}_SERVERID")
-        idx_sort = _quote_ident(f"{table_name}_SORTSEQ")
-        idx_type_seq = _quote_ident(f"{table_name}_TYPE_SEQ")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_sender} ON {quoted_table}(real_sender_id)")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_server} ON {quoted_table}(server_id)")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_sort} ON {quoted_table}(sort_seq)")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS {idx_type_seq} ON {quoted_table}(local_type, sort_seq)")
-
-        conn.commit()
-    finally:
-        conn.close()
-
-    return target_db, table_name
 
 
-def _ensure_decrypted_message_tables(
-    account_dir: Path, usernames: list[str]
-) -> dict[str, tuple[Path, str]]:
-    """Bulk resolver that also creates missing Msg_<md5> tables when needed."""
-
-    table_map = _resolve_decrypted_message_tables(account_dir, usernames)
-    for u in usernames:
-        uname = str(u or "").strip()
-        if not uname or uname in table_map:
-            continue
-        try:
-            table_map[uname] = _ensure_decrypted_message_table(account_dir, uname)
-        except Exception:
-            # Best-effort: if we can't create the table, keep it missing and let callers skip.
-            continue
-    return table_map
 
 
-def _resolve_decrypted_message_tables(
-    account_dir: Path, usernames: list[str]
-) -> dict[str, tuple[Path, str]]:
-    uniq = list(dict.fromkeys([str(u or "").strip() for u in usernames if str(u or "").strip()]))
-    if not uniq:
-        return {}
-
-    db_paths = _iter_message_db_paths(account_dir)
-    if not db_paths:
-        return {}
-
-    remaining = {u for u in uniq if u}
-    resolved: dict[str, tuple[Path, str]] = {}
-    for db_path in db_paths:
-        if not remaining:
-            break
-        try:
-            conn = sqlite3.connect(str(db_path))
-        except Exception:
-            continue
-        try:
-            try:
-                rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                names = [str(r[0]) for r in rows if r and r[0]]
-                lower_to_actual = {n.lower(): n for n in names}
-            except Exception:
-                continue
-
-            found: dict[str, str] = {}
-            for u in list(remaining):
-                try:
-                    tn = _resolve_msg_table_name_by_map(lower_to_actual, u)
-                except Exception:
-                    tn = None
-                if tn:
-                    found[u] = tn
-            for u, tn in found.items():
-                resolved[u] = (db_path, tn)
-                remaining.discard(u)
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
-
-    return resolved
 
 
-def _ensure_session_last_message_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS session_last_message (
-            username TEXT PRIMARY KEY,
-            sort_seq INTEGER NOT NULL DEFAULT 0,
-            local_id INTEGER NOT NULL DEFAULT 0,
-            create_time INTEGER NOT NULL DEFAULT 0,
-            local_type INTEGER NOT NULL DEFAULT 0,
-            sender_username TEXT NOT NULL DEFAULT '',
-            preview TEXT NOT NULL DEFAULT '',
-            db_stem TEXT NOT NULL DEFAULT '',
-            table_name TEXT NOT NULL DEFAULT '',
-            built_at INTEGER NOT NULL DEFAULT 0
-        )
-        """
-    )
 
 
-def _get_session_table_columns(conn: sqlite3.Connection) -> set[str]:
-    try:
-        rows = conn.execute("PRAGMA table_info(SessionTable)").fetchall()
-        # PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
-        cols = {str(r[1]) for r in rows if r and r[1]}
-        return cols
-    except Exception:
-        return set()
 
 
-def _upsert_session_table_rows(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> None:
-    """Best-effort upsert of WCDB Session rows into decrypted session.db::SessionTable.
-
-    Why:
-    - WCDB realtime can observe newly created sessions (e.g., new friends) immediately.
-    - The decrypted snapshot's session.db can become stale and miss those sessions entirely, causing
-      the left sidebar list to differ after a refresh (when the UI falls back to decrypted).
-
-    This upsert intentionally avoids depending on message tables; it only keeps SessionTable fresh.
-    """
-
-    if not rows:
-        return
-
-    # Ensure SessionTable exists; if not, silently skip (older/partial accounts).
-    try:
-        conn.execute("SELECT 1 FROM SessionTable LIMIT 1").fetchone()
-    except Exception:
-        return
-
-    cols = _get_session_table_columns(conn)
-    if "username" not in cols:
-        return
-
-    uniq_usernames: list[str] = []
-    for r in rows:
-        u = str((r or {}).get("username") or "").strip()
-        if not u:
-            continue
-        uniq_usernames.append(u)
-    uniq_usernames = list(dict.fromkeys(uniq_usernames))
-    if not uniq_usernames:
-        return
-
-    # Insert missing rows first so UPDATE always has a target.
-    try:
-        conn.executemany(
-            "INSERT OR IGNORE INTO SessionTable(username) VALUES (?)",
-            [(u,) for u in uniq_usernames],
-        )
-    except Exception:
-        # If the schema is unusual, don't fail the whole sync.
-        return
-
-    # Only update columns that exist in this account's schema.
-    # Keep the order stable so executemany parameters line up.
-    desired_cols = [
-        "unread_count",
-        "is_hidden",
-        "summary",
-        "draft",
-        "last_timestamp",
-        "sort_timestamp",
-        "last_msg_locald_id",
-        "last_msg_type",
-        "last_msg_sub_type",
-        "last_msg_sender",
-        "last_sender_display_name",
-    ]
-    update_cols = [c for c in desired_cols if c in cols]
-    if not update_cols:
-        return
-
-    def _int(v: Any) -> int:
-        try:
-            return int(v or 0)
-        except Exception:
-            return 0
-
-    def _text(v: Any) -> str:
-        try:
-            return str(v or "")
-        except Exception:
-            return ""
-
-    params: list[tuple[Any, ...]] = []
-    for r in rows:
-        u = str((r or {}).get("username") or "").strip()
-        if not u:
-            continue
-        values: list[Any] = []
-        for c in update_cols:
-            if c in {
-                "unread_count",
-                "is_hidden",
-                "last_timestamp",
-                "sort_timestamp",
-                "last_msg_locald_id",
-                "last_msg_type",
-                "last_msg_sub_type",
-            }:
-                values.append(_int((r or {}).get(c)))
-            else:
-                values.append(_text((r or {}).get(c)))
-        values.append(u)
-        params.append(tuple(values))
-
-    if not params:
-        return
-
-    set_expr = ", ".join([f"{c} = ?" for c in update_cols])
-    conn.executemany(f"UPDATE SessionTable SET {set_expr} WHERE username = ?", params)
 
 
-def _load_session_last_message_times(conn: sqlite3.Connection, usernames: list[str]) -> dict[str, int]:
-    """Load last synced message create_time per conversation from session.db::session_last_message.
-
-    Note: This is used as the *sync watermark* for realtime -> decrypted, because SessionTable timestamps may be
-    updated from WCDB session rows for UI consistency.
-    """
-
-    uniq = list(dict.fromkeys([str(u or "").strip() for u in usernames if str(u or "").strip()]))
-    if not uniq:
-        return {}
-
-    out: dict[str, int] = {}
-    chunk_size = 900
-    for i in range(0, len(uniq), chunk_size):
-        chunk = uniq[i : i + chunk_size]
-        placeholders = ",".join(["?"] * len(chunk))
-        try:
-            rows = conn.execute(
-                f"SELECT username, create_time FROM session_last_message WHERE username IN ({placeholders})",
-                chunk,
-            ).fetchall()
-        except Exception:
-            continue
-        for r in rows:
-            u = str((r["username"] if isinstance(r, sqlite3.Row) else r[0]) or "").strip()
-            if not u:
-                continue
-            try:
-                ts = int((r["create_time"] if isinstance(r, sqlite3.Row) else r[1]) or 0)
-            except Exception:
-                ts = 0
-            out[u] = int(ts or 0)
-    return out
 
 
 def _load_session_last_message_meta(account_dir: Path, usernames: list[str]) -> dict[str, dict[str, Any]]:
@@ -1439,7 +428,7 @@ def _load_session_last_message_meta(account_dir: Path, usernames: list[str]) -> 
     if not uniq:
         return {}
 
-    session_db_path = Path(account_dir) / "session.db"
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
     if not session_db_path.exists():
         return {}
 
@@ -1564,7 +553,7 @@ def _load_contact_top_flags(contact_db_path: Path, usernames: list[str]) -> dict
         conn.close()
 
 
-def _coerce_realtime_blobish_value(value: Any, *, allow_bare_hex: bool = True) -> Any:
+def _coerce_message_blob_value(value: Any, *, allow_bare_hex: bool = True) -> Any:
     if value is None:
         return None
     if isinstance(value, memoryview):
@@ -1603,1256 +592,14 @@ def _coerce_realtime_blobish_value(value: Any, *, allow_bare_hex: bool = True) -
     return value
 
 
-def _normalize_realtime_message_item(item: dict[str, Any]) -> dict[str, Any]:
-    def _pick(*keys: str) -> Any:
-        return _pick_case_insensitive_value(item, *keys)
 
-    def _to_int(value: Any) -> int:
-        try:
-            return int(value or 0)
-        except Exception:
-            return 0
 
-    message_content = _coerce_realtime_blobish_value(
-        _pick("message_content", "messageContent", "MessageContent"),
-        allow_bare_hex=False,
-    )
-    if message_content is None:
-        message_content = ""
-    msg_source = _coerce_realtime_blobish_value(
-        _pick("msg_source", "msgSource", "source", "Source")
-    )
 
-    return {
-        "local_id": _to_int(_pick("local_id", "localId")),
-        "server_id": _to_int(_pick("server_id", "serverId", "MsgSvrID")),
-        "local_type": _to_int(_pick("local_type", "localType", "Type", "type")),
-        "sort_seq": _to_int(_pick("sort_seq", "sortSeq", "SortSeq")),
-        "real_sender_id": _to_int(_pick("real_sender_id", "realSenderId")),
-        "create_time": _to_int(_pick("create_time", "createTime", "CreateTime")),
-        "message_content": message_content,
-        "compress_content": _coerce_realtime_blobish_value(
-            _pick("compress_content", "compressContent", "CompressContent")
-        ),
-        "msg_source": msg_source,
-        "packed_info_data": _coerce_realtime_blobish_value(
-            _pick("packed_info_data", "packedInfoData", "PackedInfoData")
-        ),
-        "sender_username": str(
-            _pick("sender_username", "senderUsername", "sender", "SenderUsername") or ""
-        ).strip(),
-        "computed_is_send": _pick("computed_is_send", "computed_isSend", "computed_is_sent", "is_send", "isSent"),
-        "debug_my_rowid": _pick("debug_my_rowid", "debugMyRowid", "my_rowid", "myRowid"),
-        "_db_path": str(_pick("_db_path", "db_path", "dbPath") or "").strip(),
-        "db_name": str(_pick("db_name", "dbName") or "").strip(),
-        "table_name": str(_pick("table_name", "tableName") or "").strip(),
-    }
 
 
-def _collect_realtime_rows_for_session(
-    *,
-    trace_id: Optional[str],
-    account_name: str,
-    rt_conn: Any,
-    username: str,
-    msg_db_path_real: Path,
-    table_name: str,
-    max_local_id: int,
-    max_scan: int,
-    backfill_limit: int,
-) -> dict[str, Any]:
-    label = f"[{trace_id}]" if trace_id else "[realtime]"
-    log_fn = logger.info if trace_id else logger.debug
-    uname = str(username or "").strip()
-    use_biz_exec_query = uname.startswith("gh_") and ("biz_message" in str(msg_db_path_real.name).lower())
 
-    if use_biz_exec_query:
-        try:
-            quoted_table = _quote_ident(table_name)
-            select_cols = (
-                "local_id",
-                "server_id",
-                "local_type",
-                "sort_seq",
-                "real_sender_id",
-                "create_time",
-                "message_content",
-                "compress_content",
-                "packed_info_data",
-            )
-            select_sql = ", ".join([_quote_ident(col) for col in select_cols])
 
-            if int(max_local_id) > 0:
-                sql_new = (
-                    f"SELECT {select_sql} FROM {quoted_table} "
-                    f"WHERE local_id > {int(max_local_id)} "
-                    f"ORDER BY local_id ASC LIMIT {int(max_scan)}"
-                )
-            else:
-                sql_new = f"SELECT {select_sql} FROM {quoted_table} ORDER BY local_id DESC LIMIT {int(max_scan)}"
 
-            log_fn(
-                "%s wcdb_exec_query biz account=%s username=%s mode=new_rows max_local_id=%s limit=%s",
-                label,
-                account_name,
-                uname,
-                int(max_local_id),
-                int(max_scan),
-            )
-            wcdb_t0 = time.perf_counter()
-            with rt_conn.lock:
-                raw_new_rows = _wcdb_exec_query(rt_conn.handle, kind="message", path=str(msg_db_path_real), sql=sql_new)
-            wcdb_ms = (time.perf_counter() - wcdb_t0) * 1000.0
-            logger.info(
-                "%s wcdb_exec_query biz done account=%s username=%s mode=new_rows rows=%s ms=%.1f",
-                label,
-                account_name,
-                uname,
-                len(raw_new_rows or []),
-                wcdb_ms,
-            )
-            if wcdb_ms > 2000:
-                logger.warning(
-                    "%s wcdb_exec_query biz slow account=%s username=%s mode=new_rows ms=%.1f",
-                    label,
-                    account_name,
-                    uname,
-                    wcdb_ms,
-                )
-
-            normalized_new_rows: list[dict[str, Any]] = []
-            for item in raw_new_rows or []:
-                if not isinstance(item, dict):
-                    continue
-                norm = _normalize_realtime_message_item(item)
-                if int(norm.get("local_id") or 0) <= 0:
-                    continue
-                normalized_new_rows.append(norm)
-
-            if int(max_local_id) > 0:
-                new_rows = list(reversed(normalized_new_rows))
-            else:
-                new_rows = normalized_new_rows
-
-            backfill_rows: list[dict[str, Any]] = []
-            scanned = len(raw_new_rows or [])
-            if int(backfill_limit) > 0 and int(max_local_id) > 0:
-                sql_backfill = (
-                    f"SELECT {select_sql} FROM {quoted_table} "
-                    f"WHERE local_id <= {int(max_local_id)} "
-                    f"ORDER BY local_id DESC LIMIT {int(backfill_limit)}"
-                )
-                log_fn(
-                    "%s wcdb_exec_query biz account=%s username=%s mode=backfill limit=%s",
-                    label,
-                    account_name,
-                    uname,
-                    int(backfill_limit),
-                )
-                backfill_t0 = time.perf_counter()
-                with rt_conn.lock:
-                    raw_backfill_rows = _wcdb_exec_query(
-                        rt_conn.handle,
-                        kind="message",
-                        path=str(msg_db_path_real),
-                        sql=sql_backfill,
-                    )
-                backfill_ms = (time.perf_counter() - backfill_t0) * 1000.0
-                logger.info(
-                    "%s wcdb_exec_query biz done account=%s username=%s mode=backfill rows=%s ms=%.1f",
-                    label,
-                    account_name,
-                    uname,
-                    len(raw_backfill_rows or []),
-                    backfill_ms,
-                )
-                if backfill_ms > 2000:
-                    logger.warning(
-                        "%s wcdb_exec_query biz slow account=%s username=%s mode=backfill ms=%.1f",
-                        label,
-                        account_name,
-                        uname,
-                        backfill_ms,
-                    )
-                scanned += len(raw_backfill_rows or [])
-                for item in raw_backfill_rows or []:
-                    if not isinstance(item, dict):
-                        continue
-                    norm = _normalize_realtime_message_item(item)
-                    if int(norm.get("local_id") or 0) <= 0:
-                        continue
-                    backfill_rows.append(norm)
-
-            return {
-                "fetchMode": "biz_exec_query",
-                "scanned": int(scanned),
-                "new_rows": new_rows,
-                "backfill_rows": backfill_rows,
-            }
-        except Exception as e:
-            logger.warning(
-                "%s wcdb_exec_query biz failed account=%s username=%s err=%s fallback=wcdb_get_messages",
-                label,
-                account_name,
-                uname,
-                str(e),
-            )
-
-    batch_size = 200
-    scanned = 0
-    offset = 0
-    new_rows: list[dict[str, Any]] = []
-    backfill_rows: list[dict[str, Any]] = []
-    reached_existing = False
-    stop = False
-
-    while scanned < int(max_scan):
-        take = min(batch_size, int(max_scan) - scanned)
-        log_fn(
-            "%s wcdb_get_messages account=%s username=%s take=%s offset=%s",
-            label,
-            account_name,
-            uname,
-            int(take),
-            int(offset),
-        )
-        wcdb_t0 = time.perf_counter()
-        with rt_conn.lock:
-            raw_rows = _wcdb_get_messages(rt_conn.handle, uname, limit=take, offset=offset)
-        wcdb_ms = (time.perf_counter() - wcdb_t0) * 1000.0
-        log_fn(
-            "%s wcdb_get_messages done account=%s username=%s rows=%s ms=%.1f",
-            label,
-            account_name,
-            uname,
-            len(raw_rows or []),
-            wcdb_ms,
-        )
-        if wcdb_ms > 2000:
-            logger.warning(
-                "%s wcdb_get_messages slow account=%s username=%s ms=%.1f",
-                label,
-                account_name,
-                uname,
-                wcdb_ms,
-            )
-        if not raw_rows:
-            break
-
-        scanned += len(raw_rows)
-        offset += len(raw_rows)
-
-        for item in raw_rows:
-            if not isinstance(item, dict):
-                continue
-            norm = _normalize_realtime_message_item(item)
-            lid = int(norm.get("local_id") or 0)
-            if lid <= 0:
-                continue
-            if (not reached_existing) and lid > int(max_local_id):
-                new_rows.append(norm)
-                continue
-
-            reached_existing = True
-            if int(backfill_limit) <= 0:
-                stop = True
-                break
-            backfill_rows.append(norm)
-            if len(backfill_rows) >= int(backfill_limit):
-                stop = True
-                break
-
-        if stop or len(raw_rows) < take:
-            break
-
-    return {
-        "fetchMode": "wcdb_get_messages",
-        "scanned": int(scanned),
-        "new_rows": new_rows,
-        "backfill_rows": backfill_rows,
-    }
-
-
-@router.post("/api/chat/realtime/sync", summary="实时消息同步到解密库（按会话增量）")
-def sync_chat_realtime_messages(
-    request: Request,
-    username: str,
-    account: Optional[str] = None,
-    max_scan: int = 600,
-    backfill_limit: int = 200,
-):
-    """
-    设计目的：实时模式只用来“同步增量”到 output/databases 下的解密库，前端始终从解密库读取显示，
-    避免 WCDB realtime 返回格式差异（如 compress_content/message_content 的 hex 编码）直接影响渲染。
-
-    同步策略：从 WCDB 获取最新消息（从新到旧），直到遇到解密库中已存在的最大 local_id 为止。
-
-    backfill_limit：同步过程中额外“回填”旧消息的 packed_info_data 的最大行数（用于修复旧库缺失字段）。
-    - 设为 0 可显著降低每次同步的扫描/写入开销（更适合前端实时轮询/推送触发的高频增量同步）。
-    """
-    if not username:
-        raise HTTPException(status_code=400, detail="Missing username.")
-    if max_scan < 50:
-        max_scan = 50
-    if max_scan > 5000:
-        max_scan = 5000
-    if backfill_limit < 0:
-        backfill_limit = 0
-    if backfill_limit > 5000:
-        backfill_limit = 5000
-
-    account_dir = _resolve_account_dir(account)
-    trace_id = f"rt-sync-{int(time.time() * 1000)}-{threading.get_ident()}"
-    logger.info(
-        "[%s] realtime sync start account=%s username=%s max_scan=%s",
-        trace_id,
-        account_dir.name,
-        username,
-        int(max_scan),
-    )
-
-    # Lock per (account, username) to avoid concurrent writes to the same sqlite tables.
-    logger.info("[%s] acquiring per-session lock account=%s username=%s", trace_id, account_dir.name, username)
-    with _realtime_sync_lock(account_dir.name, username):
-        logger.info("[%s] per-session lock acquired account=%s username=%s", trace_id, account_dir.name, username)
-        try:
-            logger.info("[%s] ensure wcdb connected account=%s", trace_id, account_dir.name)
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            logger.info("[%s] wcdb connected account=%s handle=%s", trace_id, account_dir.name, int(rt_conn.handle))
-        except WCDBRealtimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        # Some sessions may not exist in the decrypted snapshot yet; create the missing Msg_<md5> table
-        # so we can insert the realtime rows and make `/api/chat/messages` work after switching off realtime.
-        msg_db_path, table_name = _ensure_decrypted_message_table(account_dir, username)
-        msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, msg_db_path.stem)
-        logger.info(
-            "[%s] resolved decrypted table account=%s username=%s db=%s table=%s",
-            trace_id,
-            account_dir.name,
-            username,
-            str(msg_db_path),
-            table_name,
-        )
-
-        msg_conn = sqlite3.connect(str(msg_db_path))
-        msg_conn.row_factory = sqlite3.Row
-        try:
-            name2id_synced = False
-            try:
-                sync_t0 = time.perf_counter()
-                name2id_result = _sync_output_name2id_from_live(
-                    msg_conn,
-                    rt_conn=rt_conn,
-                    msg_db_path_real=msg_db_path_real,
-                )
-                sync_ms = (time.perf_counter() - sync_t0) * 1000.0
-                name2id_synced = str(name2id_result.get("status") or "") in {"up_to_date", "refreshed"}
-                logger.info(
-                    "[%s] Name2Id sync account=%s db=%s status=%s rows=%s ms=%.1f",
-                    trace_id,
-                    account_dir.name,
-                    msg_db_path.stem,
-                    str(name2id_result.get("status") or ""),
-                    int(name2id_result.get("rows") or 0),
-                    sync_ms,
-                )
-            except Exception as e:
-                logger.warning(
-                    "[%s] Name2Id sync failed account=%s db=%s error=%s",
-                    trace_id,
-                    account_dir.name,
-                    msg_db_path.stem,
-                    str(e),
-                )
-
-            quoted_table = _quote_ident(table_name)
-            row = msg_conn.execute(f"SELECT MAX(local_id) AS mx FROM {quoted_table}").fetchone()
-            try:
-                max_local_id = int((row["mx"] if row is not None else 0) or 0)
-            except Exception:
-                max_local_id = 0
-
-            # Build a minimal insert statement based on existing columns (different WeChat versions vary).
-            cols = msg_conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
-            available_cols = {str(c[1] or "") for c in cols}
-            base_cols = [
-                "local_id",
-                "server_id",
-                "local_type",
-                "sort_seq",
-                "real_sender_id",
-                "create_time",
-                "message_content",
-                "compress_content",
-                "packed_info_data",
-            ]
-            insert_cols = [c for c in base_cols if c in available_cols]
-            if "local_id" not in insert_cols:
-                raise HTTPException(status_code=500, detail="Invalid message table schema (missing local_id).")
-
-            placeholders = ",".join(["?"] * len(insert_cols))
-            insert_sql = f"INSERT OR IGNORE INTO {quoted_table} ({','.join(insert_cols)}) VALUES ({placeholders})"
-            fetch_result = _collect_realtime_rows_for_session(
-                trace_id=trace_id,
-                account_name=account_dir.name,
-                rt_conn=rt_conn,
-                username=username,
-                msg_db_path_real=msg_db_path_real,
-                table_name=table_name,
-                max_local_id=max_local_id,
-                max_scan=int(max_scan),
-                backfill_limit=int(backfill_limit),
-            )
-            scanned = int(fetch_result.get("scanned") or 0)
-            new_rows = list(fetch_result.get("new_rows") or [])
-            backfill_rows = list(fetch_result.get("backfill_rows") or [])
-
-            inserted = 0
-            backfilled = 0
-            if new_rows:
-                if not name2id_synced:
-                    _best_effort_upsert_output_name2id_rows(
-                        msg_conn,
-                        account_name=account_dir.name,
-                        rows=new_rows,
-                    )
-
-                # Insert older -> newer to keep sqlite btree locality similar to existing data.
-                values = [tuple(r.get(c) for c in insert_cols) for r in reversed(new_rows)]
-                insert_t0 = time.perf_counter()
-                msg_conn.executemany(insert_sql, values)
-                msg_conn.commit()
-                insert_ms = (time.perf_counter() - insert_t0) * 1000.0
-                inserted = len(new_rows)
-                logger.info(
-                    "[%s] sqlite insert done account=%s username=%s inserted=%s ms=%.1f",
-                    trace_id,
-                    account_dir.name,
-                    username,
-                    int(inserted),
-                    insert_ms,
-                )
-                if insert_ms > 1000:
-                    logger.warning(
-                        "[%s] sqlite insert slow account=%s username=%s ms=%.1f",
-                        trace_id,
-                        account_dir.name,
-                        username,
-                        insert_ms,
-                    )
-
-            if ("packed_info_data" in insert_cols) and backfill_rows:
-                update_values = []
-                for r in backfill_rows:
-                    pdata = r.get("packed_info_data")
-                    if not pdata:
-                        continue
-                    update_values.append((pdata, int(r.get("local_id") or 0)))
-                if update_values:
-                    before_changes = msg_conn.total_changes
-                    update_t0 = time.perf_counter()
-                    msg_conn.executemany(
-                        f"UPDATE {quoted_table} SET packed_info_data = ? WHERE local_id = ? AND (packed_info_data IS NULL OR length(packed_info_data) = 0)",
-                        update_values,
-                    )
-                    msg_conn.commit()
-                    update_ms = (time.perf_counter() - update_t0) * 1000.0
-                    backfilled = int(msg_conn.total_changes - before_changes)
-                    logger.info(
-                        "[%s] sqlite backfill done account=%s username=%s rows=%s ms=%.1f",
-                        trace_id,
-                        account_dir.name,
-                        username,
-                        int(backfilled),
-                        update_ms,
-                    )
-                    if update_ms > 1000:
-                        logger.warning(
-                            "[%s] sqlite backfill slow account=%s username=%s ms=%.1f",
-                            trace_id,
-                            account_dir.name,
-                            username,
-                            update_ms,
-                        )
-
-            # Update session.db so left sidebar ordering/time can follow new messages.
-            newest = new_rows[0] if new_rows else None
-            preview = ""
-            newest_ts = 0
-            newest_local_id = 0
-            newest_type = 0
-            newest_sort_seq = 0
-            newest_sender = ""
-            newest_sub_type = 0
-
-            if newest:
-                newest_ts = int(newest.get("create_time") or 0)
-                newest_local_id = int(newest.get("local_id") or 0)
-                newest_type = int(newest.get("local_type") or 0)
-                newest_sort_seq = int(newest.get("sort_seq") or 0)
-                newest_sender = str(newest.get("sender_username") or "").strip()
-
-                raw_text = _decode_message_content(newest.get("compress_content"), newest.get("message_content")).strip()
-                is_group = bool(username.endswith("@chatroom"))
-                preview = _build_latest_message_preview(
-                    username=username,
-                    local_type=newest_type,
-                    raw_text=raw_text,
-                    is_group=is_group,
-                    sender_username=newest_sender,
-                )
-
-                if newest_type == 49 and raw_text:
-                    try:
-                        newest_sub_type = int(str(_extract_xml_tag_text(raw_text, "type") or "0").strip() or "0")
-                    except Exception:
-                        newest_sub_type = 0
-
-            if inserted and newest_ts:
-                session_db_path = account_dir / "session.db"
-                sconn = sqlite3.connect(str(session_db_path))
-                try:
-                    sconn.execute("INSERT OR IGNORE INTO SessionTable(username) VALUES (?)", (username,))
-                    sconn.execute(
-                        """
-                        UPDATE SessionTable
-                        SET
-                            last_timestamp = CASE WHEN COALESCE(last_timestamp, 0) < ? THEN ? ELSE last_timestamp END,
-                            sort_timestamp = CASE WHEN COALESCE(sort_timestamp, 0) < ? THEN ? ELSE sort_timestamp END,
-                            last_msg_locald_id = ?,
-                            last_msg_type = ?,
-                            last_msg_sub_type = ?,
-                            last_msg_sender = ?,
-                            summary = ?
-                        WHERE username = ?
-                        """,
-                        (
-                            newest_ts,
-                            newest_ts,
-                            newest_ts,
-                            newest_ts,
-                            newest_local_id,
-                            newest_type,
-                            newest_sub_type,
-                            newest_sender,
-                            preview or "",
-                            username,
-                        ),
-                    )
-
-                    _ensure_session_last_message_table(sconn)
-                    sconn.execute(
-                        """
-                        INSERT OR REPLACE INTO session_last_message (
-                            username, sort_seq, local_id, create_time, local_type, sender_username,
-                            preview, db_stem, table_name, built_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            username,
-                            newest_sort_seq,
-                            newest_local_id,
-                            newest_ts,
-                            newest_type,
-                            newest_sender,
-                            preview or "",
-                            str(msg_db_path.stem),
-                            str(table_name),
-                            int(time.time()),
-                        ),
-                    )
-                    sconn.commit()
-                finally:
-                    sconn.close()
-
-            logger.info(
-                "[%s] realtime sync done account=%s username=%s scanned=%s inserted=%s backfilled=%s maxLocalIdBefore=%s",
-                trace_id,
-                account_dir.name,
-                username,
-                int(scanned),
-                int(inserted),
-                int(backfilled),
-                int(max_local_id),
-            )
-            return {
-                "status": "success",
-                "account": account_dir.name,
-                "username": username,
-                "scanned": int(scanned),
-                "maxLocalIdBefore": int(max_local_id),
-                "inserted": int(inserted),
-                "backfilled": int(backfilled),
-                "preview": preview or "",
-            }
-        finally:
-            msg_conn.close()
-
-
-def _sync_chat_realtime_messages_for_table(
-    *,
-    account_dir: Path,
-    rt_conn: Any,
-    username: str,
-    msg_db_path: Path,
-    table_name: str,
-    max_scan: int,
-    backfill_limit: int = 200,
-) -> dict[str, Any]:
-    if max_scan < 50:
-        max_scan = 50
-    if max_scan > 5000:
-        max_scan = 5000
-    if backfill_limit < 0:
-        backfill_limit = 0
-    if backfill_limit > 5000:
-        backfill_limit = 5000
-    if backfill_limit > max_scan:
-        backfill_limit = max_scan
-
-    msg_conn: Optional[sqlite3.Connection] = None
-    stage = "connect"
-    try:
-        stage = "connect"
-        msg_conn = sqlite3.connect(str(msg_db_path))
-        msg_conn.row_factory = sqlite3.Row
-
-        stage = "resolve_db_storage_paths"
-        msg_db_path_real, _res_db_path_real = _resolve_db_storage_message_paths(account_dir, msg_db_path.stem)
-        name2id_synced = False
-        try:
-            stage = "sync_name2id"
-            name2id_result = _sync_output_name2id_from_live(
-                msg_conn,
-                rt_conn=rt_conn,
-                msg_db_path_real=msg_db_path_real,
-            )
-            name2id_synced = str(name2id_result.get("status") or "") in {"up_to_date", "refreshed"}
-            logger.info(
-                "[realtime] Name2Id sync account=%s db=%s status=%s rows=%s",
-                account_dir.name,
-                msg_db_path.stem,
-                str(name2id_result.get("status") or ""),
-                int(name2id_result.get("rows") or 0),
-            )
-        except Exception as e:
-            logger.warning(
-                "[realtime] Name2Id sync failed account=%s db=%s error=%s",
-                account_dir.name,
-                msg_db_path.stem,
-                str(e),
-            )
-
-        quoted_table = _quote_ident(table_name)
-        stage = "max_local_id"
-        row = msg_conn.execute(f"SELECT MAX(local_id) AS mx FROM {quoted_table}").fetchone()
-        try:
-            max_local_id = int((row["mx"] if row is not None else 0) or 0)
-        except Exception:
-            max_local_id = 0
-
-        stage = "pragma_table_info"
-        cols = msg_conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
-        available_cols = {str(c[1] or "") for c in cols}
-        base_cols = [
-            "local_id",
-            "server_id",
-            "local_type",
-            "sort_seq",
-            "real_sender_id",
-            "create_time",
-            "message_content",
-            "compress_content",
-            "packed_info_data",
-        ]
-        insert_cols = [c for c in base_cols if c in available_cols]
-        if "local_id" not in insert_cols:
-            raise HTTPException(status_code=500, detail="Invalid message table schema (missing local_id).")
-
-        placeholders = ",".join(["?"] * len(insert_cols))
-        insert_sql = f"INSERT OR IGNORE INTO {quoted_table} ({','.join(insert_cols)}) VALUES ({placeholders})"
-        stage = "collect_realtime_rows"
-        fetch_result = _collect_realtime_rows_for_session(
-            trace_id=None,
-            account_name=account_dir.name,
-            rt_conn=rt_conn,
-            username=username,
-            msg_db_path_real=msg_db_path_real,
-            table_name=table_name,
-            max_local_id=max_local_id,
-            max_scan=int(max_scan),
-            backfill_limit=int(backfill_limit),
-        )
-        scanned = int(fetch_result.get("scanned") or 0)
-        new_rows = list(fetch_result.get("new_rows") or [])
-        backfill_rows = list(fetch_result.get("backfill_rows") or [])
-
-        inserted = 0
-        backfilled = 0
-        if new_rows:
-            try:
-                native_self_u = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
-                save_messages_to_archive(
-                    account_dir=account_dir,
-                    account_name=account_dir.name,
-                    username=username,
-                    rows=new_rows,
-                    self_username=native_self_u,
-                )
-            except Exception as e:
-                logger.exception(
-                    "[anti_revoke] Failed to archive realtime messages account=%s username=%s: %s",
-                    account_dir.name,
-                    username,
-                    e,
-                )
-                raise
-
-            if not name2id_synced:
-                stage = "upsert_name2id_fallback"
-                _best_effort_upsert_output_name2id_rows(
-                    msg_conn,
-                    account_name=account_dir.name,
-                    rows=new_rows,
-                )
-
-            values = [tuple(r.get(c) for c in insert_cols) for r in reversed(new_rows)]
-            insert_t0 = time.perf_counter()
-            stage = "insert_new_rows"
-            msg_conn.executemany(insert_sql, values)
-            msg_conn.commit()
-            insert_ms = (time.perf_counter() - insert_t0) * 1000.0
-            inserted = len(new_rows)
-            logger.info(
-                "[realtime] sqlite insert done account=%s username=%s inserted=%s ms=%.1f",
-                account_dir.name,
-                username,
-                int(inserted),
-                insert_ms,
-            )
-            if insert_ms > 1000:
-                logger.warning(
-                    "[realtime] sqlite insert slow account=%s username=%s ms=%.1f",
-                    account_dir.name,
-                    username,
-                    insert_ms,
-                )
-
-        if ("packed_info_data" in insert_cols) and backfill_rows:
-            update_values = []
-            for r in backfill_rows:
-                pdata = r.get("packed_info_data")
-                if not pdata:
-                    continue
-                update_values.append((pdata, int(r.get("local_id") or 0)))
-            if update_values:
-                before_changes = msg_conn.total_changes
-                update_t0 = time.perf_counter()
-                stage = "backfill_packed_info"
-                msg_conn.executemany(
-                    f"UPDATE {quoted_table} SET packed_info_data = ? WHERE local_id = ? AND (packed_info_data IS NULL OR length(packed_info_data) = 0)",
-                    update_values,
-                )
-                msg_conn.commit()
-                update_ms = (time.perf_counter() - update_t0) * 1000.0
-                backfilled = int(msg_conn.total_changes - before_changes)
-                logger.info(
-                    "[realtime] sqlite backfill done account=%s username=%s rows=%s ms=%.1f",
-                    account_dir.name,
-                    username,
-                    int(backfilled),
-                    update_ms,
-                )
-                if update_ms > 1000:
-                    logger.warning(
-                        "[realtime] sqlite backfill slow account=%s username=%s ms=%.1f",
-                        account_dir.name,
-                        username,
-                        update_ms,
-                    )
-
-        newest = new_rows[0] if new_rows else None
-        preview = ""
-        newest_ts = 0
-        newest_local_id = 0
-        newest_type = 0
-        newest_sort_seq = 0
-        newest_sender = ""
-        newest_sub_type = 0
-
-        if newest:
-            newest_ts = int(newest.get("create_time") or 0)
-            newest_local_id = int(newest.get("local_id") or 0)
-            newest_type = int(newest.get("local_type") or 0)
-            newest_sort_seq = int(newest.get("sort_seq") or 0)
-            newest_sender = str(newest.get("sender_username") or "").strip()
-
-            raw_text = _decode_message_content(newest.get("compress_content"), newest.get("message_content")).strip()
-            is_group = bool(username.endswith("@chatroom"))
-            preview = _build_latest_message_preview(
-                username=username,
-                local_type=newest_type,
-                raw_text=raw_text,
-                is_group=is_group,
-                sender_username=newest_sender,
-            )
-
-            if newest_type == 49 and raw_text:
-                try:
-                    newest_sub_type = int(str(_extract_xml_tag_text(raw_text, "type") or "0").strip() or "0")
-                except Exception:
-                    newest_sub_type = 0
-
-        if inserted and newest_ts:
-            session_db_path = account_dir / "session.db"
-            sconn: Optional[sqlite3.Connection] = None
-            try:
-                stage = "open_session_db"
-                sconn = sqlite3.connect(str(session_db_path))
-                stage = "update_session_table"
-                sconn.execute("INSERT OR IGNORE INTO SessionTable(username) VALUES (?)", (username,))
-                sconn.execute(
-                    """
-                    UPDATE SessionTable
-                    SET
-                        last_timestamp = CASE WHEN COALESCE(last_timestamp, 0) < ? THEN ? ELSE last_timestamp END,
-                        sort_timestamp = CASE WHEN COALESCE(sort_timestamp, 0) < ? THEN ? ELSE sort_timestamp END,
-                        last_msg_locald_id = ?,
-                        last_msg_type = ?,
-                        last_msg_sub_type = ?,
-                        last_msg_sender = ?,
-                        summary = ?
-                    WHERE username = ?
-                    """,
-                    (
-                        newest_ts,
-                        newest_ts,
-                        newest_ts,
-                        newest_ts,
-                        newest_local_id,
-                        newest_type,
-                        newest_sub_type,
-                        newest_sender,
-                        preview or "",
-                        username,
-                    ),
-                )
-
-                stage = "update_session_last_message"
-                _ensure_session_last_message_table(sconn)
-                sconn.execute(
-                    """
-                    INSERT OR REPLACE INTO session_last_message (
-                        username, sort_seq, local_id, create_time, local_type, sender_username,
-                        preview, db_stem, table_name, built_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        username,
-                        newest_sort_seq,
-                        newest_local_id,
-                        newest_ts,
-                        newest_type,
-                        newest_sender,
-                        preview or "",
-                        str(msg_db_path.stem),
-                        str(table_name),
-                        int(time.time()),
-                    ),
-                )
-                sconn.commit()
-            except sqlite3.DatabaseError as e:
-                logger.warning(
-                    "[realtime] malformed session db during sync account=%s username=%s session_db=%s stage=%s error=%s diag=%s",
-                    account_dir.name,
-                    username,
-                    str(session_db_path),
-                    stage,
-                    str(e),
-                    format_sqlite_diagnostics(
-                        collect_sqlite_diagnostics(session_db_path, quick_check=True, table_name="SessionTable")
-                    ),
-                )
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Malformed session db during realtime sync: {session_db_path.name}",
-                )
-            finally:
-                if sconn is not None:
-                    sconn.close()
-
-        return {
-            "username": username,
-            "scanned": int(scanned),
-            "maxLocalIdBefore": int(max_local_id),
-            "inserted": int(inserted),
-            "backfilled": int(backfilled),
-            "preview": preview or "",
-        }
-    except sqlite3.DatabaseError as e:
-        logger.warning(
-            "[realtime] malformed decrypted message db account=%s username=%s db=%s table=%s stage=%s error=%s diag=%s",
-            account_dir.name,
-            username,
-            str(msg_db_path),
-            table_name,
-            stage,
-            str(e),
-            format_sqlite_diagnostics(
-                collect_sqlite_diagnostics(msg_db_path, quick_check=True, table_name=table_name)
-            ),
-        )
-        raise HTTPException(status_code=500, detail=f"Malformed decrypted message db: {msg_db_path.name}")
-    finally:
-        if msg_conn is not None:
-            msg_conn.close()
-
-
-@router.post("/api/chat/realtime/sync_all", summary="实时消息同步到解密库（全会话增量）")
-def sync_chat_realtime_messages_all(
-    request: Request,
-    account: Optional[str] = None,
-    max_scan: int = 200,
-    priority_username: Optional[str] = None,
-    priority_max_scan: int = 600,
-    include_hidden: bool = True,
-    include_official: bool = True,
-    only_official: bool = False,
-    backfill_limit: int = 200,
-):
-    """
-    全量会话同步（增量）：遍历会话列表，对每个会话调用与 /realtime/sync 相同的“遇到已同步 local_id 即停止”逻辑。
-
-    说明：这是增量同步，不会每次全表扫描；priority_username 会优先同步并可设置更大的 priority_max_scan。
-    """
-    account_dir = _resolve_account_dir(account)
-    trace_id = f"rt-syncall-{int(time.time() * 1000)}-{threading.get_ident()}"
-    logger.info(
-        "[%s] realtime sync_all start account=%s max_scan=%s priority=%s include_hidden=%s include_official=%s only_official=%s",
-        trace_id,
-        account_dir.name,
-        int(max_scan),
-        str(priority_username or "").strip(),
-        bool(include_hidden),
-        bool(include_official),
-        bool(only_official),
-    )
-
-    if max_scan < 20:
-        max_scan = 20
-    if max_scan > 5000:
-        max_scan = 5000
-    if priority_max_scan < max_scan:
-        priority_max_scan = max_scan
-    if priority_max_scan > 5000:
-        priority_max_scan = 5000
-    if backfill_limit < 0:
-        backfill_limit = 0
-    if backfill_limit > 5000:
-        backfill_limit = 5000
-    if backfill_limit > max_scan:
-        backfill_limit = max_scan
-
-    priority = str(priority_username or "").strip()
-    started = time.time()
-
-    logger.info("[%s] acquiring global sync lock account=%s", trace_id, account_dir.name)
-    with _realtime_sync_all_lock(account_dir.name):
-        logger.info("[%s] global sync lock acquired account=%s", trace_id, account_dir.name)
-        try:
-            logger.info("[%s] ensure wcdb connected account=%s", trace_id, account_dir.name)
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            logger.info("[%s] wcdb connected account=%s handle=%s", trace_id, account_dir.name, int(rt_conn.handle))
-        except WCDBRealtimeError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-        try:
-            logger.info("[%s] wcdb_get_sessions account=%s", trace_id, account_dir.name)
-            wcdb_t0 = time.perf_counter()
-            with rt_conn.lock:
-                raw_sessions = _wcdb_get_sessions(rt_conn.handle)
-            wcdb_ms = (time.perf_counter() - wcdb_t0) * 1000.0
-            logger.info(
-                "[%s] wcdb_get_sessions done account=%s sessions=%s ms=%.1f",
-                trace_id,
-                account_dir.name,
-                len(raw_sessions or []),
-                wcdb_ms,
-            )
-        except Exception:
-            raw_sessions = []
-
-        sessions: list[tuple[int, str]] = []
-        realtime_rows_by_user: dict[str, dict[str, Any]] = {}
-        for item in raw_sessions:
-            if not isinstance(item, dict):
-                continue
-            uname = str(item.get("username") or item.get("user_name") or item.get("UserName") or "").strip()
-            if not uname:
-                continue
-
-            try:
-                hidden_val = int(item.get("is_hidden", item.get("isHidden", 0)) or 0)
-            except Exception:
-                hidden_val = 0
-            if not include_hidden and hidden_val == 1:
-                continue
-            if only_official and not uname.startswith("gh_"):
-                continue
-            if not _should_keep_session(uname, include_official=include_official):
-                continue
-
-            ts = 0
-            for k in ("sort_timestamp", "sortTimestamp", "last_timestamp", "lastTimestamp"):
-                try:
-                    ts = int(item.get(k, 0) or 0)
-                except Exception:
-                    ts = 0
-                if ts:
-                    break
-            sessions.append((ts, uname))
-
-            # Keep a normalized SessionTable row for upserting into decrypted session.db.
-            norm_row = {
-                "username": uname,
-                "unread_count": item.get("unread_count", item.get("unreadCount", 0)),
-                "is_hidden": item.get("is_hidden", item.get("isHidden", 0)),
-                "summary": item.get("summary", ""),
-                "draft": item.get("draft", ""),
-                "last_timestamp": item.get("last_timestamp", item.get("lastTimestamp", 0)),
-                "sort_timestamp": item.get(
-                    "sort_timestamp",
-                    item.get("sortTimestamp", item.get("last_timestamp", item.get("lastTimestamp", 0))),
-                ),
-                "last_msg_locald_id": item.get(
-                    "last_msg_locald_id",
-                    item.get("lastMsgLocaldId", item.get("lastMsgLocalId", 0)),
-                ),
-                "last_msg_type": item.get("last_msg_type", item.get("lastMsgType", 0)),
-                "last_msg_sub_type": item.get("last_msg_sub_type", item.get("lastMsgSubType", 0)),
-                "last_msg_sender": item.get("last_msg_sender", item.get("lastMsgSender", "")),
-                "last_sender_display_name": item.get(
-                    "last_sender_display_name",
-                    item.get("lastSenderDisplayName", ""),
-                ),
-            }
-            # Prefer the row with the newer sort timestamp for the same username.
-            prev = realtime_rows_by_user.get(uname)
-            try:
-                prev_sort = int((prev or {}).get("sort_timestamp") or 0)
-            except Exception:
-                prev_sort = 0
-            try:
-                cur_sort = int(norm_row.get("sort_timestamp") or 0)
-            except Exception:
-                cur_sort = 0
-            if prev is None or cur_sort >= prev_sort:
-                realtime_rows_by_user[uname] = norm_row
-
-        def _dedupe(items: list[tuple[int, str]]) -> list[tuple[int, str]]:
-            seen = set()
-            out: list[tuple[int, str]] = []
-            for ts, u in items:
-                if not u or u in seen:
-                    continue
-                seen.add(u)
-                out.append((ts, u))
-            return out
-
-        sessions = _dedupe(sessions)
-        sessions.sort(key=lambda x: int(x[0] or 0), reverse=True)
-        all_usernames = [u for _, u in sessions if u]
-        logger.info(
-            "[%s] sessions prepared account=%s raw=%s filtered=%s",
-            trace_id,
-            account_dir.name,
-            len(raw_sessions or []),
-            len(all_usernames),
-        )
-
-        # Keep SessionTable fresh for UI consistency, and use session_last_message.create_time as the
-        # "sync watermark" (instead of SessionTable timestamps) to decide whether a session needs syncing.
-        decrypted_ts_by_user: dict[str, int] = {}
-        if all_usernames:
-            try:
-                session_db_path = account_dir / "session.db"
-                sconn = sqlite3.connect(str(session_db_path))
-                sconn.row_factory = sqlite3.Row
-                try:
-                    _ensure_session_last_message_table(sconn)
-
-                    # If the cache table exists but is empty (older accounts), attempt a one-time build so we
-                    # don't keep treating every session as "needs_sync".
-                    try:
-                        cnt = int(sconn.execute("SELECT COUNT(1) FROM session_last_message").fetchone()[0] or 0)
-                    except Exception:
-                        cnt = 0
-                    if cnt <= 0:
-                        try:
-                            sconn.close()
-                        except Exception:
-                            pass
-                        try:
-                            build_session_last_message_table(
-                                account_dir,
-                                rebuild=False,
-                                include_hidden=True,
-                                include_official=True,
-                            )
-                        except Exception:
-                            pass
-                        sconn = sqlite3.connect(str(session_db_path))
-                        sconn.row_factory = sqlite3.Row
-                        _ensure_session_last_message_table(sconn)
-
-                    # Upsert latest WCDB sessions into decrypted SessionTable so the sidebar list remains stable
-                    # after switching off realtime (or refreshing the page).
-                    try:
-                        _upsert_session_table_rows(sconn, list(realtime_rows_by_user.values()))
-                        sconn.commit()
-                    except Exception:
-                        try:
-                            sconn.rollback()
-                        except Exception:
-                            pass
-
-                    decrypted_ts_by_user = _load_session_last_message_times(sconn, all_usernames)
-                finally:
-                    try:
-                        sconn.close()
-                    except Exception:
-                        pass
-            except Exception:
-                decrypted_ts_by_user = {}
-
-        sync_usernames: list[str] = []
-        skipped_up_to_date = 0
-        for ts, u in sessions:
-            if not u:
-                continue
-            local_ts = int(decrypted_ts_by_user.get(u) or 0)
-            if ts and local_ts and local_ts >= int(ts):
-                skipped_up_to_date += 1
-                continue
-            sync_usernames.append(u)
-
-        logger.info(
-            "[%s] sessions need_sync account=%s need_sync=%s skipped_up_to_date=%s",
-            trace_id,
-            account_dir.name,
-            len(sync_usernames),
-            int(skipped_up_to_date),
-        )
-
-        if priority and priority in sync_usernames:
-            sync_usernames = [priority] + [u for u in sync_usernames if u != priority]
-
-        table_map = _ensure_decrypted_message_tables(account_dir, sync_usernames)
-        logger.info(
-            "[%s] resolved decrypted tables account=%s resolved=%s need_sync=%s",
-            trace_id,
-            account_dir.name,
-            len(table_map),
-            len(sync_usernames),
-        )
-
-        scanned_total = 0
-        inserted_total = 0
-        synced = 0
-        skipped_missing_table = 0
-        updated_sessions = 0
-        errors: list[str] = []
-
-        for uname in sync_usernames:
-            resolved = table_map.get(uname)
-            if not resolved:
-                skipped_missing_table += 1
-                continue
-            msg_db_path, table_name = resolved
-            cur_scan = priority_max_scan if (priority and uname == priority) else max_scan
-
-            try:
-                with _realtime_sync_lock(account_dir.name, uname):
-                    result = _sync_chat_realtime_messages_for_table(
-                        account_dir=account_dir,
-                        rt_conn=rt_conn,
-                        username=uname,
-                        msg_db_path=msg_db_path,
-                        table_name=table_name,
-                        max_scan=int(cur_scan),
-                        backfill_limit=int(backfill_limit),
-                    )
-                synced += 1
-                scanned_total += int(result.get("scanned") or 0)
-                ins = int(result.get("inserted") or 0)
-                inserted_total += ins
-                if ins:
-                    updated_sessions += 1
-                    logger.info(
-                        "[%s] synced session account=%s username=%s inserted=%s scanned=%s",
-                        trace_id,
-                        account_dir.name,
-                        uname,
-                        ins,
-                        int(result.get("scanned") or 0),
-                    )
-            except HTTPException as e:
-                errors.append(f"{uname}: {str(e.detail or '')}".strip())
-                logger.warning(
-                    "[%s] sync session failed account=%s username=%s db=%s table=%s err=%s",
-                    trace_id,
-                    account_dir.name,
-                    uname,
-                    str(msg_db_path),
-                    str(table_name),
-                    str(e.detail or "").strip(),
-                )
-                continue
-            except Exception as e:
-                errors.append(f"{uname}: {str(e)}".strip())
-                logger.exception(
-                    "[%s] sync session crashed account=%s username=%s db=%s table=%s",
-                    trace_id,
-                    account_dir.name,
-                    uname,
-                    str(msg_db_path),
-                    str(table_name),
-                )
-                continue
-
-        elapsed_ms = int((time.time() - started) * 1000)
-        if len(errors) > 20:
-            errors = errors[:20] + [f"... and {len(errors) - 20} more"]
-
-        logger.info(
-            "[%s] realtime sync_all done account=%s sessions_total=%s need_sync=%s synced=%s updated=%s inserted_total=%s elapsed_ms=%s errors=%s",
-            trace_id,
-            account_dir.name,
-            len(all_usernames),
-            len(sync_usernames),
-            int(synced),
-            int(updated_sessions),
-            int(inserted_total),
-            int(elapsed_ms),
-            len(errors),
-        )
-        return {
-            "status": "success",
-            "account": account_dir.name,
-            "priorityUsername": priority,
-            "sessionsTotal": len(all_usernames),
-            "sessionsNeedSync": len(sync_usernames),
-            "sessionsSkippedUpToDate": int(skipped_up_to_date),
-            "sessionsResolved": len(table_map),
-            "sessionsSynced": int(synced),
-            "sessionsUpdated": int(updated_sessions),
-            "sessionsSkippedMissingTable": int(skipped_missing_table),
-            "scannedTotal": int(scanned_total),
-            "insertedTotal": int(inserted_total),
-            "elapsedMs": int(elapsed_ms),
-            "errors": errors,
-        }
 
 def _normalize_session_type(value: Optional[str]) -> Optional[str]:
     v = str(value or "").strip().lower()
@@ -2946,7 +693,7 @@ async def chat_search_index_senders(
         q = None
 
     account_dir = _resolve_account_dir(account)
-    contact_db_path = account_dir / "contact.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
     source_requested = _normalize_chat_source(source)
     index_status = get_chat_search_index_status(account_dir, source=source_requested)
     index = dict(index_status.get("index") or {})
@@ -3066,7 +813,7 @@ async def chat_search_index_senders(
     sender_usernames = [str(r["sender_username"] or "").strip() for r in rows if r and r["sender_username"]]
     sender_usernames = [u for u in sender_usernames if u]
     contact_rows = _load_contact_rows(contact_db_path, sender_usernames)
-    head_image_db_path = account_dir / "head_image.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
     local_sender_avatars = _query_head_image_usernames(head_image_db_path, sender_usernames)
 
     senders: list[dict[str, Any]] = []
@@ -3124,7 +871,7 @@ def _append_full_messages_from_rows(
     alias_cache: dict[str, str] = {}
     if is_group:
         try:
-            contact_db_path = account_dir / "contact.db"
+            contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
             if contact_db_path.exists():
                 contact_conn = sqlite3.connect(str(contact_db_path))
         except Exception:
@@ -3171,7 +918,7 @@ def _append_full_messages_from_rows(
             except Exception:
                 is_sent = False
         else:
-            # Realtime WCDB DLL may already compute this field.
+
             for k in (
                 "computed_is_send",
                 "computed_is_sent",
@@ -3300,6 +1047,7 @@ def _append_full_messages_from_rows(
         revoked_server_id = ""
         revoked_local_id = 0
         message_revoke_time = 0
+        revoke_original_status = ""
         if local_type == 10000:
             render_type = "system"
             content_text = _parse_system_message_content(raw_text)
@@ -3317,7 +1065,10 @@ def _append_full_messages_from_rows(
                             revoke_time=create_time or int(time.time()),
                             server_id=str(r["server_id"] or "0"),
                             local_id=local_id,
+                            source_db=effective_db_path.stem,
+                            source_table=effective_table_name,
                         )
+                        revoke_original_status = "captured" if revoked is not None else "unresolved"
                         if revoked is not None:
                             revoked_server_id = str(revoked["server_id"] or "")
                             revoked_local_id = int(revoked["local_id"] or 0)
@@ -3699,6 +1450,7 @@ def _append_full_messages_from_rows(
                 "revokedServerId": revoked_server_id,
                 "revokedLocalId": revoked_local_id,
                 "revokeTime": message_revoke_time,
+                "revokeOriginalStatus": revoke_original_status,
                 "_rawText": raw_text if local_type in (10000, 266287972401) else "",
             }
         )
@@ -3901,19 +1653,7 @@ def _postprocess_transfer_messages(merged: list[dict[str, Any]]) -> None:
         m["transferStatus"] = "已收款"
 
 
-def _postprocess_full_messages(
-    *,
-    merged: list[dict[str, Any]],
-    sender_usernames: list[str],
-    quote_usernames: list[str],
-    pat_usernames: set[str],
-    account_dir: Path,
-    username: str,
-    base_url: str,
-    contact_db_path: Path,
-    head_image_db_path: Path,
-    rt_conn: Any = None,
-) -> None:
+def _postprocess_full_messages(*, merged: list[dict[str, Any]], sender_usernames: list[str], quote_usernames: list[str], pat_usernames: set[str], account_dir: Path, username: str, base_url: str, contact_db_path: Path, head_image_db_path: Path) -> None:
     _postprocess_transfer_messages(merged)
 
     # Some appmsg payloads provide only `from` (sourcedisplayname) but not `fromUsername` (sourceusername).
@@ -3972,34 +1712,6 @@ def _postprocess_full_messages(
     sender_contact_rows = _load_contact_rows(contact_db_path, uniq_senders)
     local_sender_avatars = _query_head_image_usernames(head_image_db_path, uniq_senders)
 
-    # contact.db may not include enterprise/openim contacts (or group chatroom records). WCDB has a more complete
-    # view of display names + avatar URLs, so we use it as a best-effort fallback.
-    wcdb_display_names: dict[str, str] = {}
-    wcdb_avatar_urls: dict[str, str] = {}
-    try:
-        need_display: list[str] = []
-        need_avatar: list[str] = []
-        for u in uniq_senders:
-            if not u:
-                continue
-            row = sender_contact_rows.get(u)
-            if _pick_display_name(row, u) == u:
-                need_display.append(u)
-            if u not in local_sender_avatars:
-                need_avatar.append(u)
-
-        need_display = list(dict.fromkeys(need_display))
-        need_avatar = list(dict.fromkeys(need_avatar))
-        if (need_display or need_avatar) and not account_prefers_decrypted_snapshot(account_dir):
-            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            with wcdb_conn.lock:
-                if need_display:
-                    wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-                if need_avatar:
-                    wcdb_avatar_urls = _wcdb_get_avatar_urls(wcdb_conn.handle, need_avatar)
-    except Exception:
-        wcdb_display_names = {}
-        wcdb_avatar_urls = {}
 
     group_nicknames = _load_group_nickname_map(
         account_dir=account_dir,
@@ -4008,7 +1720,7 @@ def _postprocess_full_messages(
         sender_usernames=uniq_senders,
     )
 
-    enterprise_contacts = _load_enterprise_contact_info(contact_db_path, sender_usernames, rt_conn=rt_conn)
+    enterprise_contacts = _load_enterprise_contact_info(contact_db_path, sender_usernames)
     for m in merged:
         # If appmsg doesn't provide sourcedisplayname, try mapping sourceusername to display name.
         if (not str(m.get("from") or "").strip()) and str(m.get("fromUsername") or "").strip():
@@ -4016,10 +1728,6 @@ def _postprocess_full_messages(
             frow = sender_contact_rows.get(fu)
             if frow is not None:
                 m["from"] = _pick_display_name(frow, fu)
-            else:
-                wd = str(wcdb_display_names.get(fu) or "").strip()
-                if wd:
-                    m["from"] = wd
 
         su = str(m.get("senderUsername") or "")
         if su:
@@ -4027,7 +1735,7 @@ def _postprocess_full_messages(
             m["senderDisplayName"] = _resolve_sender_display_name(
                 sender_username=su,
                 sender_contact_rows=sender_contact_rows,
-                wcdb_display_names=wcdb_display_names,
+
                 group_nicknames=group_nicknames,
             )
             avatar_url = base_url + _avatar_url_unified(
@@ -4059,7 +1767,7 @@ def _postprocess_full_messages(
                         "displayName": _resolve_sender_display_name(
                             sender_username=au,
                             sender_contact_rows=sender_contact_rows,
-                            wcdb_display_names=wcdb_display_names,
+
                             group_nicknames=group_nicknames,
                         ),
                         "avatar": base_url
@@ -4088,14 +1796,9 @@ def _postprocess_full_messages(
                     m["quoteTitle"] = remark
                 elif not qt:
                     title = _pick_display_name(qrow, qu)
-                    if title == qu:
-                        wd = str(wcdb_display_names.get(qu) or "").strip()
-                        if wd and wd != qu:
-                            title = wd
                     m["quoteTitle"] = title
             elif not qt:
-                wd = str(wcdb_display_names.get(qu) or "").strip()
-                m["quoteTitle"] = wd or qu
+                m["quoteTitle"] = qu
 
         # Media URL fallback: if CDN URLs missing, use local media endpoints.
         try:
@@ -4118,30 +1821,22 @@ def _postprocess_full_messages(
                 md5 = str(m.get("emojiMd5") or "")
                 if md5:
                     existing_local: Optional[Path] = None
+
+                    # The local endpoint resolves encrypted sources and exposes 404/422;
+                    # message assembly must not bypass it or scan/decode every image.
                     try:
-                        existing_local = _try_find_decrypted_resource(account_dir, str(md5).lower())
+                        cur = str(m.get("emojiUrl") or "")
+                        if cur and re.match(r"^https?://", cur, flags=re.I) and (
+                            "/api/chat/media/emoji" not in cur
+                        ):
+                            m["emojiRemoteUrl"] = cur
                     except Exception:
-                        existing_local = None
+                        pass
 
-                    if existing_local:
-                        try:
-                            cur = str(m.get("emojiUrl") or "")
-                            if cur and re.match(r"^https?://", cur, flags=re.I) and (
-                                "/api/chat/media/emoji" not in cur
-                            ):
-                                m["emojiRemoteUrl"] = cur
-                        except Exception:
-                            pass
-
-                        m["emojiUrl"] = (
-                            base_url
-                            + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
-                        )
-                    elif (not str(m.get("emojiUrl") or "")):
-                        m["emojiUrl"] = (
-                            base_url
-                            + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
-                        )
+                    m["emojiUrl"] = (
+                        base_url
+                        + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
+                    )
             elif rt == "video":
                 video_thumb_url = str(m.get("videoThumbUrl") or "").strip()
                 video_thumb_md5 = str(m.get("videoThumbMd5") or "").strip()
@@ -4208,7 +1903,7 @@ def _postprocess_full_messages(
         _postprocess_special_message_content(
             message=m,
             sender_contact_rows=sender_contact_rows,
-            wcdb_display_names=wcdb_display_names,
+
         )
 
 
@@ -4216,12 +1911,13 @@ def _postprocess_full_messages(
 async def list_chat_accounts():
     """列出可用于聊天预览的账号（direct WCDB + legacy decrypted 兼容）。"""
     contexts = list_chat_account_contexts()
-    for ctx in contexts:
-        if ctx.mode == "direct" and ctx.db_key_present:
-            SNS_REALTIME_AUTOSYNC.ensure_account(ctx.name, schedule_startup=True)
     accounts = [ctx.name for ctx in contexts]
     account_infos = [_chat_account_context_public(ctx) for ctx in contexts]
-    switchable_accounts = [ctx.name for ctx in contexts if bool(getattr(ctx, "keys_ready", False))]
+    key_ready_accounts = [ctx.name for ctx in contexts if bool(getattr(ctx, "keys_ready", False))]
+    switchable_accounts = [
+        ctx.name for ctx in contexts
+        if (ctx.has_decrypted_dbs)
+    ]
     switchable_account_set = set(switchable_accounts)
     switchable_account_infos = [
         info for info in account_infos if str(info.get("account") or "").strip() in switchable_account_set
@@ -4248,7 +1944,7 @@ async def list_chat_accounts():
         "default_account": accounts[0],
         "switchable_accounts": switchable_accounts,
         "switchableAccounts": switchable_accounts,
-        "keyReadyAccounts": switchable_accounts,
+        "keyReadyAccounts": key_ready_accounts,
         "default_switchable_account": switchable_accounts[0] if switchable_accounts else None,
         "defaultSwitchableAccount": switchable_accounts[0] if switchable_accounts else None,
         "accountInfos": account_infos,
@@ -4282,7 +1978,7 @@ def _clean_account_display_name(value: Any, fallback_username: str = "") -> str:
 
 
 def _read_account_profile_display_name(account_dir: Path, fallback_username: str) -> str:
-    """Read a persisted account nickname without probing/starting native WCDB."""
+    """Read the account nickname from its saved profile."""
     for filename in ("account.json", "_source.json"):
         try:
             value = json.loads((Path(account_dir) / filename).read_text(encoding="utf-8"))
@@ -4303,215 +1999,31 @@ def _read_account_profile_display_name(account_dir: Path, fallback_username: str
     return ""
 
 
-def _resolve_account_self_display_name(
-    account_dir: Path,
-    native_wxid: str,
-    *,
-    snapshot_preferred: bool = False,
-    allow_native_connection: bool = False,
-    expected_db_storage_dir: str = "",
-) -> str:
-    """Resolve the self nickname from cheap metadata or an existing WCDB handle.
-
-    `/api/chat/accounts` calls this with `allow_native_connection=False`, so
-    listing several accounts never opens one native handle per account.  The
-    account-info route may opt into a single lazy connection for the selected
-    account when no persisted/local name is available.
-    """
+def _resolve_account_self_display_name(account_dir: Path, username: str) -> str:
     account_path = Path(account_dir)
-    username = str(native_wxid or account_path.name or "").strip()
-
-    def _from_contact_row(row: Any) -> str:
-        try:
-            return _clean_account_display_name(_pick_display_name(row, username), username)
-        except Exception:
-            return ""
-
-    def _from_connection(connection: Any) -> str:
-        if connection is None:
-            return ""
-        try:
-            expected_root = str(expected_db_storage_dir or "").strip()
-            actual_root = str(getattr(connection, "db_storage_dir", "") or "").strip()
-            if expected_root and actual_root:
-                if Path(expected_root).expanduser().resolve() != Path(actual_root).expanduser().resolve():
-                    return ""
-            with connection.lock:
-                names = _wcdb_get_display_names(connection.handle, [username])
-                display_name = _clean_account_display_name(
-                    (names or {}).get(username),
-                    username,
-                )
-                if display_name:
-                    return display_name
-                return _from_contact_row(_wcdb_get_contact(connection.handle, username))
-        except Exception:
-            return ""
-
-    # A direct account may already have been connected by chat/realtime or by
-    # the avatar endpoint.  Reuse that handle, but never start one here unless
-    # the caller explicitly requested the selected-account lazy path.
-    if not snapshot_preferred:
-        try:
-            display_name = _from_connection(WCDB_REALTIME.get_connection(account_path.name))
-            if display_name:
-                return display_name
-        except Exception:
-            pass
-
-    if allow_native_connection and not snapshot_preferred:
-        try:
-            connection = WCDB_REALTIME.ensure_connected(account_path, timeout=2.0)
-            display_name = _from_connection(connection)
-            if display_name:
-                return display_name
-        except Exception:
-            pass
-
     display_name = _read_account_profile_display_name(account_path, username)
     if display_name:
         return display_name
-
-    # Imported snapshots expose contact.db but direct accounts may retain a
-    # stale decrypted copy from the prior source.  Never use that copy for a
-    # direct account; the native path above is the source of truth there.
-    if snapshot_preferred:
-        try:
-            rows = _load_contact_rows(account_path / "contact.db", [username])
-            display_name = _from_contact_row((rows or {}).get(username))
-            if display_name:
-                return display_name
-        except Exception:
-            pass
-    return ""
+    rows = _load_contact_rows(resolve_account_database_dir(account_path) / "contact.db", [username])
+    return _clean_account_display_name(_pick_display_name(rows.get(username), username), username)
 
 
-def _chat_account_context_public(
-    ctx: Any,
-    *,
-    allow_native_display_name: bool = False,
-) -> dict[str, Any]:
+def _chat_account_context_public(ctx: Any) -> dict[str, Any]:
     account_dir = Path(ctx.account_dir)
     db_files = list_countable_database_names(account_dir)
-    snapshot_preferred = bool(
-        getattr(ctx, "prefers_decrypted_snapshot", False)
-        or account_prefers_decrypted_snapshot(account_dir)
-    )
-    realtime_status: dict[str, Any] = {}
-    if not snapshot_preferred:
-        try:
-            realtime_status = WCDB_REALTIME.get_status(account_dir)
-        except Exception as e:
-            realtime_status = {"error": str(e)}
-
-    db_storage_path = "" if snapshot_preferred else str(getattr(ctx, "db_storage_path", "") or "").strip()
-    wxid_dir = "" if snapshot_preferred else str(getattr(ctx, "wxid_dir", "") or "").strip()
-    realtime_db_storage = str(realtime_status.get("db_storage_dir") or "").strip()
-    realtime_session_db = str(realtime_status.get("session_db_path") or "").strip()
-    identity_status = dict(realtime_status)
-    identity_status["db_storage_dir"] = realtime_db_storage or db_storage_path
-    native_wxid = _wcdb_resolve_account_native_wxid(account_dir, identity_status)
-    data_source_path = realtime_db_storage or db_storage_path or wxid_dir or str(account_dir)
-    realtime_available = bool(
-        realtime_status.get("dll_present")
-        and realtime_status.get("key_present")
-        and realtime_db_storage
-        and realtime_session_db
-    )
-    self_display_name = _resolve_account_self_display_name(
-        account_dir,
-        native_wxid,
-        snapshot_preferred=snapshot_preferred,
-        # Only make the selected-account lazy probe when the cheap status
-        # probe says the native components and source are usable. This avoids
-        # turning a missing broker into a cached connection failure.
-        allow_native_connection=(
-            allow_native_display_name
-            and realtime_available
-            and not bool(realtime_status.get("recent_failure"))
-        ),
-        expected_db_storage_dir=realtime_db_storage or db_storage_path,
-    )
-    has_decrypted_dbs = bool(getattr(ctx, "has_decrypted_dbs", False))
-    realtime_preferred = bool(db_storage_path or wxid_dir or realtime_db_storage)
-    recent_failure = bool(realtime_status.get("recent_failure"))
-    fallback_reason = str(realtime_status.get("failure_reason") or "").strip()
-    if realtime_preferred and not realtime_available and not fallback_reason:
-        fallback_reason = str(realtime_status.get("error") or "").strip()
-        if not fallback_reason:
-            if not realtime_status.get("dll_present"):
-                fallback_reason = "wechatdb native core 不可用"
-            elif not realtime_status.get("key_present"):
-                fallback_reason = "当前账号缺少可用的数据库密钥"
-            elif not realtime_db_storage:
-                fallback_reason = "无法定位微信 db_storage 数据目录"
-            elif not realtime_session_db:
-                fallback_reason = "找不到微信实时数据库 session.db"
-    fallback_active = bool(
-        has_decrypted_dbs
-        and realtime_preferred
-        and (recent_failure or not realtime_available)
-        and fallback_reason
-    )
-    active_source = "decrypted" if fallback_active or not realtime_preferred else "realtime"
-    source_fallback = build_source_fallback_meta(
-        requested_source="realtime" if realtime_preferred else "decrypted",
-        active_source=active_source,
-        reason=fallback_reason if fallback_active else "",
-        retry_after_seconds=realtime_status.get("retry_after_seconds", 0),
-    )
-
+    username = resolve_account_username(account_dir)
+    self_display_name = _resolve_account_self_display_name(account_dir, username)
+    has_decrypted_dbs = bool(ctx.has_decrypted_dbs)
     return {
-        "account": ctx.name,
-        "name": ctx.name,
-        # The output/account directory may carry a WeFlow collision suffix
-        # (for example SimpleChinese_a73c).  Avatar rows are keyed by the
-        # native WeChat username (SimpleChinese), so expose both identities.
-        "selfUsername": native_wxid,
-        "nativeWxid": native_wxid,
-        "selfDisplayName": self_display_name,
-        "nickname": self_display_name,
-        "displayName": self_display_name,
-        "mode": getattr(ctx, "mode", "unknown"),
-        "defaultSource": active_source,
-        "path": data_source_path,
-        "dataSourcePath": data_source_path,
-        "accountDir": str(account_dir),
-        "dbStoragePath": db_storage_path or realtime_db_storage,
-        "wxidDir": wxid_dir,
-        "hasDecryptedDbs": has_decrypted_dbs,
-        "database_count": len(db_files),
-        "databases": db_files,
-        "dbKeyPresent": bool(getattr(ctx, "db_key_present", False) or realtime_status.get("key_present")),
-        "imageKeyPresent": bool(getattr(ctx, "image_key_present", False)),
-        "imageXorKeyPresent": bool(getattr(ctx, "image_xor_key_present", False)),
-        "imageAesKeyPresent": bool(getattr(ctx, "image_aes_key_present", False)),
-        "keysReady": bool(getattr(ctx, "keys_ready", False)),
-        "keyReady": bool(getattr(ctx, "keys_ready", False)),
-        "switchable": bool(getattr(ctx, "keys_ready", False)),
-        "keysUpdatedAt": str(getattr(ctx, "keys_updated_at", "") or ""),
-        "realtimeAvailable": bool(realtime_available),
-        "realtime": {
-            "available": bool(realtime_available),
-            "connected": bool(realtime_status.get("connected")),
-            "nativeWxid": native_wxid,
-            "dllPresent": bool(realtime_status.get("dll_present")),
-            "keyPresent": bool(realtime_status.get("key_present")),
-            "dbStorageDir": realtime_db_storage,
-            "sessionDbPath": realtime_session_db,
-            "error": str(realtime_status.get("error") or ""),
-            "recentFailure": recent_failure,
-            "failureReason": str(realtime_status.get("failure_reason") or ""),
-            "retryAfterSeconds": int(realtime_status.get("retry_after_seconds") or 0),
-        },
-        "dataSourceStatus": {
-            "preferredSource": "realtime" if realtime_preferred else "decrypted",
-            "activeSource": active_source,
-            "fallbackActive": bool(source_fallback.get("sourceFallback")),
-            "reason": str(source_fallback.get("sourceFallbackReason") or ""),
-            "message": str(source_fallback.get("sourceFallbackMessage") or ""),
-            "retryAfterSeconds": int(source_fallback.get("sourceFallbackRetryAfterSeconds") or 0),
-        },
+        "account": ctx.name, "name": ctx.name, "selfUsername": username,
+        "selfDisplayName": self_display_name, "nickname": self_display_name,
+        "displayName": self_display_name, "mode": "decrypted", "defaultSource": "decrypted",
+        "path": str(account_dir), "dataSourcePath": str(account_dir), "accountDir": str(account_dir),
+        "hasDecryptedDbs": has_decrypted_dbs, "database_count": len(db_files), "databases": db_files,
+        "dbKeyPresent": bool(ctx.db_key_present), "imageKeyPresent": bool(ctx.image_key_present),
+        "imageXorKeyPresent": bool(ctx.image_xor_key_present), "imageAesKeyPresent": bool(ctx.image_aes_key_present),
+        "keysReady": bool(ctx.keys_ready), "keyReady": bool(ctx.keys_ready),
+        "switchable": has_decrypted_dbs, "keysUpdatedAt": str(ctx.keys_updated_at or ""),
     }
 
 
@@ -4521,21 +2033,14 @@ def get_chat_account_info(account: Optional[str] = None):
     account_dir = ctx.account_dir
     db_files = list_countable_database_names(account_dir)
 
-    session_db = account_dir / "session.db"
+    session_db = resolve_account_database_dir(account_dir) / "session.db"
     session_updated_at = 0
     try:
         session_updated_at = int(session_db.stat().st_mtime)
     except Exception:
         session_updated_at = 0
 
-    info = _chat_account_context_public(ctx, allow_native_display_name=True)
-    if not session_updated_at:
-        try:
-            rt_session_db = Path(str((info.get("realtime") or {}).get("sessionDbPath") or ""))
-            if rt_session_db.exists():
-                session_updated_at = int(rt_session_db.stat().st_mtime)
-        except Exception:
-            session_updated_at = 0
+    info = _chat_account_context_public(ctx)
     info.update({
         "status": "success",
         "account": account_dir.name,
@@ -4554,134 +2059,271 @@ def delete_chat_account(account: str):
 
 
 def _delete_chat_account(account: str):
+    from ..snapshot_refresh import SNAPSHOT_REFRESH
+    from ..snapshot_registry import (
+        SnapshotRegistryError, account_deletion_scope, require_account_idle,
+    )
+
     requested_account_name = str(account or "").strip()
     if not requested_account_name:
         raise HTTPException(status_code=400, detail="Missing account.")
-
-    account_dir = _resolve_account_dir(requested_account_name)
-    # Account resolution can map a historical source-suffix alias to the
-    # canonical imported snapshot. Cleanup must consistently target the
-    # resolved account, not the stale value persisted by an older frontend.
-    account_name = account_dir.name
-    canonical_cleanup_name = canonical_account_name(account_name) or account_name
-    cleanup_account_names = list(
-        dict.fromkeys(
-            name
-            for name in (
-                account_name,
-                requested_account_name,
-                canonical_cleanup_name,
-            )
-            if name and canonical_account_name(name) == canonical_cleanup_name
-        )
-    )
-
-    databases_dir = account_dir.parent
-    account_dirs_to_remove: list[Path] = [account_dir]
     try:
-        for candidate in databases_dir.iterdir():
-            if is_internal_account_directory_name(candidate.name):
-                continue
-            if canonical_account_name(candidate.name) != canonical_cleanup_name:
-                continue
-            if candidate.is_dir() or candidate.is_symlink():
-                account_dirs_to_remove.append(candidate)
-                if candidate.name not in cleanup_account_names:
-                    cleanup_account_names.append(candidate.name)
-    except Exception:
-        pass
-    account_dirs_to_remove = list(dict.fromkeys(account_dirs_to_remove))
-
-    from ..ai.service import get_ai_service
-    for cleanup_name in cleanup_account_names:
-        get_ai_service().purge_account(cleanup_name)
-
-    # Best-effort: close realtime connections first, otherwise Windows may keep db files locked.
-    for cleanup_name in cleanup_account_names:
-        try:
-            WCDB_REALTIME.disconnect(cleanup_name)
-        except Exception:
-            pass
-
-    with _REALTIME_SYNC_MU:
-        for cleanup_name in cleanup_account_names:
-            _REALTIME_SYNC_ALL_LOCKS.pop(cleanup_name, None)
-        stale_lock_keys = [
-            k
-            for k in _REALTIME_SYNC_LOCKS.keys()
-            if k and k[0] in cleanup_account_names
-        ]
-        for k in stale_lock_keys:
-            _REALTIME_SYNC_LOCKS.pop(k, None)
-
-    output_dir = get_output_dir()
-    for cleanup_name in cleanup_account_names:
-        exports_dir = output_dir / "exports" / cleanup_name
-        if exports_dir.exists():
-            try:
-                shutil.rmtree(exports_dir)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"删除账号导出缓存失败：{e}")
-
-    removed_backups: list[str] = []
-    for cleanup_name in cleanup_account_names:
-        backup_root = output_dir / "account_backups" / cleanup_name
-        if backup_root.exists():
-            try:
-                shutil.rmtree(backup_root)
-                removed_backups.append(str(backup_root))
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"删除账号导入备份失败：{e}")
-
-    # Clean up rollback directories created by older releases. New imports keep
-    # backups outside databases so they cannot become selectable accounts.
+        account_dir = _resolve_account_delete_root(requested_account_name)
+        with account_deletion_scope(account_dir):
+            SNAPSHOT_REFRESH.stop_and_join(account_dir.name)
+            require_account_idle(account_dir)
+            result = _delete_chat_account_data(account_dir, requested_account_name)
+            SNAPSHOT_REFRESH.forget_account(account_dir.name)
+    except SnapshotRegistryError as exc:
+        raise HTTPException(status_code=409, detail=f"账号数据尚不能删除，现有数据已保留：{exc}") from exc
     try:
-        legacy_backups = [
-            path
-            for path in databases_dir.iterdir()
-            if (
-                is_internal_account_directory_name(path.name)
-                and canonical_account_name(path.name) == canonical_cleanup_name
-            )
-        ]
-    except Exception:
-        legacy_backups = []
-    for legacy_backup in legacy_backups:
-        try:
-            if legacy_backup.is_symlink():
-                legacy_backup.unlink()
-                removed_backups.append(str(legacy_backup))
-            elif legacy_backup.is_dir():
-                shutil.rmtree(legacy_backup)
-                removed_backups.append(str(legacy_backup))
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"删除旧版账号导入备份失败：{e}")
+        accounts = _list_decrypted_accounts()
+    except Exception as exc:
+        logger.exception("Account was deleted but refreshing the account list failed")
+        raise HTTPException(status_code=500, detail={
+            "code": "account_deleted_list_failed", "deleted_account": account_dir.name,
+            "message": f"账号已删除，但更新账号列表失败：{exc}",
+            "removed_paths": result["removed_paths"],
+        }) from exc
+    return {**result, "accounts": accounts, "default_account": accounts[0] if accounts else None}
 
-    for family_account_dir in account_dirs_to_remove:
-        if not (family_account_dir.exists() or family_account_dir.is_symlink()):
+
+def _resolve_account_delete_root(account: str) -> Path:
+    """Deletion must remain possible when a source DB or pointer is damaged."""
+    from ..chat_accounts import _safe_account_name
+    from ..snapshot_registry import SnapshotRegistryError, _check_ancestors
+
+    selected = _safe_account_name(account)
+    canonical = _safe_account_name(canonical_account_name(account))
+    if not canonical or not (selected or canonical != account):
+        raise HTTPException(status_code=400, detail="Invalid account.")
+    parent = get_output_dir().absolute() / "databases"
+    _check_ancestors(parent)
+    # Canonical and source-suffix aliases are an explicitly shared deletion
+    # family; no database availability or directory-name similarity is used.
+    for name in dict.fromkeys((canonical, selected)):
+        if not name:
             continue
-        try:
-            if family_account_dir.is_symlink() or family_account_dir.is_file():
-                family_account_dir.unlink()
+        candidate = parent / name
+        _check_ancestors(candidate)
+        if candidate.exists():
+            if not candidate.is_dir():
+                raise SnapshotRegistryError(f"Account deletion target is not a directory: {candidate}")
+            return candidate
+    raise HTTPException(status_code=404, detail="Account directory not found.")
+
+
+def _account_delete_targets(account_dir: Path, requested_account_name: str):
+    """Resolve every owned target before the first destructive operation."""
+    from ..snapshot_registry import SnapshotRegistryError, _check_ancestors, _read_json, _reject_link
+    from ..key_store import load_account_keys_store
+    import stat
+
+    output = get_output_dir().absolute()
+    root = Path(account_dir).absolute()
+    family = canonical_account_name(root.name)
+    if root.parent != output / "databases" or not family or is_internal_account_directory_name(root.name):
+        raise SnapshotRegistryError("Account deletion must target a stable output account directory")
+    _check_ancestors(output)
+    cleanup_names = list(dict.fromkeys((root.name, requested_account_name, family)))
+    targets: list[Path] = []
+    backups: list[Path] = []
+    generations: list[Path] = []
+    protected_sources: list[Path] = []
+    planned_snapshots: dict[str, dict[str, Any]] = {}
+
+    def protect_source(value):
+        if not isinstance(value, str) or not value or not Path(value).is_absolute():
+            raise SnapshotRegistryError("Account source metadata has no absolute source path")
+        protected_sources.append(Path(value).resolve())
+
+    plan_path = root / "_account_delete_plan.json"
+    if plan_path.exists():
+        plan = _read_json(plan_path)
+        if (type(plan.get("version")) is not int or plan["version"] != 1
+                or plan.get("account") != root.name or plan.get("family") != family
+                or not isinstance(plan.get("snapshot_targets"), list)
+                or not isinstance(plan.get("protected_sources"), list)):
+            raise SnapshotRegistryError("Invalid persisted account deletion plan")
+        for item in plan["snapshot_targets"]:
+            if (not isinstance(item, dict) or item.get("account") != family
+                    or not isinstance(item.get("path"), str)
+                    or not re.fullmatch(r"verified_snapshots/(?:generation-[0-9a-f]{32}|\.snapshot-[A-Za-z0-9_-]+)", item["path"])
+                    or type(item.get("device")) is not int or item["device"] < 0
+                    or type(item.get("inode")) is not int or item["inode"] <= 0
+                    or item["path"] in planned_snapshots):
+                raise SnapshotRegistryError("Invalid snapshot target in persisted account deletion plan")
+            planned_snapshots[item["path"]] = item
+        for value in plan["protected_sources"]:
+            protect_source(value)
+
+    for category in ("databases", "exports", "account_backups", "avatar_cache"):
+        parent = output / category
+        _check_ancestors(parent)
+        if not parent.exists():
+            continue
+        for candidate in parent.iterdir():
+            if canonical_account_name(candidate.name) != family:
+                continue
+            if candidate.name not in cleanup_names:
+                cleanup_names.append(candidate.name)
+            targets.append(candidate)
+            if category == "account_backups" or is_internal_account_directory_name(candidate.name):
+                backups.append(candidate)
+
+    parent = output / "verified_snapshots"
+    _check_ancestors(parent)
+    if parent.exists():
+        for candidate in parent.iterdir():
+            candidate_info = candidate.lstat()
+            _reject_link(candidate, candidate_info)
+            if not candidate.is_dir():
+                raise SnapshotRegistryError(f"Unexpected snapshot entry; ownership is unknown: {candidate}")
+            if not (re.fullmatch(r"generation-[0-9a-f]{32}", candidate.name) or candidate.name.startswith(".snapshot-")):
+                raise SnapshotRegistryError(f"Unknown snapshot directory: {candidate}")
+            owner_path = candidate / "ownership.json"
+            manifest_path = candidate / "manifest.json"
+            planned = planned_snapshots.get(candidate.relative_to(output).as_posix())
+            if planned is not None and (planned["device"], planned["inode"]) != (candidate_info.st_dev, candidate_info.st_ino):
+                raise SnapshotRegistryError(f"Persisted deletion target was replaced: {candidate}")
+            if owner_path.exists():
+                owner = _read_json(owner_path)
+                if type(owner.get("version")) is not int or owner["version"] != 1:
+                    raise SnapshotRegistryError(f"Unsupported snapshot ownership: {candidate}")
+                name = owner.get("account")
+                protect_source(owner.get("source_db_storage_path"))
+            elif manifest_path.exists() and candidate.name.startswith("generation-"):
+                owner = _read_json(manifest_path)
+                name = owner.get("account")
+                if owner.get("generation_path") != str(candidate) or owner.get("account_path") != str(candidate / "databases" / str(name)):
+                    raise SnapshotRegistryError(f"Snapshot manifest path does not match: {candidate}")
+            elif planned is not None:
+                # rmtree can remove all metadata before Windows rejects the
+                # final rmdir. Only the previously verified directory identity
+                # permits retry; arbitrary empty candidates remain unknown.
+                name = planned["account"]
             else:
-                shutil.rmtree(family_account_dir)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"删除账号数据失败：{e}")
+                raise SnapshotRegistryError(f"Snapshot ownership is unknown; retained for inspection: {candidate}")
+            if not isinstance(name, str) or not name or Path(name).name != name or any(x in name for x in ("/", "\\", ":")):
+                raise SnapshotRegistryError(f"Invalid snapshot account owner: {candidate}")
+            if planned is not None and canonical_account_name(name) != family:
+                raise SnapshotRegistryError(f"Persisted deletion target belongs to another account: {candidate}")
+            if owner_path.exists() and manifest_path.exists():
+                manifest = _read_json(manifest_path)
+                if manifest.get("account") != name or manifest.get("generation_path") != str(candidate):
+                    raise SnapshotRegistryError(f"Snapshot ownership and manifest disagree: {candidate}")
+            if canonical_account_name(name) == family:
+                targets.append(candidate)
+                generations.append(candidate)
+
+    def walk_error(exc):
+        raise exc
+
+    for target in targets:
+        _check_ancestors(target)
+        if target.resolve().parent not in {
+            output / "databases", output / "exports", output / "account_backups",
+            output / "avatar_cache", output / "verified_snapshots",
+        }:
+            raise SnapshotRegistryError(f"Account deletion target escaped its permitted directory: {target}")
+        if not target.is_dir():
+            raise SnapshotRegistryError(f"Account data target is not a directory: {target}")
+        for directory, dirs, files in os.walk(target, followlinks=False, onerror=walk_error):
+            for name in dirs + files:
+                entry = Path(directory) / name
+                info = entry.lstat()
+                _reject_link(entry, info)
+                if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+                    raise SnapshotRegistryError(f"Account data contains an unsupported file type: {entry}")
+                if name == "_source.json" and name in files:
+                    source = _read_json(entry)
+                    for key in ("db_storage_path", "wxid_dir"):
+                        if source.get(key):
+                            protect_source(source[key])
+
+    # Strict preflight prevents a corrupt key store masquerading as an empty one.
+    store = load_account_keys_store(strict=True)
+    for name, entry in store.items():
+        if not isinstance(entry, dict):
+            raise SnapshotRegistryError(f"Invalid account key-store entry: {name}")
+        for key in ("db_key_source_db_storage_path", "db_key_source_wxid_dir"):
+            if entry.get(key):
+                protect_source(entry[key])
+    for target in targets:
+        if any(source == target or source.is_relative_to(target) for source in protected_sources):
+            raise SnapshotRegistryError(f"Account deletion would include original source data: {target}")
+    # Keep a selectable stable root until every external artifact has gone, so
+    # an explicit retry can finish a partially failed filesystem deletion.
+    targets.sort(key=lambda path: (path.parent == output / "databases", path == root))
+    snapshot_targets = []
+    for path in generations:
+        info = path.lstat()
+        if info.st_ino <= 0:
+            raise SnapshotRegistryError(f"Cannot identify snapshot directory for a recoverable deletion: {path}")
+        snapshot_targets.append({"path": path.relative_to(output).as_posix(), "account": family,
+                                 "device": info.st_dev, "inode": info.st_ino})
+    plan = {"version": 1, "account": root.name, "family": family, "snapshot_targets": snapshot_targets,
+            "protected_sources": sorted({str(path) for path in protected_sources})}
+    return cleanup_names, targets, backups, generations, plan
+
+
+def _persist_account_delete_plan(account_dir: Path, plan: dict[str, Any]) -> None:
+    """Persist validated ownership outside the trees being removed first."""
+    import tempfile
+
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".account-delete-", suffix=".json", dir=account_dir)
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            json.dump(plan, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_path, account_dir / "_account_delete_plan.json")
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _delete_chat_account_data(account_dir: Path, requested_account_name: str):
+    from ..ai.service import get_ai_service
+    from ..snapshot_registry import SnapshotRegistryError
 
     try:
-        removed_key_accounts = remove_account_family_keys_from_store(account_name)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"清理账号密钥缓存失败：{e}")
+        cleanup_names, targets, backups, generations, plan = _account_delete_targets(account_dir, requested_account_name)
+    except SnapshotRegistryError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise SnapshotRegistryError(f"Account deletion preflight failed: {exc}") from exc
+    removed: list[str] = []
+    purged: list[str] = []
+    removed_key_accounts: list[str] = []
+    stage = "persist_plan"
+    try:
+        _persist_account_delete_plan(account_dir, plan)
+        stage = "purge_ai"
+        for cleanup_name in cleanup_names:
+            get_ai_service().purge_account(cleanup_name)
+            purged.append(cleanup_name)
+        stage = "disconnect"
+        stage = "remove_keys"
+        removed_key_accounts = remove_account_family_keys_from_store(account_dir.name)
+        stage = "remove_files"
+        for target in targets:
+            shutil.rmtree(target)
+            removed.append(str(target))
+    except Exception as exc:
+        logger.exception("Account deletion failed at %s for %s", stage, account_dir.name)
+        raise HTTPException(status_code=500, detail={
+            "code": "account_delete_failed", "stage": stage, "message": str(exc),
+            "removed_paths": removed, "purged_ai_accounts": purged,
+            "removed_key_accounts": removed_key_accounts,
+        }) from exc
 
-    accounts = _list_decrypted_accounts()
     return {
-        "status": "success",
-        "deleted_account": account_name,
-        "accounts": accounts,
-        "default_account": accounts[0] if accounts else None,
-        "removed_key_cache": bool(removed_key_accounts),
-        "removed_key_accounts": removed_key_accounts,
-        "removed_backups": removed_backups,
+        "status": "success", "deleted_account": account_dir.name,
+        "removed_key_cache": bool(removed_key_accounts), "removed_key_accounts": removed_key_accounts,
+        "removed_backups": [str(path) for path in backups],
+        "removed_generations": [str(path) for path in generations],
+        "removed_paths": removed,
     }
 
 
@@ -4703,10 +2345,9 @@ def list_chat_sessions(
 
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_chat_source(source)
-    source_norm = _resolve_chat_source_for_account(source_requested, account_dir)
-    source_fallback_reason = ""
-    contact_db_path = account_dir / "contact.db"
-    head_image_db_path = account_dir / "head_image.db"
+    source_norm = _normalize_chat_source(source_requested)
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
     base_url = str(request.base_url).rstrip("/")
     _trace_id, trace = create_perf_trace(
         logger,
@@ -4720,141 +2361,56 @@ def list_chat_sessions(
     )
     trace("request:start")
 
-    rt_conn = None
     rows: list[Any]
-    if source_norm == "realtime":
-        trace_id = f"rt-sessions-{int(time.time() * 1000)}-{threading.get_ident()}"
-        logger.info(
-            "[%s] list_sessions realtime start account=%s limit=%s include_hidden=%s include_official=%s preview=%s",
-            trace_id,
-            account_dir.name,
-            int(limit),
-            bool(include_hidden),
-            bool(include_official),
-            str(preview or ""),
-        )
+
+    session_db_path = resolve_account_database_dir(account_dir) / "session.db"
+    sconn = sqlite3.connect(str(session_db_path))
+    sconn.row_factory = sqlite3.Row
+    try:
         try:
-            logger.info("[%s] ensure wcdb connected account=%s", trace_id, account_dir.name)
-            conn = WCDB_REALTIME.ensure_connected(account_dir)
-            rt_conn = conn
-            logger.info("[%s] wcdb connected account=%s handle=%s", trace_id, account_dir.name, int(conn.handle))
-            logger.info("[%s] wcdb_get_sessions account=%s", trace_id, account_dir.name)
-            wcdb_t0 = time.perf_counter()
-            with conn.lock:
-                raw = _wcdb_get_sessions(conn.handle)
-            wcdb_ms = (time.perf_counter() - wcdb_t0) * 1000.0
-            logger.info(
-                "[%s] wcdb_get_sessions done account=%s sessions=%s ms=%.1f",
-                trace_id,
-                account_dir.name,
-                len(raw or []),
-                wcdb_ms,
-            )
-        except Exception as e:
-            logger.warning(
-                "[%s] list_sessions realtime failed account=%s error=%s",
-                trace_id,
-                account_dir.name,
-                e,
-            )
-            if not _decrypted_sessions_available(account_dir):
-                raise HTTPException(status_code=400, detail=str(e))
-            source_norm = "decrypted"
-            source_fallback_reason = str(e)
-            rt_conn = None
-            trace("realtime:fallback", error=str(e), fallbackSource="decrypted")
-        else:
-            norm: list[dict[str, Any]] = []
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                uname = str(item.get("username") or item.get("user_name") or item.get("UserName") or "").strip()
-                if not uname:
-                    continue
-                norm.append(
-                    {
-                        "username": uname,
-                        "unread_count": item.get("unread_count", item.get("unreadCount", 0)),
-                        "is_hidden": item.get("is_hidden", item.get("isHidden", 0)),
-                        "summary": item.get("summary", ""),
-                        "draft": item.get("draft", ""),
-                        "last_timestamp": item.get("last_timestamp", item.get("lastTimestamp", 0)),
-                        "sort_timestamp": item.get("sort_timestamp", item.get("sortTimestamp", item.get("last_timestamp", 0))),
-                        "last_msg_type": item.get("last_msg_type", item.get("lastMsgType", 0)),
-                        "last_msg_sub_type": item.get("last_msg_sub_type", item.get("lastMsgSubType", 0)),
-                        # Keep these fields so group session previews can render "sender: content" without
-                        # crashing (realtime rows are dicts, not sqlite Rows).
-                        "last_msg_sender": item.get("last_msg_sender", item.get("lastMsgSender", "")),
-                        "last_sender_display_name": item.get(
-                            "last_sender_display_name",
-                            item.get("lastSenderDisplayName", ""),
-                        ),
-                        "last_msg_locald_id": item.get(
-                            "last_msg_locald_id",
-                            item.get("lastMsgLocaldId", item.get("lastMsgLocalId", 0)),
-                        ),
-                    }
-                )
-
-            def _ts(v: Any) -> int:
-                try:
-                    return int(v or 0)
-                except Exception:
-                    return 0
-
-            norm.sort(key=lambda r: _ts(r.get("sort_timestamp")), reverse=True)
-            rows = norm
-            logger.info("[%s] list_sessions realtime normalized account=%s rows=%s", trace_id, account_dir.name, len(rows))
-
-    if source_norm != "realtime":
-        session_db_path = account_dir / "session.db"
-        sconn = sqlite3.connect(str(session_db_path))
-        sconn.row_factory = sqlite3.Row
-        try:
-            try:
-                rows = sconn.execute(
-                    """
-                    SELECT
-                        username,
-                        unread_count,
-                        is_hidden,
-                        summary,
-                        draft,
-                        last_timestamp,
-                        sort_timestamp,
-                        last_msg_locald_id,
-                        last_msg_type,
-                        last_msg_sub_type,
-                        last_msg_sender,
-                        last_sender_display_name
-                    FROM SessionTable
-                    ORDER BY sort_timestamp DESC
-                    """
-                ).fetchall()
-            except sqlite3.OperationalError:
-                rows = sconn.execute(
-                    """
-                    SELECT
-                        username,
-                        unread_count,
-                        is_hidden,
-                        summary,
-                        draft,
-                        last_timestamp,
-                        sort_timestamp,
-                        last_msg_type,
-                        last_msg_sub_type
-                    FROM SessionTable
-                    ORDER BY sort_timestamp DESC
-                    """
-                ).fetchall()
-        finally:
-            sconn.close()
+            rows = sconn.execute(
+                """
+                SELECT
+                    username,
+                    unread_count,
+                    is_hidden,
+                    summary,
+                    draft,
+                    last_timestamp,
+                    sort_timestamp,
+                    last_msg_locald_id,
+                    last_msg_type,
+                    last_msg_sub_type,
+                    last_msg_sender,
+                    last_sender_display_name
+                FROM SessionTable
+                ORDER BY sort_timestamp DESC
+                """
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = sconn.execute(
+                """
+                SELECT
+                    username,
+                    unread_count,
+                    is_hidden,
+                    summary,
+                    draft,
+                    last_timestamp,
+                    sort_timestamp,
+                    last_msg_type,
+                    last_msg_sub_type
+                FROM SessionTable
+                ORDER BY sort_timestamp DESC
+                """
+            ).fetchall()
+    finally:
+        sconn.close()
 
     trace(
         "rows:loaded",
         rawCount=len(rows or []),
-        realtime=bool(source_norm == "realtime"),
+
     )
 
     filtered: list[Any] = []
@@ -4875,19 +2431,6 @@ def list_chat_sessions(
 
     raw_usernames = [str(_session_row_get(r, "username", "") or "").strip() for r in filtered]
     session_last_meta = _load_session_last_message_meta(account_dir, raw_usernames)
-    if (not session_last_meta) and raw_usernames:
-        # One-time/self-heal: older parsed accounts may not have the cache table yet.
-        # This table is what lets the sidebar avoid stale SessionTable timestamps.
-        try:
-            build_session_last_message_table(
-                account_dir,
-                rebuild=False,
-                include_hidden=True,
-                include_official=True,
-            )
-            session_last_meta = _load_session_last_message_meta(account_dir, raw_usernames)
-        except Exception:
-            session_last_meta = {}
     trace(
         "session-last-message:loaded",
         metaCount=len(session_last_meta),
@@ -4943,10 +2486,7 @@ def list_chat_sessions(
         )
         try:
             group_rows = []
-            if rt_conn is not None:
-                with rt_conn.lock:
-                    group_rows = _wcdb_exec_query(rt_conn.handle, kind="contact", path=None, sql=group_sql)
-            elif contact_db_path.exists():
+            if contact_db_path.exists():
                 group_conn = sqlite3.connect(str(contact_db_path))
                 group_conn.row_factory = sqlite3.Row
                 try:
@@ -4960,7 +2500,7 @@ def list_chat_sessions(
             logger.warning("[sessions] failed to read enterprise group flags: %s", exc)
 
     contact_rows = _load_contact_rows(contact_db_path, usernames)
-    enterprise_contacts = _load_enterprise_contact_info(contact_db_path, usernames, rt_conn=rt_conn)
+    enterprise_contacts = _load_enterprise_contact_info(contact_db_path, usernames)
     local_avatar_usernames = _query_head_image_usernames(head_image_db_path, usernames)
     trace(
         "contacts:loaded",
@@ -4970,36 +2510,10 @@ def list_chat_sessions(
     )
 
     # Some sessions (notably enterprise groups / openim-related IDs) may be missing from decrypted contact.db.
-    # Only unresolved display names need the native fallback; avatars use the unified endpoint below.
-    wcdb_display_names: dict[str, str] = {}
-    try:
-        need_display: list[str] = []
-        for u in usernames:
-            if not u:
-                continue
-            row = contact_rows.get(u)
-            if _pick_display_name(row, u) == u:
-                need_display.append(u)
 
-        need_display = list(dict.fromkeys(need_display))
-        if need_display and not account_prefers_decrypted_snapshot(account_dir):
-            wcdb_conn = rt_conn
-            if wcdb_conn is None:
-                status = WCDB_REALTIME.get_status(account_dir)
-                can_connect = bool(status.get("dll_present")) and bool(status.get("key_present")) and bool(
-                    status.get("session_db_path")
-                )
-                if can_connect:
-                    wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            if wcdb_conn is not None:
-                with wcdb_conn.lock:
-                    wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-    except Exception:
-        wcdb_display_names = {}
 
     trace(
-        "wcdb-fallback:loaded",
-        displayNameCount=len(wcdb_display_names),
+        "contacts:loaded",
         avatarUrlCount=0,
     )
 
@@ -5008,34 +2522,9 @@ def list_chat_sessions(
         preview_mode = "latest"
     if preview_mode == "index":
         preview_mode = "latest"
-    if source_norm == "realtime" and preview_mode in {"latest", "db"}:
-        # Decrypted caches may be stale; prefer session summary in realtime mode.
-        preview_mode = "session"
 
     last_previews: dict[str, str] = {}
-    if preview_mode == "latest":
-        try:
-            last_previews = load_session_last_messages(account_dir, usernames)
-            # Backward-compatible: old decrypted accounts may not have built the cache table yet.
-            if (not last_previews) and usernames:
-                build_session_last_message_table(
-                    account_dir,
-                    rebuild=False,
-                    include_hidden=True,
-                    include_official=True,
-                )
-                last_previews = load_session_last_messages(account_dir, usernames)
-        except Exception:
-            logger.exception(
-                "[sessions.list] session_last_message preview load failed account=%s preview_mode=%s usernames=%s diag=%s",
-                account_dir.name,
-                preview_mode,
-                len(usernames),
-                format_sqlite_diagnostics(
-                    collect_sqlite_diagnostics(account_dir / "session.db", quick_check=True, table_name="session_last_message")
-                ),
-            )
-            last_previews = {}
+    # Offline snapshots are read directly: a prior cache must not hide a damaged shard.
 
     def _is_generic_location_preview(value: Any) -> bool:
         text = re.sub(r"\s+", " ", str(value or "").strip()).strip()
@@ -5054,14 +2543,7 @@ def list_chat_sessions(
             try:
                 legacy = _load_latest_message_previews(account_dir, targets)
             except Exception:
-                logger.exception(
-                    "[sessions.list] legacy latest-message preview fallback failed account=%s preview_mode=%s targets=%s sample_targets=%s; falling back to session summaries",
-                    account_dir.name,
-                    preview_mode,
-                    len(targets),
-                    [str(u) for u in targets[:5]],
-                )
-                legacy = {}
+                raise
             for u, v in legacy.items():
                 if v:
                     last_previews[u] = v
@@ -5078,17 +2560,6 @@ def list_chat_sessions(
         if sender_username and sender_username not in group_sender_display_names:
             unresolved.append(sender_username)
     unresolved = list(dict.fromkeys(unresolved))
-    if unresolved and not account_prefers_decrypted_snapshot(account_dir):
-        try:
-            wcdb_conn = rt_conn or WCDB_REALTIME.ensure_connected(account_dir)
-            with wcdb_conn.lock:
-                wcdb_names = _wcdb_get_display_names(wcdb_conn.handle, unresolved)
-            for sender_username in unresolved:
-                wcdb_name = str(wcdb_names.get(sender_username) or "").strip()
-                if wcdb_name and wcdb_name != sender_username:
-                    group_sender_display_names[sender_username] = wcdb_name
-        except Exception:
-            pass
 
     trace(
         "previews:resolved",
@@ -5109,15 +2580,9 @@ def list_chat_sessions(
         c_row = contact_rows.get(username)
 
         display_name = _pick_display_name(c_row, username)
-        wd = str(wcdb_display_names.get(username) or "").strip()
-        if source_norm == "realtime" and wd and wd != username:
-            display_name = wd
-        elif display_name == username:
-            if wd and wd != username:
-                display_name = wd
 
         # Prefer local head_image avatars when available: decrypted contact.db URLs can be stale
-        # (or hotlink-protected for browsers). WCDB realtime (when available) is the next best.
+
         avatar_url = base_url + _avatar_url_unified(
             account_dir=account_dir,
             username=username,
@@ -5156,7 +2621,7 @@ def list_chat_sessions(
                 last_message = _infer_last_message_brief(r["last_msg_type"], r["last_msg_sub_type"])
 
         # SessionTable can lag behind message_*.db. If the parsed latest-message cache is newer,
-        # prefer it for the sidebar preview even in realtime/session preview mode.
+        # prefer it for the sidebar preview in session preview mode.
         if (
             preview_mode != "none"
             and latest_meta_preview
@@ -5190,7 +2655,7 @@ def list_chat_sessions(
             sender_display_names=group_sender_display_names,
         )
         if str(username or "").endswith("@chatroom") and str(last_message or "") and not str(last_message).startswith("[草稿]"):
-            # Prefer group card nickname when available. In realtime mode, WCDB session rows can provide
+
             # `last_sender_display_name`, but we may still get a summary that doesn't include "sender:".
             # Also guard against URL schemes like "https://..." being mis-parsed as "https: //...".
             raw_sender_display = ""
@@ -5241,12 +2706,7 @@ def list_chat_sessions(
         "status": "success",
         "account": account_dir.name,
         "source": source_norm,
-        **_chat_source_fallback_meta(
-            account_dir=account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=source_fallback_reason,
-        ),
+
         "total": len(sessions),
         "sessions": sessions,
     }
@@ -5256,21 +2716,21 @@ def _resolve_message_self_rowid(
     conn: sqlite3.Connection,
     account_dir: Path,
 ) -> tuple[Optional[int], str]:
-    """Prefer persisted snapshot identity, then try the native WeFlow identity."""
+    """Resolve the persisted identity, including account-directory collision suffixes."""
 
     rowid, matched_username = resolve_account_self_rowid(conn, account_dir)
     if rowid is not None:
         return rowid, matched_username
-    native_username = _wcdb_resolve_account_native_wxid(account_dir)
-    if not native_username:
+    source_username = resolve_account_username(account_dir)
+    if not source_username:
         return rowid, matched_username
-    native_rowid, native_match = resolve_account_self_rowid(
+    source_rowid, source_match = resolve_account_self_rowid(
         conn,
         account_dir,
-        candidates=(native_username,),
+        candidates=(source_username,),
     )
-    if native_rowid is not None:
-        return native_rowid, native_match
+    if source_rowid is not None:
+        return source_rowid, source_match
     return rowid, matched_username
 
 
@@ -5301,7 +2761,7 @@ def _collect_chat_messages(
     alias_cache: dict[str, str] = {}
     if is_group:
         try:
-            contact_db_path = account_dir / "contact.db"
+            contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
             if contact_db_path.exists():
                 contact_conn = sqlite3.connect(str(contact_db_path))
         except Exception:
@@ -5369,7 +2829,7 @@ def _collect_chat_messages(
             try:
                 rows = conn.execute(sql_with_join, (take_probe,)).fetchall()
             except Exception:
-                rows = conn.execute(sql_no_join, (take_probe,)).fetchall()
+                raise
             if len(rows) > take:
                 has_more_any = True
                 rows = rows[:take]
@@ -5385,16 +2845,27 @@ def _collect_chat_messages(
                     else ""
                 )
                 sender_username = _decode_sqlite_text(r["sender_username"]).strip()
+                raw_text = _decode_message_content(r["compress_content"], r["message_content"]).strip()
+                # Native pat/video records may store their actor in XML rather than Name2Id.
+                sender_from_xml = local_type in (266287972401, 43) and not sender_username
+                if sender_from_xml:
+                    sender_username = _extract_sender_from_group_xml(raw_text, local_type=local_type)
+
+                if local_type != 10000 and (not sender_username):
+                    raise sqlite3.DatabaseError(
+                        f"Missing Name2Id sender mapping for local_id={local_id}, "
+                        f"real_sender_id={r['real_sender_id']}."
+                    )
 
                 is_sent = False
-                if my_rowid is not None:
+                if sender_from_xml or local_type == 266287972401:
+                    is_sent = sender_username == db_self_username
+                elif my_rowid is not None:
                     try:
                         is_sent = int(r["real_sender_id"] or 0) == int(my_rowid)
                     except Exception:
                         is_sent = False
 
-                raw_text = _decode_message_content(r["compress_content"], r["message_content"])
-                raw_text = raw_text.strip()
                 at_usernames = _extract_at_usernames_from_source(_row_get_value(r, "msg_source", "source"))
 
                 sender_prefix = ""
@@ -5475,6 +2946,7 @@ def _collect_chat_messages(
                 revoked_server_id = ""
                 revoked_local_id = 0
                 message_revoke_time = 0
+                revoke_original_status = ""
                 if local_type == 10000:
                     render_type = "system"
                     content_text = _parse_system_message_content(raw_text)
@@ -5492,7 +2964,10 @@ def _collect_chat_messages(
                                     revoke_time=create_time or int(time.time()),
                                     server_id=str(r["server_id"] or "0"),
                                     local_id=local_id,
+                                    source_db=db_path.stem,
+                                    source_table=table_name,
                                 )
+                                revoke_original_status = "captured" if revoked is not None else "unresolved"
                                 if revoked is not None:
                                     revoked_server_id = str(revoked["server_id"] or "")
                                     revoked_local_id = int(revoked["local_id"] or 0)
@@ -5871,20 +3346,15 @@ def _collect_chat_messages(
                         "revokedServerId": revoked_server_id,
                         "revokedLocalId": revoked_local_id,
                         "revokeTime": message_revoke_time,
+                        "revokeOriginalStatus": revoke_original_status,
                         "_rawText": raw_text if local_type in (10000, 266287972401) else "",
                     }
                 )
         except sqlite3.DatabaseError as e:
+            if contact_conn is not None:
+                contact_conn.close()
+            raise sqlite3.DatabaseError(f"Cannot read offline message database {db_path}: {e}") from e
             # 单个解密库损坏时不要让整个聊天详情接口 500；保留诊断日志，继续尝试其他 message_*.db。
-            logger.warning(
-                "[chat.messages] malformed message db skipped account=%s username=%s db=%s error=%s diag=%s",
-                account_dir.name,
-                username,
-                str(db_path),
-                str(e),
-                format_sqlite_diagnostics(collect_sqlite_diagnostics(db_path, quick_check=True)),
-            )
-            continue
         finally:
             if conn is not None:
                 conn.close()
@@ -5898,179 +3368,18 @@ def _collect_chat_messages(
     return merged, has_more_any, sender_usernames, quote_usernames, pat_usernames
 
 
-def _connect_realtime_for_chat_source(
-    *,
-    account_dir: Path,
-    source_requested: str,
-) -> tuple[str, Any | None, str]:
-    """Return (resolved_source, connection, error_message)."""
-
-    source_norm = _resolve_chat_source_for_account(source_requested, account_dir)
-    if source_norm != "realtime":
-        return source_norm, None, ""
-    try:
-        return "realtime", WCDB_REALTIME.ensure_connected(account_dir), ""
-    except WCDBRealtimeError as e:
-        if _decrypted_messages_available(account_dir):
-            return "decrypted", None, str(e)
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        if _decrypted_messages_available(account_dir):
-            return "decrypted", None, str(e)
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-def _fetch_realtime_message_rows(
-    *,
-    rt_conn: Any,
-    username: str,
-    max_scan: int = 50000,
-    stop_before_ts: Optional[int] = None,
-    stop_after_local_id: Optional[int] = None,
-    min_rows_after_anchor: int = 0,
-) -> tuple[list[dict[str, Any]], bool, int]:
-    """Fetch newest-first live WCDB rows and normalize them for the chat render helpers."""
-
-    max_scan = max(1, min(int(max_scan or 0), 200000))
-    batch_size = min(1000, max_scan)
-    offset = 0
-    scanned = 0
-    rows: list[dict[str, Any]] = []
-    truncated = False
-    found_anchor_index: Optional[int] = None
-
-    while scanned < max_scan:
-        take = min(batch_size, max_scan - scanned)
-        with rt_conn.lock:
-            raw_rows = _wcdb_get_messages(rt_conn.handle, username, limit=take, offset=offset)
-        if not raw_rows:
-            break
-
-        scanned += len(raw_rows)
-        offset += len(raw_rows)
-        batch_norm: list[dict[str, Any]] = []
-        for item in raw_rows:
-            if not isinstance(item, dict):
-                continue
-            norm = _normalize_realtime_message_item(item)
-            if int(norm.get("local_id") or 0) <= 0:
-                continue
-            if stop_after_local_id is not None and int(norm.get("local_id") or 0) == int(stop_after_local_id):
-                found_anchor_index = len(rows) + len(batch_norm)
-            batch_norm.append(norm)
-
-        rows.extend(batch_norm)
-
-        if stop_after_local_id is not None and found_anchor_index is not None:
-            # get_messages returns newest-first. Once we have the anchor and enough older rows after it,
-            # the requested chronological context window can be rendered without scanning the whole chat.
-            if len(rows) >= int(found_anchor_index) + int(min_rows_after_anchor) + 1:
-                break
-
-        if stop_before_ts is not None and batch_norm:
-            newest_in_batch = max(int(r.get("create_time") or 0) for r in batch_norm)
-            if newest_in_batch < int(stop_before_ts):
-                break
-
-        if len(raw_rows) < take:
-            break
-
-    if scanned >= max_scan:
-        truncated = True
-    return rows, truncated, scanned
 
 
-def _fetch_realtime_message_rows_via_exec(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    username: str,
-    take: int,
-) -> tuple[list[dict[str, Any]], bool, Optional[Path], str, Optional[int]]:
-    db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-    batch = _shared_fetch_realtime_rows_via_exec(
-        rt_conn=rt_conn,
-        account_dir=account_dir,
-        username=username,
-        take=take,
-        db_storage_dir=db_storage_dir,
-        exec_query=_wcdb_exec_query,
-        normalize_item=_normalize_realtime_message_item,
-    )
-    return batch.rows, batch.has_more, batch.db_path, batch.table_name, batch.my_rowid
 
 
-def _fetch_realtime_message_anchor_via_exec(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    username: str,
-    start_time: Optional[int] = None,
-    end_time: Optional[int] = None,
-):
-    return _shared_fetch_realtime_anchor_via_exec(
-        rt_conn=rt_conn,
-        username=username,
-        db_storage_dir=_resolve_account_db_storage_dir(account_dir),
-        exec_query=_wcdb_exec_query,
-        start_time=start_time,
-        end_time=end_time,
-    )
 
 
-def _fetch_realtime_message_context_via_exec(
-    *,
-    rt_conn: Any,
-    account_dir: Path,
-    username: str,
-    anchor_db_stem: str,
-    anchor_table_name: str,
-    anchor_local_id: int,
-    before: int,
-    after: int,
-):
-    return _shared_fetch_realtime_context_via_exec(
-        rt_conn=rt_conn,
-        account_dir=account_dir,
-        username=username,
-        anchor_db_stem=anchor_db_stem,
-        anchor_table_name=anchor_table_name,
-        anchor_local_id=anchor_local_id,
-        before=before,
-        after=after,
-        db_storage_dir=_resolve_account_db_storage_dir(account_dir),
-        exec_query=_wcdb_exec_query,
-        normalize_item=_normalize_realtime_message_item,
-    )
 
 
-def _fetch_realtime_message_rows_via_cursor(
-    *,
-    rt_conn: Any,
-    username: str,
-    take: int,
-) -> tuple[list[dict[str, Any]], bool]:
-    batch = _shared_fetch_realtime_rows_via_cursor(
-        rt_conn=rt_conn,
-        username=username,
-        take=take,
-        open_cursor=_wcdb_open_message_cursor,
-        fetch_batch=_wcdb_fetch_message_batch,
-        close_cursor=_wcdb_close_message_cursor,
-        normalize_item=_normalize_realtime_message_item,
-    )
-    return batch.rows, batch.has_more
 
 
-def _sort_realtime_rows_chronological(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        rows,
-        key=lambda r: (
-            int(r.get("create_time") or 0),
-            int(r.get("sort_seq") or 0),
-            int(r.get("local_id") or 0),
-        ),
-    )
 
 
 def _parse_message_anchor_local_id(anchor_id: str) -> tuple[str, str, int]:
@@ -6118,59 +3427,48 @@ def get_chat_message_daily_counts(
     try:
         account_dir = _resolve_account_dir(account)
         source_requested = _normalize_chat_source(source)
-        source_norm, rt_conn, rt_error = _connect_realtime_for_chat_source(
-            account_dir=account_dir,
-            source_requested=source_requested,
-        )
+        source_norm = _normalize_chat_source(source_requested)
         log_perf("source:resolved", source=source_norm)
         counts: dict[str, int] = {}
-        if source_norm == "realtime":
-            counts = _shared_fetch_realtime_daily_counts_via_exec(
-                rt_conn=rt_conn, username=username,
-                db_storage_dir=_resolve_account_db_storage_dir(account_dir),
-                exec_query=_wcdb_exec_query, start_time=start_ts, end_time=end_ts,
-                timings=metrics,
-            )
-        else:
+        metrics["stage"] = "discovery"
+        discovery_started = time.perf_counter()
+        db_paths = _iter_message_db_paths(account_dir)
+        metrics["discoveryMs"] += (time.perf_counter() - discovery_started) * 1000
+        metrics["candidateDatabases"] = len(db_paths)
+        for db_path in db_paths:
             metrics["stage"] = "discovery"
             discovery_started = time.perf_counter()
-            db_paths = _iter_message_db_paths(account_dir)
-            metrics["discoveryMs"] += (time.perf_counter() - discovery_started) * 1000
-            metrics["candidateDatabases"] = len(db_paths)
-            for db_path in db_paths:
-                metrics["stage"] = "discovery"
-                discovery_started = time.perf_counter()
-                # 只读打开，分库丢失时不能创建空库并返回错误的零计数。
-                conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+            # 只读打开，分库丢失时不能创建空库并返回错误的零计数。
+            conn = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
                 try:
-                    try:
-                        table_name = _resolve_msg_table_name(conn, username)
-                        if not table_name:
-                            continue
-                        quoted_table = _quote_ident(table_name)
-                        columns = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
-                        time_type = next((str(col[2]).upper() for col in columns if str(col[1]).lower() == "create_time"), "")
-                        time_expr = "create_time" if "INT" in time_type else "CAST(create_time AS INTEGER)"
-                    finally:
-                        metrics["discoveryMs"] += (time.perf_counter() - discovery_started) * 1000
-                    metrics["stage"] = "aggregate"
-                    aggregate_started = time.perf_counter()
-                    try:
-                        rows = conn.execute(
-                            f"SELECT strftime('%Y-%m-%d', {time_expr}, 'unixepoch', 'localtime') AS day, "
-                            f"COUNT(*) AS c FROM {quoted_table} "
-                            f"WHERE {time_expr} >= ? AND {time_expr} < ? GROUP BY day",
-                            (int(start_ts), int(end_ts)),
-                        ).fetchall()
-                        metrics["returnedRows"] = metrics.get("returnedRows", 0) + len(rows)
-                        for day, count in rows:
-                            if not day or int(count) <= 0:
-                                raise ValueError("Invalid daily count")
-                            counts[str(day)] = counts.get(str(day), 0) + int(count)
-                    finally:
-                        metrics["aggregateMs"] += (time.perf_counter() - aggregate_started) * 1000
+                    table_name = _resolve_msg_table_name(conn, username)
+                    if not table_name:
+                        continue
+                    quoted_table = _quote_ident(table_name)
+                    columns = conn.execute(f"PRAGMA table_info({quoted_table})").fetchall()
+                    time_type = next((str(col[2]).upper() for col in columns if str(col[1]).lower() == "create_time"), "")
+                    time_expr = "create_time" if "INT" in time_type else "CAST(create_time AS INTEGER)"
                 finally:
-                    conn.close()
+                    metrics["discoveryMs"] += (time.perf_counter() - discovery_started) * 1000
+                metrics["stage"] = "aggregate"
+                aggregate_started = time.perf_counter()
+                try:
+                    rows = conn.execute(
+                        f"SELECT strftime('%Y-%m-%d', {time_expr}, 'unixepoch', 'localtime') AS day, "
+                        f"COUNT(*) AS c FROM {quoted_table} "
+                        f"WHERE {time_expr} >= ? AND {time_expr} < ? GROUP BY day",
+                        (int(start_ts), int(end_ts)),
+                    ).fetchall()
+                    metrics["returnedRows"] = metrics.get("returnedRows", 0) + len(rows)
+                    for day, count in rows:
+                        if not day or int(count) <= 0:
+                            raise ValueError("Invalid daily count")
+                        counts[str(day)] = counts.get(str(day), 0) + int(count)
+                finally:
+                    metrics["aggregateMs"] += (time.perf_counter() - aggregate_started) * 1000
+            finally:
+                conn.close()
         metrics["stage"] = "complete"
         log_perf("response:ready", **metrics, source=source_norm, activeDays=len(counts))
     except HTTPException:
@@ -6189,13 +3487,8 @@ def get_chat_message_daily_counts(
         "account": account_dir.name,
         "username": username,
         "source": source_norm,
-        **({"scanLimited": False, "scannedMessages": 0} if source_norm == "realtime" else {}),
-        **_chat_source_fallback_meta(
-            account_dir=account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=rt_error,
-        ),
+        **({}),
+
         "year": int(y),
         "month": int(m),
         "counts": counts,
@@ -6233,90 +3526,8 @@ def get_chat_message_anchor(
 
     account_dir = _resolve_account_dir(account)
     source_requested = _normalize_chat_source(source)
-    source_norm, rt_conn, rt_error = _connect_realtime_for_chat_source(
-        account_dir=account_dir,
-        source_requested=source_requested,
-    )
+    source_norm = _normalize_chat_source(source_requested)
 
-    if source_norm == "realtime":
-        rows: list[dict[str, Any]] = []
-        scan_limited = False
-        scanned = 0
-        exec_anchor = None
-        try:
-            exec_anchor = _fetch_realtime_message_anchor_via_exec(
-                rt_conn=rt_conn,
-                account_dir=account_dir,
-                username=username,
-                start_time=start_ts if kind_norm == "day" else None,
-                end_time=end_ts if kind_norm == "day" else None,
-            )
-        except Exception as exc:
-            logger.debug(
-                "[chat.anchor] realtime exec query failed account=%s username=%s kind=%s error=%s",
-                account_dir.name,
-                username,
-                kind_norm,
-                str(exc),
-            )
-
-        if exec_anchor is not None and bool(exec_anchor.authoritative):
-            rows = list(exec_anchor.rows or [])
-            scanned = len(rows)
-        else:
-            rows, scan_limited, scanned = _fetch_realtime_message_rows(
-                rt_conn=rt_conn,
-                username=username,
-                max_scan=200000,
-                stop_before_ts=start_ts if kind_norm == "day" else None,
-            )
-        best_row: Optional[dict[str, Any]] = None
-        best_key: Optional[tuple[int, int, int]] = None
-        for row in rows:
-            try:
-                local_id = int(row.get("local_id") or 0)
-                create_time = int(row.get("create_time") or 0)
-                sort_seq = int(row.get("sort_seq") or 0)
-            except Exception:
-                continue
-            if local_id <= 0:
-                continue
-            if kind_norm == "day" and not (int(start_ts or 0) <= create_time < int(end_ts or 0)):
-                continue
-            key = (int(create_time), int(sort_seq), int(local_id))
-            if best_key is None or key < best_key:
-                best_key = key
-                best_row = row
-
-        if best_row is None:
-            return {
-                "status": "empty",
-                "anchorId": "",
-                "source": "realtime",
-                "scanLimited": bool(scan_limited),
-                "scannedMessages": int(scanned),
-            }
-
-        local_id = int(best_row.get("local_id") or 0)
-        create_time = int(best_row.get("create_time") or 0)
-        anchor_db_path = str(best_row.get("_db_path") or "").strip()
-        anchor_db_stem = Path(anchor_db_path).stem if anchor_db_path else _realtime_message_db_path(account_dir).stem
-        anchor_table_name = str(best_row.get("table_name") or "").strip() or _realtime_message_table_name(username)
-        anchor_id = f"{anchor_db_stem}:{anchor_table_name}:{local_id}"
-        resp: dict[str, Any] = {
-            "status": "success",
-            "account": account_dir.name,
-            "username": username,
-            "source": "realtime",
-            "kind": kind_norm,
-            "anchorId": anchor_id,
-            "createTime": int(create_time),
-            "scanLimited": bool(scan_limited),
-            "scannedMessages": int(scanned),
-        }
-        if date_norm is not None:
-            resp["date"] = date_norm
-        return resp
 
     db_paths = _iter_message_db_paths(account_dir)
 
@@ -6378,12 +3589,7 @@ def get_chat_message_anchor(
             "status": "empty",
             "anchorId": "",
             "source": source_norm,
-            **_chat_source_fallback_meta(
-                account_dir=account_dir,
-                requested_source=source_requested,
-                active_source=source_norm,
-                reason=rt_error,
-            ),
+
         }
 
     resp: dict[str, Any] = {
@@ -6391,12 +3597,7 @@ def get_chat_message_anchor(
         "account": account_dir.name,
         "username": username,
         "source": source_norm,
-        **_chat_source_fallback_meta(
-            account_dir=account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=rt_error,
-        ),
+
         "kind": kind_norm,
         "anchorId": best_anchor_id,
         "createTime": int(best_create_time),
@@ -6429,11 +3630,13 @@ def _merge_anti_revoke_into_messages(
         return
 
     seen_non_system_servers: set[str] = set()
-    seen_non_system_locals: set[int] = set()
+    seen_non_system_locals: set[str] = set()
 
     for m in merged:
         sid = str(m.get("serverIdStr") or m.get("serverId") or "").strip()
         lid = int(m.get("localId") or 0)
+        source_db, source_table = str(m.get("db") or ""), str(m.get("table") or "")
+        local_identity = f"{source_db}:{source_table}:{lid}" if source_db or source_table else str(lid)
         m_type = int(m.get("type") or 0)
         is_system = (m_type == 10000 or m.get("renderType") == "system")
 
@@ -6441,13 +3644,13 @@ def _merge_anti_revoke_into_messages(
             if sid and sid != "0":
                 seen_non_system_servers.add(sid)
             if lid > 0 and sid in ("", "0"):
-                seen_non_system_locals.add(lid)
+                seen_non_system_locals.add(local_identity)
 
             match = None
             if sid and sid != "0":
                 match = revoked_map.get(f"server:{sid}")
             elif lid > 0:
-                local_match = revoked_map.get(f"local:{lid}")
+                local_match = revoked_map.get(f"local:{local_identity}")
                 if local_match is not None:
                     match_sid = str(local_match.get("server_id") or "").strip()
                     if match_sid in ("", "0"):
@@ -6460,10 +3663,12 @@ def _merge_anti_revoke_into_messages(
     for rev_row in revoked_list:
         rsid = str(rev_row.get("server_id") or "").strip()
         rlid = int(rev_row.get("local_id") or 0)
+        source_db, source_table = str(rev_row.get("source_db") or ""), str(rev_row.get("source_table") or "")
+        local_identity = f"{source_db}:{source_table}:{rlid}" if source_db and source_table else str(rlid)
         if rsid and rsid != "0":
             already_present = rsid in seen_non_system_servers
         else:
-            already_present = rlid > 0 and rlid in seen_non_system_locals
+            already_present = rlid > 0 and local_identity in seen_non_system_locals
         if already_present:
             continue
 
@@ -6479,7 +3684,7 @@ def _merge_anti_revoke_into_messages(
         if rsid and rsid != "0":
             seen_non_system_servers.add(rsid)
         if rlid > 0 and rsid in ("", "0"):
-            seen_non_system_locals.add(rlid)
+            seen_non_system_locals.add(local_identity)
 
 
 @router.get("/api/chat/messages", summary="获取会话消息列表")
@@ -6518,12 +3723,13 @@ def list_chat_messages(
         scan_limit = 2000
 
     account_dir = _resolve_account_dir(account)
+    database_dir = resolve_account_database_dir(account_dir)
+    snapshot_generation = database_dir.parents[1].name if database_dir != account_dir else "legacy"
     source_requested = _normalize_chat_source(source)
-    source_norm = _resolve_chat_source_for_account(source_requested, account_dir)
-    source_fallback_reason = ""
-    contact_db_path = account_dir / "contact.db"
-    head_image_db_path = account_dir / "head_image.db"
-    message_resource_db_path = account_dir / "message_resource.db"
+    source_norm = _normalize_chat_source(source_requested)
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
+    message_resource_db_path = resolve_account_database_dir(account_dir) / "message_resource.db"
     base_url = str(request.base_url).rstrip("/")
     request_perf_fields: dict[str, Any] = {}
     asgi_arrived_perf = request_perf.get("asgiArrivedPerf")
@@ -6565,19 +3771,19 @@ def list_chat_messages(
     trace("request:start")
 
     db_paths: list[Path] = []
-    if source_norm != "realtime":
-        db_paths = _iter_message_db_paths(account_dir)
-        if not db_paths:
-            trace("response:error", reason="no-message-dbs")
-            return {
-                "status": "error",
-                "account": account_dir.name,
-                "username": username,
-                "source": source_norm,
-                "total": 0,
-                "messages": [],
-                "message": "No message databases found for this account.",
-            }
+    db_paths = _iter_message_db_paths(account_dir)
+    if not db_paths:
+        trace("response:error", reason="no-message-dbs")
+        return {
+            "snapshotGeneration": snapshot_generation,
+            "status": "error",
+            "account": account_dir.name,
+            "username": username,
+            "source": source_norm,
+            "total": 0,
+            "messages": [],
+            "message": "No message databases found for this account.",
+        }
 
     resource_conn: Optional[sqlite3.Connection] = None
     resource_chat_id: Optional[int] = None
@@ -6631,192 +3837,51 @@ def list_chat_messages(
     pat_usernames: set[str] = set()
     has_more_any = False
 
-    if source_norm == "realtime":
-        try:
-            rt_conn = WCDB_REALTIME.ensure_connected(account_dir)
-        except Exception as e:
-            trace("realtime:error", error=str(e))
-            if not _decrypted_messages_available(account_dir):
-                raise HTTPException(status_code=400, detail=str(e))
-            source_norm = "decrypted"
-            source_fallback_reason = str(e)
-            db_paths = _iter_message_db_paths(account_dir)
-            trace("realtime:fallback", error=str(e), fallbackSource="decrypted")
 
-    if source_norm == "realtime":
-        # Realtime mode: fetch from newest (offset handled after render_type filtering).
-        table_name = _realtime_message_table_name(username)
-        rt_db_path = _realtime_message_db_path(account_dir)
-        my_rowid_realtime: Optional[int] = None
-        used_exec_query = False
-        used_cursor = False
-
-        while True:
-            probe = int(scan_take) + 1
-            if probe <= 0:
-                probe = 1
-            if probe > 50000:
-                probe = 50000
-
-            norm_rows: list[dict[str, Any]] = []
-            try:
-                (
-                    norm_rows,
-                    has_more_any,
-                    exec_db_path,
-                    exec_table_name,
-                    my_rowid_realtime,
-                ) = _fetch_realtime_message_rows_via_exec(
-                    rt_conn=rt_conn,
-                    account_dir=account_dir,
-                    username=username,
-                    take=int(scan_take),
-                )
-                if exec_db_path is not None:
-                    used_exec_query = True
-                    rt_db_path = exec_db_path
-                    table_name = exec_table_name or table_name
-                else:
-                    used_exec_query = False
-            except Exception as e:
-                trace("realtime:exec-query:error", error=str(e))
-                norm_rows = []
-                used_exec_query = False
-
-            used_cursor = False
-            if not used_exec_query:
-                try:
-                    norm_rows, has_more_any = _fetch_realtime_message_rows_via_cursor(
-                        rt_conn=rt_conn,
-                        username=username,
-                        take=int(scan_take),
-                    )
-                    used_cursor = bool(norm_rows)
-                except Exception as e:
-                    trace("realtime:cursor:error", error=str(e))
-                    norm_rows = []
-                    used_cursor = False
-
-            if not used_exec_query and not used_cursor:
-                with rt_conn.lock:
-                    raw_rows = _wcdb_get_messages(rt_conn.handle, username, limit=probe, offset=0)
-                has_more_any = len(raw_rows) > int(scan_take)
-                raw_rows = raw_rows[: int(scan_take)] if int(scan_take) > 0 else []
-                norm_rows = [_normalize_realtime_message_item(r) for r in raw_rows if isinstance(r, dict)]
-
-            native_self_u = _wcdb_resolve_account_native_wxid(account_dir, rt_conn)
-            if norm_rows:
-                try:
-                    save_messages_to_archive(
-                        account_dir=account_dir,
-                        account_name=account_dir.name,
-                        username=username,
-                        rows=norm_rows,
-                        my_rowid=my_rowid_realtime if used_exec_query else None,
-                        self_username=native_self_u,
-                    )
-                except Exception as e:
-                    logger.exception("[anti_revoke] Failed to archive realtime rows account=%s user=%s: %s", account_dir.name, username, e)
-                    raise
-
-            merged = []
-            sender_usernames = []
-            quote_usernames = []
-            pat_usernames = set()
-
-            _append_full_messages_from_rows(
-                merged=merged,
-                sender_usernames=sender_usernames,
-                quote_usernames=quote_usernames,
-                pat_usernames=pat_usernames,
-                rows=norm_rows,
-                db_path=rt_db_path,
-                table_name=table_name,
-                username=username,
-                account_dir=account_dir,
-                is_group=bool(username.endswith("@chatroom")),
-                my_rowid=my_rowid_realtime if used_exec_query else None,
-                resource_conn=resource_conn,
-                resource_chat_id=resource_chat_id,
-                self_username=native_self_u,
-            )
-
-            if merged:
-                try:
-                    save_messages_to_archive(
-                        account_dir=account_dir,
-                        account_name=account_dir.name,
-                        username=username,
-                        rows=merged,
-                        my_rowid=my_rowid_realtime if used_exec_query else None,
-                        self_username=native_self_u,
-                    )
-                except Exception as e:
-                    logger.exception("[anti_revoke] Failed to update archive realtime rows account=%s user=%s: %s", account_dir.name, username, e)
-                    raise
-
-            if progressive_filter:
-                break
-
-            if want_types is not None:
-                merged = [m for m in merged if _normalize_render_type_key(m.get("renderType")) in want_types]
-
-            if want_types is None:
-                break
-            if (len(merged) >= (int(offset) + int(limit))) or (not has_more_any):
-                break
-
-            next_take = scan_take * 2 if scan_take > 0 else (int(limit) + int(offset))
-            if next_take <= scan_take:
-                break
-            if next_take > 50000:
-                next_take = 50000
-            scan_take = next_take
-
-    else:
+    if not db_paths:
+        db_paths = _iter_message_db_paths(account_dir)
         if not db_paths:
-            db_paths = _iter_message_db_paths(account_dir)
-            if not db_paths:
-                trace("response:error", reason="no-message-dbs")
-                return {
-                    "status": "error",
-                    "account": account_dir.name,
-                    "username": username,
-                    "source": source_norm,
-                    "total": 0,
-                    "messages": [],
-                    "message": "No message databases found for this account.",
-                }
-        while True:
-            (
-                merged,
-                has_more_any,
-                sender_usernames,
-                quote_usernames,
-                pat_usernames,
-            ) = _collect_chat_messages(
-                username=username,
-                account_dir=account_dir,
-                db_paths=db_paths,
-                resource_conn=resource_conn,
-                resource_chat_id=resource_chat_id,
-                take=scan_take,
-                want_types=None if progressive_filter else want_types,
-            )
+            trace("response:error", reason="no-message-dbs")
+            return {
+                "snapshotGeneration": snapshot_generation,
+                "status": "error",
+                "account": account_dir.name,
+                "username": username,
+                "source": source_norm,
+                "total": 0,
+                "messages": [],
+                "message": "No message databases found for this account.",
+            }
+    while True:
+        (
+            merged,
+            has_more_any,
+            sender_usernames,
+            quote_usernames,
+            pat_usernames,
+        ) = _collect_chat_messages(
+            username=username,
+            account_dir=account_dir,
+            db_paths=db_paths,
+            resource_conn=resource_conn,
+            resource_chat_id=resource_chat_id,
+            take=scan_take,
+            want_types=None if progressive_filter else want_types,
+        )
 
-            if progressive_filter:
-                break
+        if progressive_filter:
+            break
 
-            if want_types is None:
-                break
+        if want_types is None:
+            break
 
-            if (len(merged) >= (int(offset) + int(limit))) or (not has_more_any):
-                break
+        if (len(merged) >= (int(offset) + int(limit))) or (not has_more_any):
+            break
 
-            next_take = scan_take * 2 if scan_take > 0 else (int(limit) + int(offset))
-            if next_take <= scan_take:
-                break
-            scan_take = next_take
+        next_take = scan_take * 2 if scan_take > 0 else (int(limit) + int(offset))
+        if next_take <= scan_take:
+            break
+        scan_take = next_take
 
     trace(
         "messages:collected",
@@ -6829,71 +3894,7 @@ def list_chat_messages(
     )
 
     # Self-heal (default source only): if the decrypted snapshot has no conversation table yet (new session),
-    # do a one-shot realtime->decrypted sync and re-query once. This avoids "暂无聊天记录" after turning off realtime.
-    if (
-        source_norm != "realtime"
-        and (source is None or not str(source).strip())
-        and (not merged)
-        and int(offset) == 0
-        and not account_prefers_decrypted_snapshot(account_dir)
-    ):
-        missing_table = False
-        try:
-            missing_table = _resolve_decrypted_message_table(account_dir, username) is None
-        except Exception:
-            missing_table = True
 
-        if missing_table:
-            trace("self-heal:missing-table")
-            rt_conn2 = None
-            try:
-                rt_conn2 = WCDB_REALTIME.ensure_connected(account_dir)
-            except WCDBRealtimeError:
-                rt_conn2 = None
-            except Exception:
-                rt_conn2 = None
-
-            if rt_conn2 is not None:
-                try:
-                    trace("self-heal:sync:start")
-                    with _realtime_sync_lock(account_dir.name, username):
-                        msg_db_path2, table_name2 = _ensure_decrypted_message_table(account_dir, username)
-                        _sync_chat_realtime_messages_for_table(
-                            account_dir=account_dir,
-                            rt_conn=rt_conn2,
-                            username=username,
-                            msg_db_path=msg_db_path2,
-                            table_name=table_name2,
-                            max_scan=max(200, int(limit) + 50),
-                            backfill_limit=0,
-                        )
-                    trace("self-heal:sync:end")
-                except Exception:
-                    trace("self-heal:sync:error")
-                    pass
-
-                (
-                    merged,
-                    has_more_any,
-                    sender_usernames,
-                    quote_usernames,
-                    pat_usernames,
-                ) = _collect_chat_messages(
-                    username=username,
-                    account_dir=account_dir,
-                    db_paths=db_paths,
-                    resource_conn=resource_conn,
-                    resource_chat_id=resource_chat_id,
-                    take=scan_take,
-                    want_types=None if progressive_filter else want_types,
-                )
-                if want_types is not None and not progressive_filter:
-                    merged = [m for m in merged if _normalize_render_type_key(m.get("renderType")) in want_types]
-                trace(
-                    "self-heal:requery:end",
-                    mergedCount=len(merged),
-                    hasMoreAny=bool(has_more_any),
-                )
 
     r"""
     take = int(limit) + int(offset)
@@ -7382,7 +4383,7 @@ def list_chat_messages(
         except Exception:
             pass
 
-    # Guard against duplicate message ids (observed in realtime mode).
+    # Guard against duplicate message ids.
     # Duplicate ids break Vue list rendering (duplicate keys) and can cause incorrect message display.
     if merged:
         seen_ids: set[str] = set()
@@ -7455,16 +4456,12 @@ def list_chat_messages(
     if not page:
         trace("response:ready", pageCount=0)
         return {
+            "snapshotGeneration": snapshot_generation,
             "status": "success",
             "account": account_dir.name,
             "username": username,
             "source": source_norm,
-            **_chat_source_fallback_meta(
-                account_dir=account_dir,
-                requested_source=source_requested,
-                active_source=source_norm,
-                reason=source_fallback_reason,
-            ),
+
             "total": int(offset) + (1 if has_more_global else 0),
             "hasMore": bool(has_more_global),
             "filterMode": "progressive" if progressive_filter else "",
@@ -7544,43 +4541,23 @@ def list_chat_messages(
         localSenderAvatarCount=len(local_sender_avatars),
     )
 
-    # contact.db may not include enterprise/openim contacts (or group chatroom records), so unresolved
-    # display names use the native database as a best-effort fallback.
-    wcdb_display_names: dict[str, str] = {}
-    try:
-        need_display: list[str] = []
-        for u in uniq_senders:
-            if not u:
-                continue
-            row = sender_contact_rows.get(u)
-            if _pick_display_name(row, u) == u:
-                need_display.append(u)
 
-        need_display = list(dict.fromkeys(need_display))
-        if need_display and not account_prefers_decrypted_snapshot(account_dir):
-            wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-            with wcdb_conn.lock:
-                wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-    except Exception:
-        wcdb_display_names = {}
 
     group_nicknames = _load_group_nickname_map(
         account_dir=account_dir,
         contact_db_path=contact_db_path,
         chatroom_id=username,
         sender_usernames=uniq_senders,
-        allow_native_fallback=False,
+
     )
     trace(
         "sender-fallbacks:loaded",
-        wcdbDisplayNameCount=len(wcdb_display_names),
-        wcdbAvatarUrlCount=0,
         groupNicknameCount=len(group_nicknames),
     )
 
     enterprise_contacts = _load_enterprise_contact_info(
         contact_db_path, sender_usernames_in_page,
-        rt_conn=rt_conn if source_norm == "realtime" else None,
+
     )
     for m in messages_window:
         # If appmsg doesn't provide sourcedisplayname, try mapping sourceusername to display name.
@@ -7589,10 +4566,6 @@ def list_chat_messages(
             frow = sender_contact_rows.get(fu)
             if frow is not None:
                 m["from"] = _pick_display_name(frow, fu)
-            else:
-                wd = str(wcdb_display_names.get(fu) or "").strip()
-                if wd:
-                    m["from"] = wd
 
         su = str(m.get("senderUsername") or "")
         if su:
@@ -7600,7 +4573,7 @@ def list_chat_messages(
             m["senderDisplayName"] = _resolve_sender_display_name(
                 sender_username=su,
                 sender_contact_rows=sender_contact_rows,
-                wcdb_display_names=wcdb_display_names,
+
                 group_nicknames=group_nicknames,
             )
             avatar_url = base_url + _avatar_url_unified(
@@ -7624,14 +4597,9 @@ def list_chat_messages(
                     m["quoteTitle"] = remark
                 elif not qt:
                     title = _pick_display_name(qrow, qu)
-                    if title == qu:
-                        wd = str(wcdb_display_names.get(qu) or "").strip()
-                        if wd and wd != qu:
-                            title = wd
                     m["quoteTitle"] = title
             elif not qt:
-                wd = str(wcdb_display_names.get(qu) or "").strip()
-                m["quoteTitle"] = wd or qu
+                m["quoteTitle"] = qu
 
         # Media URL fallback: if CDN URLs missing, use local media endpoints.
         try:
@@ -7654,29 +4622,20 @@ def list_chat_messages(
                 md5 = str(m.get("emojiMd5") or "")
                 if md5:
                     existing_local: Optional[Path] = None
+
+                    # Preserve the remote URL only for the user's explicit download.
                     try:
-                        existing_local = _try_find_decrypted_resource(account_dir, str(md5).lower())
+                        # import re
+                        cur = str(m.get("emojiUrl") or "")
+                        if cur and re.match(r"^https?://", cur, flags=re.I) and ("/api/chat/media/emoji" not in cur):
+                            m["emojiRemoteUrl"] = cur
                     except Exception:
-                        existing_local = None
+                        pass
 
-                    if existing_local:
-                        try:
-                            # import re
-                            cur = str(m.get("emojiUrl") or "")
-                            if cur and re.match(r"^https?://", cur, flags=re.I) and ("/api/chat/media/emoji" not in cur):
-                                m["emojiRemoteUrl"] = cur
-                        except Exception:
-                            pass
-
-                        m["emojiUrl"] = (
-                            base_url
-                            + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
-                        )
-                    elif (not str(m.get("emojiUrl") or "")):
-                        m["emojiUrl"] = (
-                            base_url
-                            + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
-                        )
+                    m["emojiUrl"] = (
+                        base_url
+                        + f"/api/chat/media/emoji?account={quote(account_dir.name)}&md5={quote(md5)}&username={quote(username)}"
+                    )
             elif rt == "video":
                 video_thumb_url = str(m.get("videoThumbUrl") or "").strip()
                 video_thumb_md5 = str(m.get("videoThumbMd5") or "").strip()
@@ -7739,7 +4698,7 @@ def list_chat_messages(
         _postprocess_special_message_content(
             message=m,
             sender_contact_rows=sender_contact_rows,
-            wcdb_display_names=wcdb_display_names,
+
         )
 
     trace(
@@ -7752,16 +4711,12 @@ def list_chat_messages(
         nextFilterOffset=next_filter_offset,
     )
     return {
+        "snapshotGeneration": snapshot_generation,
         "status": "success",
         "account": account_dir.name,
         "username": username,
         "source": source_norm,
-        **_chat_source_fallback_meta(
-            account_dir=account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=source_fallback_reason,
-        ),
+
         "total": int(offset) + len(page) + (1 if has_more_global else 0),
         "hasMore": bool(has_more_global),
         "filterMode": "progressive" if progressive_filter else "",
@@ -7827,24 +4782,7 @@ def _should_use_single_char_recent_probe(conn: sqlite3.Connection, token: str) -
     return doc_count >= _single_char_recent_probe_min_docs()
 
 
-async def _search_chat_messages_via_fts(
-    request: Request,
-    *,
-    q: str,
-    account: Optional[str],
-    username: Optional[str],
-    sender: Optional[str],
-    session_type: Optional[str],
-    limit: int,
-    offset: int,
-    start_time: Optional[int],
-    end_time: Optional[int],
-    render_types: Optional[str],
-    include_hidden: bool,
-    include_official: bool,
-    source: Optional[str] = None,
-    allow_native_enrichment: bool = True,
-) -> dict[str, Any]:
+async def _search_chat_messages_via_fts(request: Request, *, q: str, account: Optional[str], username: Optional[str], sender: Optional[str], session_type: Optional[str], limit: int, offset: int, start_time: Optional[int], end_time: Optional[int], render_types: Optional[str], include_hidden: bool, include_official: bool, source: Optional[str]=None) -> dict[str, Any]:
     tokens = _make_search_tokens(q)
     if not tokens:
         raise HTTPException(status_code=400, detail="Missing q.")
@@ -7900,11 +4838,11 @@ async def _search_chat_messages_via_fts(
 
     source_requested = _normalize_chat_source(source)
     # 搜索索引恢复为旧模式：索引只从 output/databases/{account} 下的解密 SQLite
-    # 构建。聊天列表/详情仍可走 realtime，但 search index 不再直接全量拉 WCDB sidecar。
+
     index_source = "decrypted"
     account_dir = _resolve_account_dir(account)
-    contact_db_path = account_dir / "contact.db"
-    head_image_db_path = account_dir / "head_image.db"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
     base_url = str(request.base_url).rstrip("/")
 
     index_status = get_chat_search_index_status(account_dir, source=index_source)
@@ -8184,7 +5122,7 @@ async def _search_chat_messages_via_fts(
         groups.setdefault((db_path, table_name, conv_username), []).append(local_id)
         ordered_keys.append(key4)
 
-    self_username = _wcdb_resolve_account_native_wxid(account_dir)
+    self_username = resolve_account_username(account_dir)
 
     for (db_path, table_name, conv_username), local_ids in groups.items():
         uniq_local_ids = list(dict.fromkeys([int(x) for x in local_ids if int(x) > 0]))
@@ -8287,44 +5225,9 @@ async def _search_chat_messages_via_fts(
         contact_rows = _load_contact_rows(contact_db_path, uniq_usernames)
         local_avatar_usernames = _query_head_image_usernames(head_image_db_path, uniq_usernames)
 
-        wcdb_display_names: dict[str, str] = {}
-        wcdb_avatar_urls: dict[str, str] = {}
-        try:
-            need_display: list[str] = []
-            need_avatar: list[str] = []
-            for u in uniq_usernames:
-                uu = str(u or "").strip()
-                if not uu:
-                    continue
-                row = contact_rows.get(uu)
-                if _pick_display_name(row, uu) == uu:
-                    need_display.append(uu)
-                if uu not in local_avatar_usernames:
-                    need_avatar.append(uu)
-
-            need_display = list(dict.fromkeys(need_display))
-            need_avatar = list(dict.fromkeys(need_avatar))
-            if (
-                allow_native_enrichment
-                and (need_display or need_avatar)
-                and not account_prefers_decrypted_snapshot(account_dir)
-            ):
-                wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-                with wcdb_conn.lock:
-                    if need_display:
-                        wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-                    if need_avatar:
-                        wcdb_avatar_urls = _wcdb_get_avatar_urls(wcdb_conn.handle, need_avatar)
-        except Exception:
-            wcdb_display_names = {}
-            wcdb_avatar_urls = {}
 
         conv_row = contact_rows.get(username)
         conv_name = _pick_display_name(conv_row, username)
-        if conv_name == username:
-            wd = str(wcdb_display_names.get(username) or "").strip()
-            if wd and wd != username:
-                conv_name = wd
         conv_avatar = base_url + _avatar_url_unified(
             account_dir=account_dir,
             username=username,
@@ -8335,7 +5238,7 @@ async def _search_chat_messages_via_fts(
             contact_db_path=contact_db_path,
             chatroom_id=username,
             sender_usernames=[str(x.get("senderUsername") or "") for x in hits],
-            allow_native_fallback=allow_native_enrichment,
+
         )
 
         for h in hits:
@@ -8346,7 +5249,7 @@ async def _search_chat_messages_via_fts(
                 h["senderDisplayName"] = _resolve_sender_display_name(
                     sender_username=su,
                     sender_contact_rows=contact_rows,
-                    wcdb_display_names=wcdb_display_names,
+
                     group_nicknames=group_nicknames,
                 )
                 avatar_url = base_url + _avatar_url_unified(
@@ -8358,7 +5261,7 @@ async def _search_chat_messages_via_fts(
             _postprocess_special_message_content(
                 message=h,
                 sender_contact_rows=contact_rows,
-                wcdb_display_names=wcdb_display_names,
+
             )
     else:
         system_usernames = [
@@ -8376,37 +5279,6 @@ async def _search_chat_messages_via_fts(
         contact_rows = _load_contact_rows(contact_db_path, uniq_contacts)
         local_avatar_usernames = _query_head_image_usernames(head_image_db_path, uniq_contacts)
 
-        wcdb_display_names: dict[str, str] = {}
-        wcdb_avatar_urls: dict[str, str] = {}
-        try:
-            need_display: list[str] = []
-            need_avatar: list[str] = []
-            for u in uniq_contacts:
-                uu = str(u or "").strip()
-                if not uu:
-                    continue
-                row = contact_rows.get(uu)
-                if _pick_display_name(row, uu) == uu:
-                    need_display.append(uu)
-                if uu not in local_avatar_usernames:
-                    need_avatar.append(uu)
-
-            need_display = list(dict.fromkeys(need_display))
-            need_avatar = list(dict.fromkeys(need_avatar))
-            if (
-                allow_native_enrichment
-                and (need_display or need_avatar)
-                and not account_prefers_decrypted_snapshot(account_dir)
-            ):
-                wcdb_conn = WCDB_REALTIME.ensure_connected(account_dir)
-                with wcdb_conn.lock:
-                    if need_display:
-                        wcdb_display_names = _wcdb_get_display_names(wcdb_conn.handle, need_display)
-                    if need_avatar:
-                        wcdb_avatar_urls = _wcdb_get_avatar_urls(wcdb_conn.handle, need_avatar)
-        except Exception:
-            wcdb_display_names = {}
-            wcdb_avatar_urls = {}
 
         group_senders_by_room: dict[str, list[str]] = {}
         for h in hits:
@@ -8423,7 +5295,7 @@ async def _search_chat_messages_via_fts(
                 contact_db_path=contact_db_path,
                 chatroom_id=cu,
                 sender_usernames=senders,
-                allow_native_fallback=allow_native_enrichment,
+
             )
 
         for h in hits:
@@ -8431,10 +5303,6 @@ async def _search_chat_messages_via_fts(
             su = str(h.get("senderUsername") or "").strip()
             crow = contact_rows.get(cu)
             conv_name = _pick_display_name(crow, cu) if cu else ""
-            if cu and (conv_name == cu):
-                wd = str(wcdb_display_names.get(cu) or "").strip()
-                if wd and wd != cu:
-                    conv_name = wd
             h["conversationName"] = conv_name or cu
             conv_avatar = base_url + _avatar_url_unified(
                 account_dir=account_dir,
@@ -8446,7 +5314,7 @@ async def _search_chat_messages_via_fts(
                 h["senderDisplayName"] = _resolve_sender_display_name(
                     sender_username=su,
                     sender_contact_rows=contact_rows,
-                    wcdb_display_names=wcdb_display_names,
+
                     group_nicknames=group_nickname_cache.get(cu, {}),
                 )
                 avatar_url = base_url + _avatar_url_unified(
@@ -8458,7 +5326,7 @@ async def _search_chat_messages_via_fts(
             _postprocess_special_message_content(
                 message=h,
                 sender_contact_rows=contact_rows,
-                wcdb_display_names=wcdb_display_names,
+
             )
 
     rev_map = get_revoked_messages_map(account_dir, username)
@@ -8476,7 +5344,11 @@ async def _search_chat_messages_via_fts(
         if sid and sid != "0":
             m = rev_map.get(f"server:{sid}")
         elif lid > 0 and conv:
-            m = rev_map.get(f"local:{conv}:{lid}")
+            source_db, source_table = str(h.get("db") or ""), str(h.get("table") or "")
+            if source_db and source_table:
+                m = rev_map.get(f"local:{conv}:{source_db}:{source_table}:{lid}")
+            elif not source_db and not source_table:
+                m = rev_map.get(f"local:{conv}:{lid}")
             if m is not None and str(m.get("server_id") or "0").strip() != "0":
                 m = None
         if m is not None:
@@ -8517,28 +5389,7 @@ async def _search_chat_messages_via_fts(
 
 
 @router.get("/api/chat/search", summary="搜索聊天记录（消息）")
-async def search_chat_messages(
-    request: Request,
-    q: str,
-    account: Optional[str] = None,
-    username: Optional[str] = None,
-    sender: Optional[str] = None,
-    session_type: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-    start_time: Optional[int] = None,
-    end_time: Optional[int] = None,
-    render_types: Optional[str] = None,
-    include_hidden: bool = False,
-    include_official: bool = False,
-    source: Optional[str] = None,
-    allow_native_enrichment: bool = True,
-    session_limit: int = 200,
-    per_chat_scan: int = 200,
-    scan_limit: int = 20000,
-    retrieval_mode: str = 'keyword',
-    search_ticket: Optional[str] = None,
-):
+async def search_chat_messages(request: Request, q: str, account: Optional[str]=None, username: Optional[str]=None, sender: Optional[str]=None, session_type: Optional[str]=None, limit: int=50, offset: int=0, start_time: Optional[int]=None, end_time: Optional[int]=None, render_types: Optional[str]=None, include_hidden: bool=False, include_official: bool=False, source: Optional[str]=None, session_limit: int=200, per_chat_scan: int=200, scan_limit: int=20000, retrieval_mode: str='keyword', search_ticket: Optional[str]=None):
     source_requested = _normalize_chat_source(source)
 
     if retrieval_mode not in {'keyword', 'hybrid'}:
@@ -8565,10 +5416,10 @@ async def search_chat_messages(
         include_hidden=include_hidden,
         include_official=include_official,
         source=source_requested,
-        allow_native_enrichment=allow_native_enrichment,
+
     )
     if isinstance(response, dict):
-        if source_requested in {"auto", "realtime", "decrypted"}:
+        if source_requested in {"auto", "decrypted"}:
             response.setdefault("source", "decrypted_index")
             response.setdefault(
                 "freshness",
@@ -8581,8 +5432,9 @@ async def search_chat_messages(
     if retrieval_mode == 'hybrid':
         from ..local_search.service import get_local_search
         from ..chat_export_service import get_chat_export_targets_preview
-        account_id = _resolve_account_dir(account).name
-        targets = await asyncio.to_thread(get_chat_export_targets_preview, account=account_id,
+        account_dir = _resolve_account_dir(account)
+        account_id = account_dir.name
+        targets = await account_to_thread(account_dir, get_chat_export_targets_preview, account=account_id,
             include_hidden=include_hidden, include_official=include_official)
         usernames = [x['username'] for x in targets['targets'] if not username or x['username'] == username]
         if session_type == 'group': usernames = [u for u in usernames if u.endswith('@chatroom')]
@@ -8595,7 +5447,7 @@ async def search_chat_messages(
                 sender=sender, session_type=session_type, limit=limit, offset=offset,
                 start_time=start_time, end_time=end_time, render_types=render_types,
                 include_hidden=include_hidden, include_official=include_official,
-                source=source_requested, allow_native_enrichment=allow_native_enrichment)
+                source=source_requested)
             combined = {**fallback, 'retrievalMode': 'keyword', 'coverage': combined['coverage']}
         return combined
     if requested_hybrid and isinstance(response,dict):
@@ -8646,182 +5498,15 @@ async def get_chat_messages_around(
         raise
 
     account_dir = _resolve_account_dir(account)
-    contact_db_path = account_dir / "contact.db"
-    head_image_db_path = account_dir / "head_image.db"
-    message_resource_db_path = account_dir / "message_resource.db"
+    database_dir = resolve_account_database_dir(account_dir)
+    snapshot_generation = database_dir.parents[1].name if database_dir != account_dir else "legacy"
+    contact_db_path = resolve_account_database_dir(account_dir) / "contact.db"
+    head_image_db_path = resolve_account_database_dir(account_dir) / "head_image.db"
+    message_resource_db_path = resolve_account_database_dir(account_dir) / "message_resource.db"
     base_url = str(request.base_url).rstrip("/")
     source_requested = _normalize_chat_source(source)
-    source_norm, rt_conn, rt_error = _connect_realtime_for_chat_source(
-        account_dir=account_dir,
-        source_requested=source_requested,
-    )
+    source_norm = _normalize_chat_source(source_requested)
 
-    if source_norm == "realtime":
-        rows: list[dict[str, Any]] = []
-        scan_limited = False
-        scanned = 0
-        exec_context = None
-        try:
-            exec_context = _fetch_realtime_message_context_via_exec(
-                rt_conn=rt_conn,
-                account_dir=account_dir,
-                username=username,
-                anchor_db_stem=anchor_db_stem,
-                anchor_table_name=anchor_table_name_in,
-                anchor_local_id=int(anchor_local_id),
-                before=int(before),
-                after=int(after),
-            )
-        except Exception as exc:
-            logger.debug(
-                "[%s] chat messages around realtime exec query failed account=%s username=%s error=%s",
-                trace_id,
-                account_dir.name,
-                username,
-                str(exc),
-            )
-
-        if exec_context is not None and bool(exec_context.authoritative):
-            rows = list(exec_context.rows or [])
-            scanned = len(rows)
-        else:
-            rows, scan_limited, scanned = _fetch_realtime_message_rows(
-                rt_conn=rt_conn,
-                username=username,
-                max_scan=200000,
-                stop_after_local_id=int(anchor_local_id),
-                min_rows_after_anchor=int(before),
-            )
-        rows_asc = _sort_realtime_rows_chronological(rows)
-        anchor_index_all = -1
-        for i, row in enumerate(rows_asc):
-            try:
-                if int(row.get("local_id") or 0) != int(anchor_local_id):
-                    continue
-                row_db_path = str(row.get("_db_path") or "").strip()
-                row_table_name = str(row.get("table_name") or "").strip()
-                if row_db_path and Path(row_db_path).stem.lower() != anchor_db_stem.lower():
-                    continue
-                if row_table_name and anchor_table_name_in and row_table_name.lower() != anchor_table_name_in.lower():
-                    continue
-                anchor_index_all = i
-                break
-            except Exception:
-                continue
-
-        if anchor_index_all >= 0:
-            start = max(0, int(anchor_index_all) - int(before))
-            end = min(len(rows_asc), int(anchor_index_all) + int(after) + 1)
-            window_rows = rows_asc[start:end]
-
-            resource_conn: Optional[sqlite3.Connection] = None
-            resource_chat_id: Optional[int] = None
-            try:
-                if message_resource_db_path.exists():
-                    resource_conn = sqlite3.connect(str(message_resource_db_path))
-                    resource_conn.row_factory = sqlite3.Row
-                    resource_chat_id = _resource_lookup_chat_id(resource_conn, username)
-            except Exception:
-                if resource_conn is not None:
-                    try:
-                        resource_conn.close()
-                    except Exception:
-                        pass
-                resource_conn = None
-                resource_chat_id = None
-
-            return_messages: list[dict[str, Any]] = []
-            sender_usernames_win: list[str] = []
-            quote_usernames_win: list[str] = []
-            pat_usernames_win: set[str] = set()
-            anchor_row = rows_asc[anchor_index_all]
-            anchor_row_db_path = str(anchor_row.get("_db_path") or "").strip()
-            rt_db_path = Path(anchor_row_db_path) if anchor_row_db_path else _realtime_message_db_path(account_dir)
-            rt_table_name = str(anchor_row.get("table_name") or "").strip() or _realtime_message_table_name(username)
-            try:
-                _append_full_messages_from_rows(
-                    merged=return_messages,
-                    sender_usernames=sender_usernames_win,
-                    quote_usernames=quote_usernames_win,
-                    pat_usernames=pat_usernames_win,
-                    rows=window_rows,
-                    db_path=rt_db_path,
-                    table_name=rt_table_name,
-                    username=username,
-                    account_dir=account_dir,
-                    is_group=bool(username.endswith("@chatroom")),
-                    my_rowid=None,
-                    resource_conn=resource_conn,
-                    resource_chat_id=resource_chat_id,
-                    self_username=_wcdb_resolve_account_native_wxid(account_dir, rt_conn),
-                )
-            finally:
-                if resource_conn is not None:
-                    try:
-                        resource_conn.close()
-                    except Exception:
-                        pass
-
-            _postprocess_full_messages(
-                merged=return_messages,
-                sender_usernames=sender_usernames_win,
-                quote_usernames=quote_usernames_win,
-                pat_usernames=pat_usernames_win,
-                account_dir=account_dir,
-                username=username,
-                base_url=base_url,
-                contact_db_path=contact_db_path,
-                head_image_db_path=head_image_db_path,
-                rt_conn=rt_conn,
-            )
-
-            anchor_id_canon = f"{rt_db_path.stem}:{rt_table_name}:{int(anchor_local_id)}"
-            anchor_index = -1
-            for i, msg in enumerate(return_messages):
-                if str(msg.get("id") or "") == anchor_id_canon:
-                    anchor_index = i
-                    break
-            if anchor_index < 0:
-                for i, msg in enumerate(return_messages):
-                    try:
-                        if int(msg.get("localId") or 0) == int(anchor_local_id):
-                            anchor_index = i
-                            break
-                    except Exception:
-                        continue
-
-            logger.info(
-                "[%s] chat messages around realtime done account=%s username=%s anchor_id=%s canonical_anchor=%s anchor_index=%s returned=%s scanned=%s",
-                trace_id,
-                account_dir.name,
-                username,
-                str(anchor_id or "").strip(),
-                anchor_id_canon,
-                int(anchor_index),
-                len(return_messages),
-                int(scanned),
-            )
-            return {
-                "status": "success",
-                "account": account_dir.name,
-                "username": username,
-                "source": "realtime",
-                "anchorId": anchor_id_canon,
-                "anchorIndex": int(anchor_index),
-                "scanLimited": bool(scan_limited),
-                "scannedMessages": int(scanned),
-                "messages": return_messages,
-            }
-
-        logger.warning(
-            "[%s] chat messages around realtime anchor missing account=%s username=%s anchor_id=%s scanned=%s",
-            trace_id,
-            account_dir.name,
-            username,
-            str(anchor_id or "").strip(),
-            int(scanned),
-        )
-        raise HTTPException(status_code=404, detail="Anchor message not found.")
 
     db_paths = _iter_message_db_paths(account_dir)
 
@@ -8947,7 +5632,7 @@ async def get_chat_messages_around(
     quote_usernames_all: list[str] = []
     pat_usernames_all: set[str] = set()
     is_group = bool(username.endswith("@chatroom"))
-    self_username = _wcdb_resolve_account_native_wxid(account_dir)
+    self_username = resolve_account_username(account_dir)
 
     for db_path in db_paths:
         conn: Optional[sqlite3.Connection] = None
@@ -9262,16 +5947,12 @@ async def get_chat_messages_around(
     )
 
     return {
+        "snapshotGeneration": snapshot_generation,
         "status": "success",
         "account": account_dir.name,
         "username": username,
         "source": source_norm,
-        **_chat_source_fallback_meta(
-            account_dir=account_dir,
-            requested_source=source_requested,
-            active_source=source_norm,
-            reason=rt_error,
-        ),
+
         "anchorId": anchor_id_canon,
         "anchorIndex": anchor_index,
         "messages": return_messages,
@@ -9522,16 +6203,6 @@ def _normalize_table_name_case(conn: sqlite3.Connection, table_name: str) -> str
     return t
 
 
-def _resolve_db_storage_message_paths(account_dir: Path, db_stem: str) -> tuple[Path, Path]:
-    db_storage_dir = _resolve_account_db_storage_dir(account_dir)
-    if db_storage_dir is None:
-        raise HTTPException(status_code=400, detail="Cannot resolve db_storage directory for this account.")
-    db_name = str(db_stem or "").strip()
-    if not db_name:
-        raise HTTPException(status_code=400, detail="Invalid message_id.")
-    msg_db_path = db_storage_dir / "message" / f"{db_name}.db"
-    res_db_path = db_storage_dir / "message" / "message_resource.db"
-    return msg_db_path, res_db_path
 
 
 @router.get("/api/chat/messages/raw", summary="获取单条消息原始字段（output 解密库）")
@@ -9559,7 +6230,7 @@ def get_chat_message_raw(
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="Invalid message_id.")
 
-    db_path = account_dir / f"{db_stem}.db"
+    db_path = resolve_account_database_dir(account_dir) / f"{db_stem}.db"
     if not db_path.exists():
         raise HTTPException(status_code=404, detail="Message database not found.")
 

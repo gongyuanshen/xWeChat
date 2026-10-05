@@ -125,7 +125,6 @@ async function main() {
           reasoning_effort: body.reasoning_effort, text: body.text })
       }
     })
-    await page.getByRole('button', { name: '我已阅读全部内容并同意', exact: true }).click({ timeout: 120000 })
     await page.goto(base + '/chat')
     // 图片样例改变最近会话排序，主动选择目标会话，不依赖首个聊天。
     await page.getByRole('heading', { name: '验收 · 海桥项目', exact: true }).first().click()
