@@ -18,10 +18,13 @@ from wechat_decrypt_tool.runtime_settings import (
 def main() -> None:
     if "--smoke-backend" in sys.argv[1:]:
         import json
+        from wechat_decrypt_tool.api import app
+
         payload = {
             "ok": True,
             "frozen": bool(getattr(sys, "frozen", False)),
             "platform": sys.platform,
+            "title": getattr(app, "title", "wechat-decrypt-tool"),
         }
         print(json.dumps(payload, ensure_ascii=True))
         return

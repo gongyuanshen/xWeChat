@@ -3,7 +3,9 @@ Publish release artifacts to GitHub Releases.
 """
 
 import hashlib
+import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -42,12 +44,26 @@ BODY = """# xwechat v2.7.1 - 独立纯本地版发布
 """
 
 
+def get_git_exe() -> str:
+    found = shutil.which("git")
+    if found:
+        return found
+    for c in [
+        r"E:\Git\cmd\git.exe",
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+    ]:
+        if os.path.isfile(c):
+            return c
+    return "git"
+
+
 def get_token() -> str:
     env_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if env_token:
         return env_token
     proc = subprocess.run(
-        ["git", "credential", "fill"],
+        [get_git_exe(), "credential", "fill"],
         input="protocol=https\nhost=github.com\n",
         capture_output=True,
         text=True,
@@ -66,7 +82,7 @@ def get_session(token: str) -> requests.Session:
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "xwechat-releaser",
     })
-    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or "http://127.0.0.1:7897"
+    proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
     if proxy_url:
         session.proxies.update({
             "http": proxy_url,
@@ -75,7 +91,59 @@ def get_session(token: str) -> requests.Session:
     return session
 
 
+class ProgressFileReader:
+    def __init__(self, file_path: Path):
+        self.file = open(file_path, "rb")
+        self.total_size = file_path.stat().st_size
+        self.uploaded_size = 0
+        self.last_print = 0
+
+    def read(self, size=-1):
+        chunk = self.file.read(size)
+        if chunk:
+            self.uploaded_size += len(chunk)
+            now = time.time()
+            if now - self.last_print >= 1.0 or self.uploaded_size == self.total_size:
+                pct = (self.uploaded_size / self.total_size) * 100 if self.total_size else 100
+                mb_up = self.uploaded_size / (1024 * 1024)
+                mb_tot = self.total_size / (1024 * 1024)
+                print(f"\r  Uploading: {mb_up:.2f} / {mb_tot:.2f} MB ({pct:.1f}%)", end="", flush=True)
+                self.last_print = now
+        return chunk
+
+    def __len__(self):
+        return self.total_size
+
+    def close(self):
+        self.file.close()
+
+
+def upload_file_asset(session: requests.Session, upload_url: str, file_path: Path) -> dict:
+    reader = ProgressFileReader(file_path)
+    try:
+        resp = session.post(
+            upload_url,
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_path.stat().st_size),
+            },
+            data=reader,
+            params={"name": file_path.name},
+            timeout=1800,
+        )
+        print()
+        resp.raise_for_status()
+        return resp.json()
+    finally:
+        reader.close()
+
+
 def main() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     token = get_token()
     session = get_session(token)
 
@@ -107,8 +175,8 @@ def main() -> None:
     release_html_url = release.get("html_url", f"https://github.com/{REPO}/releases/tag/{TAG}")
     upload_url_template = release["upload_url"].split("{")[0]
 
-    # Existing assets
-    existing_assets = {a["name"]: a["id"] for a in release.get("assets", [])}
+    # Existing assets map: name -> asset info dict
+    existing_assets = {a["name"]: a for a in release.get("assets", [])}
 
     repo_root = Path(__file__).resolve().parent.parent
     files_to_upload = [
@@ -130,37 +198,27 @@ def main() -> None:
         print(f"\nProcessing {filename} ({file_size / (1024 * 1024):.2f} MB)...")
 
         if filename in existing_assets:
-            print(f"Asset {filename} already exists on release, checking...")
-            # We can delete and re-upload to ensure fresh content
+            existing = existing_assets[filename]
+            if existing.get("size") == file_size and existing.get("state") == "uploaded":
+                print(f"Asset {filename} is already up to date ({file_size} bytes), skipping.")
+                continue
+            print(f"Asset {filename} exists on release but size/state differs ({existing.get('size')} != {file_size}), replacing...")
             del_resp = session.delete(
-                f"https://api.github.com/repos/{REPO}/releases/assets/{existing_assets[filename]}"
+                f"https://api.github.com/repos/{REPO}/releases/assets/{existing['id']}"
             )
             if del_resp.status_code in (204, 200, 404):
                 print(f"Removed stale asset {filename}")
             time.sleep(1)
 
-        upload_headers = {
-            "Content-Type": "application/octet-stream",
-        }
-
         print(f"Uploading {filename} (size: {file_size} bytes)...")
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
-                with open(file_path, "rb") as f:
-                    upload_resp = session.post(
-                        upload_url_template,
-                        headers=upload_headers,
-                        data=f,
-                        params={"name": filename},
-                        timeout=300,
-                    )
-                upload_resp.raise_for_status()
-                uploaded_asset = upload_resp.json()
+                uploaded_asset = upload_file_asset(session, upload_url_template, file_path)
                 print(f"Successfully uploaded {filename} (id={uploaded_asset.get('id')})")
                 break
             except Exception as e:
-                print(f"Upload attempt {attempt}/{max_attempts} failed: {e}")
+                print(f"\nUpload attempt {attempt}/{max_attempts} failed: {e}")
                 if attempt == max_attempts:
                     raise
                 time.sleep(3)

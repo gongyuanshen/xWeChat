@@ -17,60 +17,6 @@
   "dependencies": {
     "ffmpeg-static": "^5.3.0"
   },
-  "build": {
-    "appId": "com.xwechat.app",
-    "productName": "xwechat",
-    "artifactName": "${productName}-${version}-Setup.${ext}",
-    "icon": "src/icon.ico",
-    "asar": true,
-    "directories": {
-      "output": "dist"
-    },
-    "electronFuses": {
-      "runAsNode": true
-    },
-    "files": [
-      "src/**/*",
-      "!node_modules/ffmpeg-static/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "resources/ui",
-        "to": "ui"
-      },
-      {
-        "from": "resources/backend",
-        "to": "backend"
-      },
-      {
-        "from": "node_modules/ffmpeg-static",
-        "to": "ffmpeg",
-        "filter": [
-          "ffmpeg",
-          "ffmpeg.exe",
-          "ffmpeg.LICENSE",
-          "ffmpeg.README",
-          "ffmpeg.exe.LICENSE",
-          "ffmpeg.exe.README",
-          "LICENSE"
-        ]
-      }
-    ],
-    "win": {
-      "icon": "src/icon.ico",
-      "forceCodeSigning": false,
-      "signExecutable": false,
-      "target": [
-        "nsis",
-        "zip"
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    }
-  },
   "devDependencies": {
     "cross-env": "^10.1.0",
     "electron": "^40.0.0",
