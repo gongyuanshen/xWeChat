@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = {'.git', '.venv', 'node_modules', '.nuxt', '.output', 'tmp', 'output', 'dist', '__pycache__', '.pytest_cache'}
-SOURCE_ROOTS = {'src', 'frontend', 'desktop', 'tools', 'tests', 'docs', '.github'}
+SOURCE_ROOTS = {'src', 'frontend', 'desktop', 'tools', 'docs', '.github'}
 
 
 def files():
@@ -18,6 +18,7 @@ def files():
     for name in sorted(set(tracked + added)):
         path = Path(name)
         if not name or any(part in EXCLUDED for part in path.parts): continue
+        if path.parts[0] == 'tests': continue
         if name in added and (len(path.parts) < 2 or path.parts[0] not in SOURCE_ROOTS): continue
         if path.name.startswith('.env') or path.suffix in {'.sqlite3', '.db', '.pem', '.key'}: continue
         if name.startswith(('desktop/resources/backend/', 'desktop/resources/ui/')): continue

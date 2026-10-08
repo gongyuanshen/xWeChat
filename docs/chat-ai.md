@@ -49,12 +49,19 @@ AI 对话历史显示当前聊天的已保存对话。从顶部左侧历史按�
 
 Windows 源码启动只使用项目内的独立数据实现，不下载或加载旧 client／broker。先在 `desktop` 安装 npm 依赖，再以 Node 22.12 以上运行 `node scripts/dev.cjs`；Nuxt 子进程复用同一个 Node。旧模式删除后的运行验证暂未执行，见[本轮清理范围](plans/2026-10-04-remove-legacy-mode.md)。
 
-模型测试均可使用模拟服务，不需要真实密钥：
+模型测试均可使用模拟服务，不需要真实密钥。根目录 `tests/` 为本地私有 Python 回归测试，不随公开源码提供；构建和运行应用无需该目录。
+
+公开源码检查（前端命令在 `frontend` 目录执行，桌面命令在项目根目录执行）：
+
+```text
+npx vitest run tests/ai-panel.test.js
+node --test desktop/tests/ai-notifications.test.cjs
+```
+
+本地 Python 回归（需持有根目录 `tests/`，在项目根目录执行）：
 
 ```text
 python -m pytest tests/test_ai_services.py tests/test_ai_api.py
-npx vitest run tests/ai-panel.test.js
-node --test desktop/tests/ai-notifications.test.cjs
 ```
 
 `desktop/scripts/smoke-ai-notifications.cjs` 由 Electron 执行，用合成消息验证原生通知，结果写入 `logs/ai-notification-smoke.json`。不读取微信数据或调用模型。

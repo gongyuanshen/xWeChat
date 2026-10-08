@@ -6,6 +6,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+for name in ('test_ai_deepagents.py', 'test_ai_planned_work.py', 'test_ai_parallel_analysis.py'):
+    if not (ROOT / 'tests' / name).is_file():
+        raise FileNotFoundError(f'离线成本验证需要本地私有测试 tests/{name}；公开源码不包含根 tests/，请使用保留私有测试的本地工作区。')
 sys.path.insert(0, str(ROOT / 'tests'))
 sys.path.insert(0, str(ROOT / 'src'))
 

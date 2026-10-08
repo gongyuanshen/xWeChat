@@ -20,6 +20,9 @@ def main():
     parser.add_argument('--node', default='node')
     parser.add_argument('--skip-install', action='store_true', help='已按锁文件安装依赖时使用')
     args = parser.parse_args()
+    test_files = sorted(str(p.relative_to(ROOT)) for pattern in ('test_ai*.py', 'test_local_search*.py') for p in (ROOT / 'tests').glob(pattern))
+    if not test_files:
+        parser.error('本地完整验收需要根 tests/ 中的私有测试；公开源码不包含这些测试，请使用保留私有测试的本地工作区。')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     node = shutil.which(args.node) or args.node
@@ -59,7 +62,6 @@ def main():
     if not args.skip_install:
         if not npm_command or not check('frontend-install', [*npm_command, 'ci'], ROOT / 'frontend'): return 1
     check('runtime-synthetic', [sys.executable, 'tools/verify_ai_runtime.py'])
-    test_files = sorted(str(p.relative_to(ROOT)) for pattern in ('test_ai*.py', 'test_local_search*.py') for p in (ROOT / 'tests').glob(pattern))
     check('backend-synthetic', [sys.executable, '-m', 'pytest', '-q', *test_files, '--basetemp=' + str(output / 'pytest'), '--tb=short'])
     check('frontend-components', [node, 'node_modules/vitest/vitest.mjs', 'run'], ROOT / 'frontend')
     node_tests = sorted(str(p.relative_to(ROOT / 'frontend')) for p in (ROOT / 'frontend/tests').glob('*.test.mjs'))

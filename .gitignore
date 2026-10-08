@@ -1,4 +1,6 @@
 # Python-generated files
+# Backend regression tests and fixtures are maintained locally and stay private.
+/tests/
 /.work/
 /.superpowers/
 /.agents/

@@ -192,7 +192,6 @@ xwechat/
 ├── frontend/                 # Nuxt 4 / Vue 3 界面
 ├── desktop/                  # Electron 主进程、桌面桥与打包脚本
 ├── src/wechat_decrypt_tool/   # FastAPI、数据处理、AI、媒体与年度统计
-├── tests/                    # Python 测试
 ├── docs/                     # 专题说明及分阶段验收记录
 ├── skills/                   # MCP 客户端配套 Skill
 ├── tools/                    # 开发与验证工具
@@ -203,15 +202,29 @@ xwechat/
 
 ### 常用验证命令
 
+根目录 `tests/` 是本地私有 Python 回归测试，不随公开源码提供；公开用户构建和运行应用无需该目录。`frontend/tests/` 和 `desktop/tests/` 继续随公开源码提供。
+
+公开源码可执行以下检查：
+
 ```powershell
-# 后端、前端和桌面自动化测试
-uv run --locked --group dev --extra voice-transcription python -m pytest
+# AI 运行时合成检查，不调用真实模型
+uv run --locked python tools/verify_ai_runtime.py
+
+# 前端和桌面自动化测试
 npm --prefix frontend test
 node --test (Get-ChildItem -LiteralPath .\desktop\tests -Filter *.test.cjs).FullName
 
 # 桌面使用的前端静态生成
 npm --prefix frontend run generate
 ```
+
+仅在持有本地根目录 `tests/` 时运行 Python 回归：
+
+```powershell
+uv run --locked --group dev --extra voice-transcription python -m pytest tests
+```
+
+`tools/run_ai_acceptance.py` 和 `tools/verify_planned_work_cost.py` 依赖本地根目录 `tests/`，不能在仅含公开源码的检出目录中完成验收。专题文档中的根目录 Python 测试引用及历史通过记录描述本地回归，不表示公开仓库包含这些测试。
 
 按改动范围运行相关检查。自动化测试、真实模型推理、真实微信操作和安装包验收分别验证不同层面，不能互相代替。
 
@@ -293,7 +306,7 @@ CPU 与 GPU 构建使用同一输出目录和文件名，应分别保存产物�
 
 桌面版可在 **“设置 → 桌面行为 → 日志文件 → 打开日志”** 定位实际日志。请提供问题发生前后至少一分钟的相关完整日志，上传前删除密钥、Token、聊天正文和其他敏感信息；不要上传微信数据库。截图和导出样例也应先脱敏。
 
-提交代码时仅包含本次相关源码、测试、依赖锁文件和必要公开资源。数据库、账号密钥、个人配置、模型权重、日志、缓存、验收材料和生成的安装产物应留在本地；`.gitignore` 不会自动移除已被跟踪的文件，提交前仍需检查暂存区。
+提交代码时仅包含本次相关源码、公开的前端／桌面测试、依赖锁文件和必要公开资源。根目录 `tests/`、数据库、账号密钥、个人配置、模型权重、日志、缓存、验收材料和生成的安装产物应留在本地；`.gitignore` 不会自动移除已被跟踪的文件，提交前仍需检查暂存区。
 
 ## 免责声明与严禁商用
 

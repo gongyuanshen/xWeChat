@@ -20,12 +20,6 @@ on:
       - "src/wechat_decrypt_tool/routers/sns.py"
       - "src/wechat_decrypt_tool/sns_export_service.py"
       - "src/wechat_decrypt_tool/sns_media.py"
-      - "tests/test_sns_media.py"
-      - "tests/test_sns_media_route_weflow_default.py"
-      - "tests/test_sns_media_url.py"
-      - "tests/test_sns_video_thumbnail_proxy.py"
-      - "tests/test_request_log_redaction.py"
-      - "tests/test_logging_config_data_dir.py"
 
 permissions:
   contents: read
@@ -78,19 +72,6 @@ jobs:
       - name: Install desktop dependencies
         working-directory: desktop
         run: npm ci
-
-      - name: Run SNS Python unit and integration tests
-        env:
-          PYTHONPATH: src
-        run: >-
-          uv run pytest -q
-          tests/test_sns_media.py
-          tests/test_sns_media_route_weflow_default.py
-          tests/test_sns_media_url.py
-          tests/test_sns_video_thumbnail_proxy.py
-          tests/test_request_log_redaction.py
-          tests/test_logging_config_data_dir.py
-          -k "not html_export and not contacts_export_seal_request_logs_only_redacted_metadata"
 
       - name: Run frontend media source tests
         working-directory: frontend
