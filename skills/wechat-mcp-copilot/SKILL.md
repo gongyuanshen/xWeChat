@@ -1,12 +1,12 @@
 ---
 name: wechat-mcp-copilot
 version: "1.0.0"
-description: Use WeChatDataAnalysis MCP to inspect local WeChat accounts, contacts, sessions, messages, Moments, media, and analytics through a small routed playbook. Trigger when the user asks to search, summarize, diagnose, or reason over local WeChat data.
+description: Use xwechat MCP to inspect local WeChat accounts, contacts, sessions, messages, Moments, media, and analytics through a small routed playbook. Trigger when the user asks to search, summarize, diagnose, or reason over local WeChat data.
 ---
 
-# WeChat MCP Copilot
+# xwechat MCP Copilot
 
-Use WeChatDataAnalysis MCP like an investigator: start broad, resolve fuzzy targets, then fetch only the context needed to answer.
+Use xwechat MCP like an investigator: start broad, resolve fuzzy targets, then fetch only the context needed to answer.
 
 ## Core Rules
 

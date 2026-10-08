@@ -84,6 +84,21 @@ class MatrixTools:
         guard()
         return {'messages': self.selected(conversations, start, end, sender)[-count:], 'warning': ''}
 
+    async def latest(self, account, conversations, start, end, *, sender=None, kind=None,
+                     offsets=None, limit=20, checkpoint=None):
+        if checkpoint is not None:
+            checkpoint()
+        positions = dict(offsets or {})
+        remaining = []
+        for username in conversations:
+            rows = [m for m in self.selected([username], start, end, sender) if not kind or m['kind'] == kind]
+            remaining.extend(list(reversed(rows))[positions.get(username, 0):])
+        page = sorted(remaining, key=lambda m: (m['time'], m['source']), reverse=True)[:limit]
+        for message in page:
+            username = message['username']
+            positions[username] = positions.get(username, 0) + 1
+        return {'messages': page, 'next_offsets': positions, 'has_more': len(remaining) > len(page), 'warning': ''}
+
     async def live_search_segments(self, account, conversations, start, end):
         return {'segments': [{'username': u, 'start': start, 'end': end} for u in conversations], 'warning': ''}
 
@@ -201,6 +216,7 @@ async def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    # Match the source desktop profile pinned by desktop-identity.cjs; this is a storage identity.
     parser.add_argument('--data', type=Path, default=Path(os.environ['APPDATA']) / 'wechat-data-analysis-desktop')
     parser.add_argument('--profile', required=True)
     parser.add_argument('--api-key-env', default='', help='仅从进程环境读取临时测试密钥，不写入配置或结果')

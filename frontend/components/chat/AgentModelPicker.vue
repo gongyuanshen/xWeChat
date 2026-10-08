@@ -14,15 +14,15 @@ const identity = computed(() => JSON.stringify([profile.value?.id, profile.value
 // 当前配置已合并手动能力；上游的简略模型列表不能覆盖已确认的能力。
 const metadata = computed(() => capabilityCache.value[identity.value] || (modelId.value === profile.value?.model ? profile.value?.model_metadata : catalogs.value[profile.value?.id]?.find(m => m.id === modelId.value)) || {})
 const modelName = computed(() => profile.value ? metadata.value.name || modelId.value : '选择模型')
-const labels = { none: '关闭', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' }
+const labels = { none: '直接回答', minimal: '极低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' }
 const capability = computed(() => metadata.value.reasoning_controls || {
   efforts: metadata.value.reasoning_efforts || metadata.value.reasoning_options?.find(item => item.type === 'effort')?.values || [], toggle: false, budget: null,
 })
 const steps = computed(() => {
   const values = (capability.value.efforts || []).map(value => ({ value, label: labels[value] || value, selection: { reasoning_effort: value } }))
   if (capability.value.toggle) {
-    if (!values.some(item => item.value === 'none')) values.unshift({ value: 'disabled', label: '关闭', selection: { thinking_mode: 'disabled' } })
-    if (!capability.value.efforts?.length) values.push({ value: 'enabled', label: '开启', selection: { thinking_mode: 'enabled' } })
+    if (!values.some(item => item.value === 'none')) values.unshift({ value: 'disabled', label: labels.none, selection: { thinking_mode: 'disabled' } })
+    if (!capability.value.efforts?.length) values.push({ value: 'enabled', label: '深度思考', selection: { thinking_mode: 'enabled' } })
   }
   if (!capability.value.efforts?.length && capability.value.budget) return []
   return values
@@ -34,9 +34,9 @@ const minimum = computed(() => budget.value ? budget.value.min - (capability.val
 const maximum = computed(() => budget.value ? budget.value.max : Math.max(0, steps.value.length - 1))
 const value = computed(() => draft.value ?? (budget.value ? props.modelValue.thinking_budget ?? minimum.value : Math.max(0, selectedIndex.value)))
 const label = computed(() => {
-  if (draft.value != null) return budget.value ? (draft.value < budget.value.min ? '关闭' : `${draft.value.toLocaleString()} tokens`) : steps.value[draft.value]?.label || '默认'
+  if (draft.value != null) return budget.value ? (draft.value < budget.value.min ? labels.none : `${draft.value.toLocaleString()} tokens`) : steps.value[draft.value]?.label || '跟随模型默认'
   if (props.modelValue.thinking_budget != null) return `${props.modelValue.thinking_budget.toLocaleString()} tokens`
-  return labels[props.modelValue.reasoning_effort] || props.modelValue.reasoning_effort || ({ enabled: '开启', disabled: '关闭' })[props.modelValue.thinking_mode] || '默认'
+  return labels[props.modelValue.reasoning_effort] || props.modelValue.reasoning_effort || ({ enabled: '深度思考', disabled: labels.none })[props.modelValue.thinking_mode] || '跟随模型默认'
 })
 const progress = computed(() => (isDefault.value && draft.value == null) || maximum.value === minimum.value ? 0 : 100 * (value.value - minimum.value) / (maximum.value - minimum.value))
 const fillWidth = computed(() => `calc(${progress.value}% + ${13 - progress.value * .26}px)`)

@@ -4,16 +4,6 @@ from pathlib import Path
 from ..snapshot_registry import snapshot_cache_dir
 
 
-def wrapped_account_dir(account_dir: Path) -> Path:
-    """Return the per-account wrapped working directory.
-
-    We keep all wrapped artifacts under `<account>/_wrapped` so they travel
-    with the decrypted databases and are easy to inspect/backup.
-    """
-
-    return account_dir / "_wrapped"
-
-
 def wrapped_cache_dir(account_dir: Path) -> Path:
     d = snapshot_cache_dir(account_dir) / "_wrapped" / "cache"
     d.mkdir(parents=True, exist_ok=True)

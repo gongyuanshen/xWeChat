@@ -1,6 +1,6 @@
 # Routing
 
-Use this first for every WeChatDataAnalysis MCP task.
+Use this first for every xwechat MCP task.
 
 ## First Calls
 

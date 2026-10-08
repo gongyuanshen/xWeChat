@@ -1,2 +1,1 @@
-"""MCP integration for WeChatDataAnalysis."""
-
+"""MCP integration for xwechat."""

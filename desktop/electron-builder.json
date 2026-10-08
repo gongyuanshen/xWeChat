@@ -22,7 +22,13 @@
     },
     {
       "from": "resources/backend",
-      "to": "backend"
+      "to": "backend",
+      "filter": [
+        "wechat-backend.exe",
+        "native/*.dll",
+        "native/weflow_wasm/*.js",
+        "native/weflow_wasm/*.wasm"
+      ]
     },
     {
       "from": "node_modules/ffmpeg-static",

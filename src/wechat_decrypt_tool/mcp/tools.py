@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from typing import Any, Callable, Optional
 from urllib.parse import urlencode
 
@@ -11,9 +10,7 @@ from .. import __version__ as APP_VERSION
 from ..chat_helpers import (
     _iter_message_db_paths,
     _list_decrypted_accounts,
-    _quote_ident,
     _resolve_account_dir,
-    _resolve_msg_table_name,
 )
 from ..chat_accounts import resolve_chat_account_context
 from ..snapshot_registry import resolve_account_database_dir, snapshot_cache_dir
@@ -121,8 +118,8 @@ def _chat_source(args: dict[str, Any]) -> str:
 def _int(args: dict[str, Any], key: str, default: int = 0, *, minimum: int | None = None, maximum: int | None = None) -> int:
     try:
         value = int(args.get(key, default))
-    except Exception:
-        value = int(default)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{key} must be an integer.") from exc
     if minimum is not None and value < minimum:
         value = minimum
     if maximum is not None and value > maximum:
@@ -148,7 +145,7 @@ def _bool(args: dict[str, Any], key: str, default: bool = False) -> bool:
         return True
     if text in {"0", "false", "no", "n", "off"}:
         return False
-    return default
+    raise ValueError(f"{key} must be a boolean.")
 
 
 def _list_str(args: dict[str, Any], key: str) -> list[str]:
@@ -612,7 +609,7 @@ def _wrapped_meta(args: dict[str, Any], _: McpToolContext) -> dict[str, Any]:
         "scope": "global",
         "cacheOnly": True,
         "availableYears": _wrapped_available_cache_years(account_dir, svc),
-        "cards": [dict(c) for c in getattr(svc, "_WRAPPED_CARD_MANIFEST", ())],
+        "cards": [dict(c) for c in svc._WRAPPED_CARD_MANIFEST],
     }
 
 
@@ -642,66 +639,48 @@ def _wrapped_cache_dir_readonly(account_dir: Any) -> Any:
     return snapshot_cache_dir(account_dir) / "_wrapped" / "cache"
 
 
-def _wrapped_cache_version(svc: Any) -> int:
-    return int(getattr(svc, "_CACHE_VERSION", 0))
-
-
-def _wrapped_implemented_upto(svc: Any) -> int:
-    return int(getattr(svc, "_IMPLEMENTED_UPTO_ID", 0))
-
-
-def _wrapped_default_year(svc: Any) -> int:
-    try:
-        return int(svc._default_year())
-    except Exception:
-        from datetime import datetime
-
-        return int(datetime.now().year)
-
-
 def _wrapped_full_cache_path(account_dir: Any, year: int, svc: Any) -> Any:
-    version = _wrapped_cache_version(svc)
-    upto = _wrapped_implemented_upto(svc)
+    version = svc._CACHE_VERSION
+    upto = svc._IMPLEMENTED_UPTO_ID
     return _wrapped_cache_dir_readonly(account_dir) / f"global_{int(year)}_upto_{upto}_v{version}.json"
 
 
 def _wrapped_card_cache_path(account_dir: Any, year: int, card_id: int, svc: Any) -> Any:
-    version = _wrapped_cache_version(svc)
+    version = svc._CACHE_VERSION
     return _wrapped_cache_dir_readonly(account_dir) / f"global_{int(year)}_card_{int(card_id)}_v{version}.json"
 
 
 def _read_json_file(path: Any) -> Any:
     try:
-        if not path.exists() or not path.is_file():
-            return None
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Cannot read Wrapped cache {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Wrapped cache {path} must contain a JSON object")
+    return value
 
 
 def _wrapped_available_cache_years(account_dir: Any, svc: Any) -> list[int]:
     cache_dir = _wrapped_cache_dir_readonly(account_dir)
     if not cache_dir.exists() or not cache_dir.is_dir():
         return []
-    version = _wrapped_cache_version(svc)
-    upto = _wrapped_implemented_upto(svc)
+    version = svc._CACHE_VERSION
+    upto = svc._IMPLEMENTED_UPTO_ID
     years: set[int] = set()
     patterns = [
         f"global_*_upto_{upto}_v{version}.json",
         f"global_*_card_*_v{version}.json",
     ]
     for pattern in patterns:
-        try:
-            paths = list(cache_dir.glob(pattern))
-        except Exception:
-            paths = []
-        for path in paths:
+        for path in cache_dir.glob(pattern):
             parts = str(path.stem or "").split("_")
             if len(parts) < 2:
                 continue
             try:
                 year = int(parts[1])
-            except Exception:
+            except ValueError:
                 continue
             if year > 0:
                 years.add(year)
@@ -710,7 +689,7 @@ def _wrapped_available_cache_years(account_dir: Any, svc: Any) -> list[int]:
 
 def _wrapped_cache_year(account_dir: Any, requested_year: Optional[int], svc: Any) -> int:
     years = _wrapped_available_cache_years(account_dir, svc)
-    year = int(requested_year or _wrapped_default_year(svc))
+    year = int(requested_year or svc._default_year())
     if years and year not in years:
         return int(years[0])
     return year
@@ -870,16 +849,10 @@ async def _mobile_search_context(args: dict[str, Any], ctx: McpToolContext) -> d
         "warnings": [],
     }
 
-    messages = _safe_call("messages", lambda: None)
     try:
-        messages["data"] = await _search_messages({"account": account, "query": query, "limit": limit, "offset": _int(args, "offset", 0, minimum=0), "source": chat_source}, ctx)
-        messages["ok"] = True
+        payload["messages"] = await _search_messages({"account": account, "query": query, "limit": limit, "offset": _int(args, "offset", 0, minimum=0), "source": chat_source}, ctx)
     except Exception as exc:
-        messages = {"ok": False, "error": str(exc), "section": "messages"}
-    if messages["ok"]:
-        payload["messages"] = messages["data"]
-    else:
-        payload["warnings"].append(messages)
+        payload["warnings"].append({"ok": False, "error": str(exc), "section": "messages"})
 
     sessions = _safe_call("sessions", lambda: _resolve_session({"account": account, "query": query, "limit": limit, "source": chat_source}, ctx))
     if sessions["ok"]:
@@ -1409,7 +1382,7 @@ PAGING = {
 def _install_tools() -> None:
     _register("wechat.core.get_status", "Return MCP service readiness, account availability, and package list.", object_schema(), _status, package="wechat.core")
     _register("wechat.core.list_tools", "List WeChat MCP tools, optionally filtered by package.", object_schema({"package": string_schema("Optional package name."), "cursor": string_schema("Optional numeric cursor."), "limit": int_schema("Maximum tools to return.", minimum=1, maximum=100)}), _tools_catalog, package="wechat.core")
-    _register("wechat.core.list_accounts", "List WeChat chat accounts available to WeChatDataAnalysis.", object_schema(), _list_accounts, package="wechat.core")
+    _register("wechat.core.list_accounts", "List WeChat chat accounts available to xwechat.", object_schema(), _list_accounts, package="wechat.core")
     _register("wechat.core.get_account_info", "Return database and account metadata for one chat account.", object_schema(COMMON_ACCOUNT), _get_account_info, package="wechat.core")
 
     _register("wechat.contacts.list_contacts", "List contacts, groups, and official accounts with optional fuzzy keyword filtering. Reads the selected decrypted snapshot.", object_schema({**COMMON_ACCOUNT, **PAGING, **CHAT_SOURCE, "keyword": string_schema("Optional fuzzy keyword."), "include_friends": bool_schema("Include friends.", default=True), "include_groups": bool_schema("Include groups.", default=True), "include_officials": bool_schema("Include official accounts.", default=True)}), _list_contacts, package="wechat.contacts")

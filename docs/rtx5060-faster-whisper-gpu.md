@@ -36,7 +36,7 @@ uv sync --no-editable --extra voice-transcription
 建议把缓存放在数据盘，例如：
 
 ```bash
-export HF_HOME=/mnt/sdb/wechat-data-analysis/hf-cache
+export HF_HOME=/mnt/sdb/xwechat/hf-cache
 export WECHAT_TOOL_WHISPER_MODEL=medium
 export WECHAT_TOOL_WHISPER_ALLOW_DOWNLOAD=0
 ```

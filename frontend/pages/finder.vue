@@ -171,7 +171,7 @@ import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
-useHead({ title: '视频号直播 - 微信数据分析助手' })
+useHead({ title: '视频号直播 - xwechat' })
 
 const api = useApi()
 const chatAccounts = useChatAccountsStore()

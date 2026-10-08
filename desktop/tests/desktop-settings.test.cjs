@@ -15,9 +15,11 @@ test("parseDesktopSettingsText accepts installer JSON with a UTF-8 BOM", () => {
   });
 });
 
-test("parseDesktopSettingsText normalizes non-object JSON to an empty settings object", () => {
-  assert.deepEqual(parseDesktopSettingsText("null"), {});
-  assert.deepEqual(parseDesktopSettingsText("[]"), {});
+test("parseDesktopSettingsText rejects malformed or non-object settings", () => {
+  for (const text of ["null", "[]", "1", '"text"', "", "{broken"]) {
+    assert.throws(() => parseDesktopSettingsText(text));
+  }
+  assert.deepEqual(parseDesktopSettingsText("{}"), {});
 });
 
 test("writeDesktopSettingsFileAtomic replaces settings without leaving a temp file", () => {

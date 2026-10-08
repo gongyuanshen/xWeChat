@@ -1,5 +1,5 @@
 /* ════════════════════════════════════════════════════════════
-   WeChatDataAnalysis — 官网
+   xwechat — 官网
    Dark decrypt-lab · cinematic scroll narrative
    ════════════════════════════════════════════════════════════ */
 
@@ -710,6 +710,10 @@ main { position: relative; z-index: 1; }
   will-change: transform; backface-visibility: hidden;
 }
 .deck__card img { width: 100%; height: 100%; object-fit: cover; object-position: top; display: block; }
+/* 旧截图约 75px / 1919px 的应用侧栏只在展示层裁去；PNG/GIF 原件与账号头像不改。 */
+.deck__card img[data-legacy-sidebar] {
+  width: 104.166667%; max-width: none; margin-left: -4.166667%; object-position: right top;
+}
 .deck__card--code { display: grid; place-content: center; background: #060a08; padding: clamp(18px, 3vw, 52px); }
 .deck__card--code pre { font-size: clamp(12px, 1.4vw, 18px); line-height: 2.4; }
 .c-dim { color: var(--ink-faint); }
@@ -1061,8 +1065,6 @@ main { position: relative; z-index: 1; }
   .cta__slug-t:last-child { display: none; }
   .cta__leader { display: none; }
   .dhud__left { flex-direction: column; gap: 4px; }
-  .river-gates i { display: none; }
-  .river-exits span { padding: 6px 10px; font-size: 10px; }
 }
 
 /* ─────────────────────────── reduced motion ─────────────────────────── */

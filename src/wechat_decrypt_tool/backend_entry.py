@@ -3,19 +3,24 @@
 import multiprocessing
 import sys
 
-import uvicorn
-
-from wechat_decrypt_tool.desktop_parent_watchdog import (
-    start_desktop_parent_watchdog_from_env,
-)
-from wechat_decrypt_tool.runtime_settings import (
-    default_backend_host,
-    read_effective_backend_host,
-    read_effective_backend_port,
-)
-
-
 def main() -> None:
+    if sys.argv[1:2] == ["--wxgf-decode-worker"]:
+        from wechat_decrypt_tool.wxgf_codec import worker_main
+
+        worker_main(sys.argv[2:])
+        return
+
+    import uvicorn
+
+    from wechat_decrypt_tool.desktop_parent_watchdog import (
+        start_desktop_parent_watchdog_from_env,
+    )
+    from wechat_decrypt_tool.runtime_settings import (
+        default_backend_host,
+        read_effective_backend_host,
+        read_effective_backend_port,
+    )
+
     if "--smoke-backend" in sys.argv[1:]:
         import json
         from wechat_decrypt_tool.api import app
@@ -24,7 +29,7 @@ def main() -> None:
             "ok": True,
             "frozen": bool(getattr(sys, "frozen", False)),
             "platform": sys.platform,
-            "title": getattr(app, "title", "wechat-decrypt-tool"),
+            "title": app.title,
         }
         print(json.dumps(payload, ensure_ascii=True))
         return

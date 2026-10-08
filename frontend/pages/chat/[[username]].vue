@@ -59,6 +59,8 @@ import { heatColor } from '~/lib/wrapped/heatmap'
 import { parseTextWithEmoji } from '~/lib/wechat-emojis'
 import { PROJECT_VOICE_TRANSCRIPTS_INVALIDATED_EVENT } from '~/lib/voice-transcript-invalidation'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
+import { showErrorAlert } from '~/composables/useErrorNotice'
+import { createAiNavigationConsumer } from '~/utils/createAiNavigationConsumer'
 import { usePrivacyStore } from '~/stores/privacy'
 
 defineOptions({ name: 'ChatPage' })
@@ -67,7 +69,7 @@ definePageMeta({
 })
 
 useHead({
-  title: '聊天记录 - 微信数据库解密工具'
+  title: '聊天记录 - xwechat'
 })
 
 const route = useRoute()
@@ -1276,29 +1278,33 @@ const locateInsightSource = async source => {
     throw error
   }
 }
-const consumeAiNavigation = async () => {
-  if (!chatPageActive.value) return
-  const target = aiNavigation.value
-  if (!target) return
-  aiDiagnosticApi.diagnostic('navigation.started', { task_id: target.task_id, component: 'notification' })
-  try {
-  await chatAccounts.ensureLoaded()
-  if (!chatPageActive.value || aiNavigation.value !== target) return
-  if (target.account !== selectedAccount.value) chatAccounts.setSelectedAccount(target.account)
-  await nextTick()
-  // 等待现有账号切换流程结束，防止定位结果被初始会话加载覆盖。
-  for (let i = 0; i < 100 && (accountBootstrapInProgress || accountChangeInProgress); i++) await new Promise(resolve => setTimeout(resolve, 100))
-  if (!chatPageActive.value) return
-  if (aiNavigation.value !== target) { aiDiagnosticApi.diagnostic('response.stale', { task_id: target.task_id, component: 'notification' }); return }
-  aiSidebarOpen.value = true
-  aiFocusTaskId.value = target.task_id || ''
-  if (target.username && target.anchor) await locateAiSource(target)
-  aiNavigation.value = null
-  aiDiagnosticApi.diagnostic('navigation.finished', { task_id: target.task_id, component: 'notification' })
-  } catch {
-    aiDiagnosticApi.diagnostic('navigation.failed', { task_id: target.task_id, component: 'notification' })
-  }
-}
+const consumeAiNavigation = createAiNavigationConsumer({
+  navigation: aiNavigation,
+  account: selectedAccount,
+  isActive: () => chatPageActive.value,
+  ensureLoaded: () => chatAccounts.ensureLoaded(),
+  selectAccount: account => chatAccounts.setSelectedAccount(account),
+  waitForAccount: async () => {
+    await nextTick()
+    // 等待现有账号切换流程结束，防止定位结果被初始会话加载覆盖。
+    for (let i = 0; i < 100 && (!snapshotRefreshReady.value || accountBootstrapInProgress || accountChangeInProgress); i++) await new Promise(resolve => setTimeout(resolve, 100))
+    if (!snapshotRefreshReady.value || accountBootstrapInProgress || accountChangeInProgress) throw new Error('聊天初始化或账号切换尚未完成，请稍后重试定位')
+  },
+  showSourceChat: async () => {
+    aiSidebarOpen.value = false
+    insightsPanelOpen.value = false
+    await nextTick()
+  },
+  openTask: taskId => {
+    aiSidebarOpen.value = true
+    aiFocusTaskId.value = taskId
+  },
+  locateSource: source => source.origin === 'wrapped'
+    ? searchState.locateByAnchorId({ targetUsername: source.username, anchorId: source.anchor, kind: 'wrapped', label: '年度总结来源', throwOnError: true })
+    : locateAiSource(source),
+  diagnostic: (event, context) => aiDiagnosticApi.diagnostic(event, context),
+  showError: showErrorAlert,
+})
 watch(aiNavigation, () => { void consumeAiNavigation() })
 onMounted(() => { void consumeAiNavigation() })
 

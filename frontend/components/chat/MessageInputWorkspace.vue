@@ -347,12 +347,15 @@ const handleSend = async () => {
 
   try {
     const api = getApi()
-    await api.sendChatMessage({
+    const receipt = await api.sendChatMessage({
       account: account.value,
       username: contactUsername.value,
       display_name: contactDisplayName.value || null,
       content: draftText.value
     })
+    if (receipt?.success !== true) {
+      throw Object.assign(new Error('后端未确认消息发送成功，请检查微信后再决定是否重试'), { code: 'WECHAT_SEND_UNCONFIRMED' })
+    }
 
     // Debug-First / Let-It-Fail: Draft is ONLY cleared on successful send!
     draftText.value = ''
@@ -508,12 +511,13 @@ const handleAiSuggest = async () => {
       ...(choice?.profile_id ? { selected_model: { ...choice } } : {})
     })
 
-    if (res?.suggestion) {
-      draftText.value = res.suggestion
-      await nextTick()
-      resizeDraft()
-      textareaRef.value?.focus()
+    if (typeof res?.suggestion !== 'string' || !res.suggestion.trim()) {
+      throw new Error('AI 建议未返回有效的回复草稿')
     }
+    draftText.value = res.suggestion
+    await nextTick()
+    resizeDraft()
+    textareaRef.value?.focus()
   } catch (err) {
     const code = err.code || err.data?.code || (typeof err.detail === 'object' ? err.detail?.code : '') || 'AI_SUGGEST_ERROR'
     const message = err.message || err.detail || err.data?.detail || '获取 AI 建议失败'

@@ -1,5 +1,32 @@
 # 聊天 Agent
 
+## 独立 AI 助手（2026-10-07）
+
+侧栏「AI 助手」打开 `/agent`，无需先选联系人。模型、API 地址、密钥、推理能力和用量沿用现有「设置 → AI 服务」；未配置模型会明确提示并提供设置入口。聊天页右侧的原助手继续保留。
+
+- 首页居中输入，开始对话后输入区位于底部。回答、过程、补充要求、停止和继续复用现有组件及 DeepAgents 链路。
+- `@聊天` 默认为当前微信账号的所有可读私聊和群聊；可搜索、多选。选中的真实会话 ID 是服务器读取边界，模型不能扩大范围。
+- 每个独立 AI 对话的范围固定。改变范围会进入新对话并保留输入草稿，下次发送时创建线程；旧历史、原文和笔记保留，但不会带入新范围。运行中需先停止才能改变范围。
+- 历史只显示独立入口创建的对话，支持搜索、切换、重命名和删除；打开历史恢复其范围。账号及聊天侧栏的草稿、当前对话分开保存。
+- 点击引用可预览原文和前后文，再定位到聊天。定位失败显示错误；引用跳转不自动打开聊天助手，任务通知仍保留原行为。
+
+接口复用 `/api/ai/agent`：创建线程新增 `origin`（默认 `chat`）和 `chat_scope`。独立入口传 `origin: "agent"`、`username: ""`；`chat_scope: null` 代表全账号，非空 ID 列表代表所选聊天。空列表、重复 ID、不属于账号或不可读的会话会报错。列表可传 `origin=agent`；不传保持原行为，缺少字段的旧记录归为 `chat`。独立范围不可通过 PATCH 修改。每轮运行和子任务保存独立范围快照，不使用工具会更新的 `thread.scope` 作为读取授权。
+
+继续使用已有关键词及语义检索，沿用覆盖与失败说明；不重建索引、不新增依赖。本轮没有接入 Relink 运行时、上传、跨对话长期记忆或对外 Agent API。
+
+### 本轮验证
+
+- 后端：新增 `tests/test_ai_standalone_agent.py` 覆盖范围、账号隔离、历史兼容、继续/重启/子任务继承、新线程上下文隔离及资料/上下文/媒体越界拒绝；运行了相关 Agent、历史、模型执行、范围和 SSE 回归。自动测试使用隔离存储和受控响应。
+- 前端：`npm test` 通过（Node 98 项、Vitest 850 项）；`npm run generate` 成功生成含 `/agent` 的 34 个路由。已有构建警告仍在，未把警告当作本轮功能错误处理。
+- 浏览器：真实组件配合合成接口，检查 1440px、900px、420px、深浅色、空态/运行/完成/失败、范围键盘操作、历史列表和来源预览。通过 Chrome 组合输入协议验证中文确认键不发送，不代表 Windows 原生输入法及桌面安装包已完成验收。
+- 真实模型：复用当前选择的 Xiaomi MiMo `mimo-v2.6-pro`，在独立目录中读取 2 个虚构聊天的 13 条消息。跨聊天改期查找、限定活动时间线、同线程结清追问共 3 项通过；最终成功轮次共 9 次 API 调用，输入 45,740 / 输出 2,340 Token。前期验收适配器缺少接口的一次失败另产生 2 次调用，输入 6,470 / 输出 175 Token，不计入上述成功轮次数值。回答与引用已逐条核对；此结果不代表大规模私人聊天召回或真实微信操作验收。
+
+可复现脚本：`tools/verify_standalone_agent.py --database <现有AI数据库> --output <新的隔离目录>`，由项目 Python 环境运行。它只读当前模型配置，聊天来自虚构内存样本；凭据只在内存使用，不写入验收目录。脚本的越界文字检查是完整样本文字匹配，需结合服务器范围测试及人工回答核查，不能单独证明所有摘要片段均无泄漏。
+
+浏览器合成入口：`frontend/tests/fixtures/agent-standalone.html`（已有 Vite acceptance 配置）。本轮结果和截图保存在本地 `.work/standalone-agent/`，不作为待发布用户数据。
+
+## 既有说明与历史记录
+
 当前引擎以 [DeepAgents v3 架构与迁移说明](deepagents-migration.md) 为准，验收见 [迁移验收](deepagents-acceptance.md)。以下内容保留作为迁移前的历史说明，其中旧检查点、固定执行阶段和旧任务继续行为不再适用于新运行。旧版 [Mac 记录](ai-macos-compatibility.md) 不代表本轮通过。
 
 聊天页右上角 AI 默认进入对话模式；原消息总结、自动任务、关注提醒位于「工具」。侧栏和大视图共享状态。
@@ -17,9 +44,9 @@
 
 ## 数据与接口
 
-业务数据位于现有 output/ai/ai.sqlite3，使用 agent_thread、agent_run、agent_settings 类型。阶段检查点位于 agent_checkpoints.sqlite3，节点只保存运行标识；密钥执行时解析，不进入检查点。
+业务数据位于现有 output/ai/ai.sqlite3，使用 agent_thread、agent_run 类型。旧人工额度设置接口已移除，历史设置不参与执行。阶段检查点位于 agent_checkpoints.sqlite3，节点只保存运行标识；密钥执行时解析，不进入检查点。
 
-`/api/ai/agent` 提供 settings、threads、threads/{id}/messages、runs/{id}、runs/{id}/stop、runs/{id}/continue 和 events。消息带客户端 request_id 去重；运行中再次发送进入同一任务并增加补充版本。
+`/api/ai/agent` 提供 threads、threads/{id}/messages、runs/{id}、runs/{id}/stop、runs/{id}/continue 和 events。消息带客户端 request_id 去重；运行中再次发送进入同一任务并增加补充版本。
 
 SSE 使用稳定事件 ID，支持 Last-Event-ID 重连，前端同时定期查询。完全退出后未完成任务标记为中断，不自动产生新的模型费用。
 

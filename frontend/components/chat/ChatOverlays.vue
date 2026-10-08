@@ -993,18 +993,9 @@
         v-if="canShowVoiceContextAction(contextMenu.message)"
         class="chat-context-menu__item block w-full text-left px-3 py-2"
         type="button"
-        @click="onTranscribeVoiceClick('local')"
+        @click="onTranscribeVoiceClick"
       >
         本地转文字
-      </button>
-      <button
-        v-if="canShowVoiceContextAction(contextMenu.message, 'wechat')"
-        class="chat-context-menu__item block w-full text-left px-3 py-2"
-        type="button"
-        title="会短暂切换微信；同一分钟多条语音无法唯一定位时会报错。"
-        @click="onTranscribeVoiceClick('wechat')"
-      >
-        微信转文字
       </button>
       <button
         class="chat-context-menu__item block w-full text-left px-3 py-2"
@@ -1098,29 +1089,27 @@ export default defineComponent({
 
     const previewImageScaleText = computed(() => `${Math.round(previewImageScale.value * 100)}%`)
 
-    const canShowVoiceContextAction = (message, source = 'local') => {
+    const canShowVoiceContextAction = (message) => {
       if (!message || String(message?.renderType || '').trim() !== 'voice' || readMaybeRef(props.state?.privacyMode)) {
         return false
       }
       const status = String(message?.voiceTranscriptStatus || 'idle').trim().toLowerCase()
       if (status === 'loading' || status === 'success' || String(message?.voiceTranscript || '').trim()) return false
-      const transcribe = source === 'wechat' ? props.state?.transcribeVoiceNatively : props.state?.transcribeVoiceLocally
-      if (typeof transcribe !== 'function') return false
-      if (source === 'local' && readMaybeRef(props.state?.voiceTranscriptionStatusLoading) === true) return false
+      if (typeof props.state?.transcribeVoiceLocally !== 'function') return false
+      if (readMaybeRef(props.state?.voiceTranscriptionStatusLoading) === true) return false
       return true
     }
 
-    const onTranscribeVoiceClick = (source) => {
+    const onTranscribeVoiceClick = () => {
       const menuRef = props.state?.contextMenu
       const menu = menuRef && typeof menuRef === 'object' && 'value' in menuRef ? menuRef.value : menuRef
       const message = menu?.message
-      const transcribe = source === 'wechat' ? props.state?.transcribeVoiceNatively : props.state?.transcribeVoiceLocally
+      const transcribe = props.state?.transcribeVoiceLocally
       if (!message || typeof transcribe !== 'function') return
       const status = String(message?.voiceTranscriptStatus || '').trim().toLowerCase()
       if (status === 'loading') return
       if (typeof props.state?.closeContextMenu === 'function') props.state.closeContextMenu()
-      if (source === 'wechat') void transcribe(message)
-      else void transcribe(message, { force: status === 'error' })
+      void transcribe(message, { force: status === 'error' })
     }
 
     watch(

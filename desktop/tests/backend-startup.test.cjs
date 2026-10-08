@@ -13,7 +13,7 @@ test("health checks require the expected 200 JSON identity", () => {
   assert.equal(
     isBackendHealthResponse({
       statusCode: 200,
-      body: JSON.stringify({ status: "healthy", service: "微信解密工具" }),
+      body: JSON.stringify({ status: "healthy", service: "xwechat" }),
     }),
     true
   );
@@ -37,14 +37,9 @@ test("backend startup timeout accepts a bounded support override", () => {
     resolveBackendStartupTimeoutMs({ isPackaged: true, envValue: "240000" }),
     240_000
   );
-  assert.equal(
-    resolveBackendStartupTimeoutMs({ isPackaged: true, envValue: "not-a-number" }),
-    PACKAGED_BACKEND_STARTUP_TIMEOUT_MS
-  );
-  assert.equal(
-    resolveBackendStartupTimeoutMs({ isPackaged: true, envValue: "999" }),
-    PACKAGED_BACKEND_STARTUP_TIMEOUT_MS
-  );
+  for (const envValue of ["not-a-number", "999", "600001", "10000.5"]) {
+    assert.throws(() => resolveBackendStartupTimeoutMs({ isPackaged: true, envValue }), /启动超时/);
+  }
 });
 
 test("a slow live process does not trigger port walking even after binding its port", () => {

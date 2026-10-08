@@ -1,12 +1,13 @@
 import asyncio
 import json
+from typing import Literal
 from pathlib import PurePosixPath
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 
 from .ai import local_only, account_name
-from ..ai.agent_schemas import ThreadInput, ThreadUpdate, TurnInput, AgentSettings, RestartInput
+from ..ai.agent_schemas import ThreadInput, ThreadUpdate, TurnInput, RestartInput
 from ..ai.agent_service import get_agent_service
 
 router = APIRouter(prefix='/api/ai/agent', dependencies=[Depends(local_only)])
@@ -20,19 +21,8 @@ def thread(id, account):
         raise HTTPException(404, str(exc)) from None
 
 
-@router.get('/settings')
-def settings():
-    return get_agent_service().settings()
-
-
-@router.put('/settings')
-def update_settings(body: AgentSettings):
-    # 旧版本写入请求保持兼容，但不再保存或启用人工额度。
-    return get_agent_service().settings()
-
-
 @router.get('/threads')
-def threads(account: str, username: str = ''):
+def threads(account: str, username: str = '', origin: Literal['chat', 'agent'] | None = None):
     store = get_agent_service().store
     owner = account_name(account)
     records = store.list('agent_thread', owner)
@@ -41,6 +31,10 @@ def threads(account: str, username: str = ''):
         if record.get('parent_run_id'):
             continue
         if username and record['username'] != username:
+            continue
+        record.setdefault('origin', 'chat')
+        record.setdefault('chat_scope', None)
+        if origin is not None and record['origin'] != origin:
             continue
         item = {k: v for k, v in record.items() if k not in ('messages', 'memory')}
         # 列表只返回最新任务的状态，不加载证据或把回答内容带入列表。
@@ -62,7 +56,7 @@ async def create_thread(body: ThreadInput):
             # 删除完成后再验证账号；重新导入的同名账号可恢复写入。
             service.ai.deleted_accounts.discard(owner)
             service.store.revoked_accounts.discard(owner)
-            return await service.create_thread(owner, body.username, body.title)
+            return await service.create_thread(owner, body.username, body.title, origin=body.origin, chat_scope=body.chat_scope)
         finally:
             lock.release()
     except ValueError as exc:
@@ -78,7 +72,7 @@ def get_thread(id: str, account: str):
 async def edit_thread(id: str, account: str, body: ThreadUpdate):
     record = thread(id, account)
     try:
-        return await get_agent_service().edit_thread(id, record['account'], **body.model_dump())
+        return await get_agent_service().edit_thread(id, record['account'], **body.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
 

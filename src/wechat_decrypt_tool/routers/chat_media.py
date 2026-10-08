@@ -4,11 +4,9 @@ from functools import lru_cache
 import hashlib
 import html
 import ipaddress
-import mimetypes
 import os
 import sqlite3
 import subprocess
-import sys
 import time
 import re
 from pathlib import Path
@@ -18,8 +16,7 @@ from urllib.parse import quote, urlparse
 import requests
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
-from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field, conint, field_validator
+from pydantic import BaseModel, Field, conint
 
 
 from ..account_workers import AccountFileResponse, account_to_thread
@@ -46,7 +43,6 @@ from ..chat_helpers import _extract_md5_from_packed_info, _load_contact_rows, _p
 from ..path_fix import PathFixRoute
 from ..perf_trace import create_perf_trace
 from ..runtime_settings import remote_calls_enabled
-from .chat_send import get_wechat_bridge
 
 from ..voice_transcription import (
     VOICE_MODEL_DOWNLOAD_MANAGER,
@@ -78,25 +74,6 @@ class VoiceTranscriptionRequest(BaseModel):
     server_id: int = Field(..., description="语音消息服务端 ID")
     account: Optional[str] = Field(None, description="账号目录名")
     force: bool = Field(False, description="忽略缓存并重新识别")
-
-
-class NativeVoiceTranscriptionRequest(BaseModel):
-    account: str = Field(..., strict=True, min_length=1, description="当前账号目录名")
-    username: str = Field(..., strict=True, min_length=1, description="目标会话 username")
-    display_name: Optional[str] = Field(None, strict=True, description="目标会话展示名称")
-    message_id: str = Field(
-        ..., strict=True, pattern=r"(?i)^message_[0-9]+:(?:Msg|Chat)_[0-9a-f]{32}:[1-9][0-9]*$",
-        description="包含分库、消息表和 localId 的完整消息 ID",
-    )
-    server_id: str = Field(..., strict=True, pattern=r"^[1-9][0-9]*$", description="准确的十进制服务端 ID 字符串")
-    create_time: int = Field(..., strict=True, gt=0, description="消息创建时间，Unix 秒")
-
-    @field_validator("account", "username")
-    @classmethod
-    def validate_non_empty(cls, value: str) -> str:
-        if not value.strip():
-            raise ValueError("字段不能为空或纯空白字符")
-        return value
 
 
 class VoiceTranscriptionCacheLookupRequest(BaseModel):
@@ -319,10 +296,6 @@ def _resolve_video_path_from_weflow_index(
                 except Exception:
                     continue
     return None
-
-
-def _sql_quote(value: str) -> str:
-    return "'" + str(value or "").replace("'", "''") + "'"
 
 
 def _build_cached_media_response(request: Optional[Request], data: bytes, media_type: str) -> Response:
@@ -1646,21 +1619,6 @@ def _lookup_image_md5_by_server_id_from_messages_cached(account_dir_str: str, se
             return md5_norm
 
     return ""
-
-
-def _quote_sql_identifier(value: str) -> str:
-    return '"' + str(value or "").replace('"', '""') + '"'
-
-
-def _pick_row_value(row: dict[str, Any], *names: str) -> Any:
-    if not isinstance(row, dict):
-        return None
-    lowered = {str(k).lower(): v for k, v in row.items()}
-    for name in names:
-        key = str(name or "").lower()
-        if key in lowered:
-            return lowered[key]
-    return None
 
 
 def _is_safe_http_url(url: str) -> bool:
@@ -3434,22 +3392,6 @@ async def delete_all_chat_voice_transcription_caches(request: Request):
         ) from exc
 
 
-async def transcribe_chat_voice_native(req: NativeVoiceTranscriptionRequest, request: Request):
-    _require_local_voice_mutation(request)
-    session_title = req.display_name.strip() if req.display_name and req.display_name.strip() else req.username.strip()
-    return await get_wechat_bridge().transcribe_voice_native(
-        session_title, account=req.account, username=req.username,
-        message_id=req.message_id, server_id=req.server_id, create_time=req.create_time,
-    )
-
-
-# Message identities and titles use normal JSON escapes, not filesystem path repair.
-router.add_api_route(
-    "/api/chat/media/voice/transcription/native", transcribe_chat_voice_native,
-    methods=["POST"], summary="请求微信转写唯一定位的单条语音", route_class_override=APIRoute,
-)
-
-
 @router.post("/api/chat/media/voice/transcription", summary="将语音消息转成中文文字")
 async def transcribe_chat_voice(req: VoiceTranscriptionRequest, request: Request):
     _require_local_voice_mutation(request)
@@ -3748,7 +3690,10 @@ async def open_chat_media_folder(
             candidates.append(account_dir)
             p = candidates[0]
         else:
-            raise HTTPException(status_code=404, detail="File not found.")
+            detail = "File not found."
+            if kind_key == "file":
+                detail = f"未找到本地文件。请先在电脑版微信中下载该文件，再回到本软件打开。\n\n{detail}"
+            raise HTTPException(status_code=404, detail=detail)
 
     try:
         target = str(p.resolve())

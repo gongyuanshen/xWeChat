@@ -1113,7 +1113,7 @@ import { formatBytes } from '~/lib/format-bytes'
 import { useSnapshotRefresh } from '~/composables/chat/useSnapshotRefresh'
 import SnapshotRefreshControl from '~/components/chat/SnapshotRefreshControl.vue'
 
-useHead({ title: '朋友圈 - 微信数据分析助手' })
+useHead({ title: '朋友圈 - xwechat' })
 
 const api = useApi()
 

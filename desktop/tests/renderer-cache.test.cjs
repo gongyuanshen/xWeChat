@@ -13,7 +13,7 @@ function setup({ staticUi = '1', fail = false, previous = 'old' } = {}) {
   const calls = [], settings = { lastSeenUiBuildId: previous };
   const context = { app: { isPackaged: false }, process: { env: { WECHAT_TOOL_STATIC_UI: staticUi } },
     readPackagedUiBuildId: () => 'new', loadDesktopSettings: () => settings, desktopSettings: settings,
-    persistDesktopSettings: () => calls.push('persist'), logMain: () => {},
+    persistDesktopSettings: next => { Object.assign(settings, next); calls.push('persist'); }, logMain: () => {},
     session: { defaultSession: { clearCache: async () => { calls.push('cache'); if (fail) throw new Error('locked'); },
       clearStorageData: async options => calls.push(options.storages) } } };
   vm.createContext(context); vm.runInContext(cacheCode, context);

@@ -53,7 +53,7 @@ it('中心进入同一浮层的模型列表；新模型清除旧强度，返回�
   expect(wrapper.find('details').element.open).toBe(true)
   expect(wrapper.find('.model-list').exists()).toBe(false)
   expect(wrapper.find('input[type=range]').attributes('max')).toBe('1')
-  expect(wrapper.find('summary').text()).toBe('other · 默认')
+  expect(wrapper.find('summary').text()).toBe('other · 跟随模型默认')
   wrapper.unmount()
 })
 
@@ -83,14 +83,23 @@ it('开关与思考预算使用声明范围，不发送虚构的高低档位', a
 
 it('只有开关时只显示两档；能力加载失败仍能选模型及重试', async () => {
   const request = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue({ metadata: { reasoning_controls: { efforts: [], toggle: true } } })
-  const wrapper = setup({ profiles: [{ ...profiles[0], model_metadata: {} }] }, request)
+  const wrapper = setup({ profiles: [{ ...profiles[0], model_metadata: {} }], modelValue: { profile_id: 'service', model_id: 'saved' } }, request)
   await flushPromises()
   expect(wrapper.text()).toContain('模型能力暂时未更新')
   await wrapper.find('.strength-note button').trigger('click'); await flushPromises()
   const slider = wrapper.find('input[type=range]')
   expect(slider.attributes('max')).toBe('1')
+  expect(wrapper.find('summary').text()).toBe('saved · 跟随模型默认')
   await slider.setValue(1)
   expect(wrapper.emitted('update:modelValue').at(-1)[0]).toMatchObject({ reasoning_effort: null, thinking_mode: 'enabled' })
+  await wrapper.setProps({ modelValue: wrapper.emitted('update:modelValue').at(-1)[0] })
+  expect(wrapper.find('.strength-center strong').text()).toBe('深度思考')
+  expect(slider.attributes('aria-valuetext')).toBe('深度思考')
+  await slider.setValue(0)
+  expect(wrapper.emitted('update:modelValue').at(-1)[0]).toMatchObject({ reasoning_effort: null, thinking_mode: 'disabled' })
+  await wrapper.setProps({ modelValue: wrapper.emitted('update:modelValue').at(-1)[0] })
+  expect(wrapper.find('.strength-center strong').text()).toBe('直接回答')
+  expect(slider.attributes('aria-valuetext')).toBe('直接回答')
   wrapper.unmount()
 })
 

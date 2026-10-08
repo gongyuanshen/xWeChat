@@ -19,12 +19,12 @@ from langsmith import tracing_context
 from fastapi import HTTPException
 from deepagents import create_deep_agent
 from deepagents.middleware.filesystem import FilesystemMiddleware, FilesystemPermission
-from .deep_context import DurableSummarization, context_tokens, ContextRecoveryRequired
+from .deep_context import context_tokens, ContextRecoveryRequired
 from .deep_sawtooth import SawtoothSummarization
 from .deep_conversation import inherit_context
 from deepagents.profiles import HarnessProfile, GeneralPurposeSubagentProfile, register_harness_profile
 
-from .agent_budget import input_limit, model_output_limit, size, request_size
+from .agent_budget import input_limit, model_output_limit, size
 from .agent_references import valid_answer_references
 from .deep_backend import TaskBackend
 from .deep_model import DeepChatModel
@@ -550,9 +550,14 @@ class DeepAgentRuntime(ParallelAnalysis):
         conversation = run['thread_id'] + ':' if run.get('checkpoint_schema') == 2 else ''
         return f'{run["account"]}:{conversation}{run["id"]}:v{version}'
 
-    async def create_thread(self, account, username, title):
+    async def create_thread(self, account, username, title, origin='chat', chat_scope=None):
+        from .agent_schemas import ThreadInput
+        data = ThreadInput(account=account, username=username, title=title, origin=origin, chat_scope=chat_scope)
+        if data.origin == 'agent':
+            await self.agent_directory(account, data.chat_scope)
         # 当前聊天身份由现有页面传入；真正查询时才解析目录，不阻塞空对话。
         return self.store.put('agent_thread', dict(account=account, username=username, title=title,
+            origin=data.origin, chat_scope=data.chat_scope,
             scope=[], scope_revision=0, account_wide=True, messages=[], created=time.time(), draft='', latest_run=''))
 
     async def submit(self, id, account, data):
@@ -561,6 +566,8 @@ class DeepAgentRuntime(ParallelAnalysis):
             prior_message = next((m for m in thread['messages'] if m.get('request_id') == data['request_id']), None)
             if prior_message:
                 return self.run(prior_message['run_id'], account)
+            if thread['origin'] == 'agent':
+                await self.agent_directory(account, thread['chat_scope'])
             previous = self.run(thread['latest_run']) if thread.get('latest_run') else None
             supplement = previous and previous.get('engine_version') == 3 and previous['status'] in ('queued', 'running')
             if supplement:
@@ -592,6 +599,7 @@ class DeepAgentRuntime(ParallelAnalysis):
                 vision = profile if profile.get('vision') else {}
                 now = time.time()
                 run = self.store.put('agent_run', dict(account=account, thread_id=id, status='queued', stage='正在回答',
+                    origin=thread['origin'], chat_scope=thread['chat_scope'],
                     created=now, started_at=now, elapsed_seconds=0, segment_started=now, stage_started_at=now,
                     used={'tools': 0, 'models': 0, 'media': 0}, version=1, applied_version=1,
                     engine='deepagents', engine_version=3, checkpoint_schema=2, subtask_plan_version=REVISION, timezone=datetime.now().astimezone().tzname(),
@@ -617,12 +625,15 @@ class DeepAgentRuntime(ParallelAnalysis):
 
     def deep_index(self, id):
         from .agent_tools import ChatTools
+        from ..app_paths import get_output_dir
+        from ..snapshot_registry import create_account_task
         if not isinstance(self.tools, ChatTools):
             return
         run = self.guard(id)
         current = self.index_workers.get(run['account'])
         if not current or current.done():
-            self.index_workers[run['account']] = asyncio.create_task(self.prepare_global_index(run['account'], id))
+            self.index_workers[run['account']] = create_account_task(get_output_dir() / 'databases' / run['account'],
+                self.prepare_global_index, run['account'], id)
 
     def restore_notes(self, run):
         """复用持久化入口校验并恢复当前版本的批次，损坏时保留明确定位错误。"""
@@ -686,7 +697,10 @@ class DeepAgentRuntime(ParallelAnalysis):
         if run.get('engine_version') != 3:
             raise ValueError('legacy_restart_required：旧任务不能继续，请使用新引擎重新运行。')
         async with self.locks.setdefault(run['thread_id'], asyncio.Lock()):
-            if self.thread(run['thread_id'], account)['latest_run'] != id or run['status'] == 'completed':
+            thread = self.thread(run['thread_id'], account)
+            if thread['origin'] == 'agent':
+                await self.agent_directory(account, run['chat_scope'])
+            if thread['latest_run'] != id or run['status'] == 'completed':
                 raise ValueError('只能恢复最新未完成任务')
             if run['status'] in ('running', 'queued') and (worker := self.workers.get(id)) and not worker.done():
                 return run
@@ -823,6 +837,9 @@ class DeepAgentRuntime(ParallelAnalysis):
             backend.write(history_root + '/previous.json', json.dumps(history, ensure_ascii=False))
         context = {'now': datetime.fromtimestamp(run['cutoff']).isoformat(), 'timezone_offset': run['timezone_offset'],
             'current_conversation': thread.get('username') or None}
+        if run.get('origin') == 'agent':
+            context['chat_scope'] = run['chat_scope']
+            context['scope_instruction'] = '独立 Agent 仅可读取 chat_scope 指定会话；null 表示当前账号全部可读聊天。范围不可更改。'
         if history:
             context['history_path'] = history_root + '/previous.json'
         previous = self.store.get('agent_run', run.get('previous_run_id', '')) or {}
@@ -1224,6 +1241,7 @@ class DeepAgentRuntime(ParallelAnalysis):
                         query_scope=[username], scope_handle='', previous_run_id='', statistics_scope='', restart_filters=None, required_conversations=[],
                         needs_continuation=False, partial_answer='', answer_continuations=0, answer_draft_saved=False, coverage_state='not_applicable')
                     self.store.put('agent_thread', {'id': child['thread_id'], 'account': parent['account'], 'username': username,
+                        'origin': child.get('origin', 'chat'), 'chat_scope': child.get('chat_scope'),
                         'parent_run_id': parent['id'], 'scope': [username], 'scope_revision': 0, 'messages': [], 'latest_run': child_id, 'title': '范围分析'})
                     self.store.put('agent_run', child)
                     directory = self.workspace.get(parent['id'], parent['version'], 'directory:conversations')

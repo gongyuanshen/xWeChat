@@ -4,7 +4,6 @@
 """
 
 import sqlite3
-import os
 from pathlib import Path
 
 def test_database(db_path):

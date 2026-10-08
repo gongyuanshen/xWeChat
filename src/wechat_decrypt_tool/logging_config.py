@@ -142,7 +142,7 @@ def install_sensitive_query_log_filter() -> None:
 
 
 class WeChatLogger:
-    """微信解密工具统一日志管理器"""
+    """xwechat 统一日志管理器"""
     
     _instance: Optional['WeChatLogger'] = None
     _initialized = False
@@ -319,7 +319,7 @@ class WeChatLogger:
         # 记录初始化信息
         logger = logging.getLogger(__name__)
         logger.info("=" * 60)
-        logger.info("微信解密工具日志系统初始化完成")
+        logger.info("xwechat 日志系统初始化完成")
         logger.info(f"日志文件: {self.log_file}")
         logger.info(f"日志级别: {logging.getLevelName(level)}")
         try:

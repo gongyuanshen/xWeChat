@@ -96,10 +96,10 @@
         <span class="voice-sub wrapped-label">语音与通话</span>
       </div>
 
-      <!-- 一台「微信留言机」：这一年的语音与通话都住在这台桌面设备里 -->
+      <!-- 一台「xwechat 留言机」：这一年的语音与通话都住在这台桌面设备里 -->
       <div class="am" :class="{ 'am--paused': wavePaused, 'am--fast': amFast }">
         <div class="am-head">
-          <span class="am-brand wrapped-label">微信留言机 · ANSWERING MACHINE</span>
+          <span class="am-brand wrapped-label">xwechat 留言机 · ANSWERING MACHINE</span>
           <i class="am-led" :class="{ 'am-led--on': amRecLed }" aria-hidden="true"></i>
           <i class="am-grille" aria-hidden="true"></i>
         </div>
@@ -305,7 +305,7 @@
             <div v-if="keyTooltip.meta" class="kb-hud-meta">{{ keyTooltip.meta }}</div>
           </div>
 
-          <div class="keyboard-brand">微信机械键盘 · 手工敲字一年</div>
+          <div class="keyboard-brand">xwechat 机械键盘 · 手工敲字一年</div>
         </div>
 
         <!-- 底部：磨损注脚 + 年度键位领奖台 -->
@@ -2324,7 +2324,7 @@ onBeforeUnmount(() => {
   color: rgba(0,0,0,0.35);
 }
 
-/* ============ 微信留言机：与键盘同一产品线的桌面设备 ============ */
+/* ============ xwechat 留言机：与键盘同一产品线的桌面设备 ============ */
 
 .am {
   position: relative;

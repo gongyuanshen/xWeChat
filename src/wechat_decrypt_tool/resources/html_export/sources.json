@@ -8,7 +8,8 @@
     "Retained existing presentation, paging, search and message interactions.",
     "Removed automatic remote media URL substitution.",
     "Integrated existing incremental session catalog source.",
-    "Linked local merged-record attachments and playable videos without thumbnails."
+    "Linked local merged-record attachments and playable videos without thumbnails.",
+    "Updated the visible export attribution to xwechat and its current repository; retained upstream provenance."
   ],
   "runtimeRequiresOriginalBinary": false
 }

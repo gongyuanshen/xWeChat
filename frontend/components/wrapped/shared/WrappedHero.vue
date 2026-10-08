@@ -14,15 +14,15 @@
           </div>
 
           <div class="mt-10 sm:mt-14 hero-title-block">
-            <h1 class="wrapped-title text-3xl sm:text-5xl text-[#000000e6] leading-[1.05] hero-title">
+            <h1 class="wrapped-title text-3xl sm:text-5xl text-[#283b34] leading-[1.05] hero-title">
               {{ randomTitle.main }}
-              <span class="block mt-3 text-[#07C160]">
+              <span class="block mt-3 text-[#21483f]">
                 {{ randomTitle.highlight }}
               </span>
             </h1>
 
             <div class="mt-7 sm:mt-9 max-w-2xl hero-sub-wrap">
-              <p class="wrapped-body text-base sm:text-lg text-[#00000080] hero-sub">
+              <p class="wrapped-body text-base sm:text-lg text-[#66786e] hero-sub">
                 {{ randomSubtitle }}
               </p>
             </div>
@@ -43,7 +43,8 @@
             <div class="relative" :class="previewViewportClass">
               <BitsGridMotion
                 :items="modernPreviewItems"
-                gradient-color="rgba(7, 193, 96, 0.24)"
+                :active="isActive"
+                gradient-color="rgba(198, 243, 223, 0.24)"
                 :row-count="previewRowCount"
                 :column-count="previewColumnCount"
                 :item-width="previewItemWidth"
@@ -80,7 +81,7 @@
       <template v-else>
         <div class="flex items-start justify-between gap-4">
           <div class="wrapped-label text-xs text-[#00000080]">
-            WECHAT WRAPPED
+            xwechat
           </div>
           <!-- 年份放到右上角（分享视图不包含账号信息） -->
           <span

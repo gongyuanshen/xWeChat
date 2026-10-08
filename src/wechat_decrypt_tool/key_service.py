@@ -7,20 +7,16 @@ from .platform_support import is_windows
 import time
 import threading
 import psutil
-import subprocess
-import hashlib
 import os
 import json
 import re
-import random
 import logging
 import asyncio
-import importlib
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict, Any
 
   # 建议使用 packaging 库处理版本比较
-from .wechat_detection import detect_wechat_installation, parse_global_config
+from .wechat_detection import parse_global_config
 from .dll_key_scan import extract_xor_keys_from_dll
 from .image_key_resolver import (
     ImageKeyResolution,
@@ -192,56 +188,6 @@ def _resolve_manual_wechat_exe_path(wechat_install_path: Optional[str] = None) -
         raise RuntimeError("手动指定的微信安装目录中未找到 Weixin.exe 或 WeChat.exe")
 
     raise RuntimeError(f"手动指定的微信安装目录不存在: {candidate}")
-
-
-def _resolve_wechat_dll_path(wechat_install_path: Optional[str] = None) -> Path:
-    def _dll_candidates_from_dir(install_dir: Path) -> list[Path]:
-        patterns = (
-            "Weixin.dll",
-            "WeChat.dll",
-            "*/Weixin.dll",
-            "*/WeChat.dll",
-            "install/*/Weixin.dll",
-            "install/*/WeChat.dll",
-        )
-        out: list[Path] = []
-        seen: set[str] = set()
-        for pattern in patterns:
-            try:
-                for item in install_dir.glob(pattern):
-                    if not item.is_file():
-                        continue
-                    key = str(item.resolve()).lower()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    out.append(item)
-            except Exception:
-                continue
-        out.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
-        return out
-
-    normalized = _normalize_user_path(wechat_install_path)
-    if normalized:
-        candidate = Path(normalized).expanduser()
-        if candidate.is_file():
-            install_dir = candidate.parent
-        else:
-            install_dir = candidate
-        dll_candidates = _dll_candidates_from_dir(install_dir)
-        if dll_candidates:
-            return dll_candidates[0]
-        raise FileNotFoundError(f"微信安装目录中未找到 Weixin.dll / WeChat.dll: {install_dir}")
-
-    install_info = detect_wechat_installation()
-    exe_path = _normalize_user_path(install_info.get("wechat_exe_path"))
-    if exe_path:
-        exe_dir = Path(exe_path).parent
-        dll_candidates = _dll_candidates_from_dir(exe_dir)
-        if dll_candidates:
-            return dll_candidates[0]
-
-    raise FileNotFoundError("未能定位微信 DLL，请先提供微信安装目录或确保微信进程已正确检测")
 
 
 def _normalize_db_key(value: Any) -> str:
@@ -493,10 +439,6 @@ def _get_image_key_kvcomm_dirs(account_dir: Optional[Path] = None) -> tuple[Path
     if existing:
         return existing
     return tuple(deduplicated[:1])
-
-
-def _get_image_key_kvcomm_dir(account_dir: Optional[Path] = None) -> Path:
-    return _get_image_key_kvcomm_dirs(account_dir)[0]
 
 
 def _resolve_local_image_key_from_kvcomm_candidates(

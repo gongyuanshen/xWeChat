@@ -199,27 +199,6 @@ def _voice_transcript_cache_path(account_dir: Path) -> Path:
     return Path(account_dir) / "_cache" / "voice_transcripts.sqlite3"
 
 
-def has_voice_transcript_cache(account_dir: Path, server_id: int) -> bool:
-    """Return whether any non-empty project transcript already exists for a voice."""
-
-    path = _voice_transcript_cache_path(Path(account_dir))
-    if not path.exists() or int(server_id or 0) <= 0:
-        return False
-    with _VOICE_TRANSCRIPT_CACHE_LOCK:
-        try:
-            conn = sqlite3.connect(str(path))
-            try:
-                row = conn.execute(
-                    "SELECT 1 FROM transcript WHERE server_id = ? AND trim(text) <> '' LIMIT 1",
-                    (int(server_id),),
-                ).fetchone()
-                return bool(row)
-            finally:
-                conn.close()
-        except (OSError, sqlite3.Error):
-            return False
-
-
 def _capture_voice_transcript_cache_epoch(account_dir: Path) -> int:
     key = _voice_transcript_cache_account_key(account_dir)
     with _VOICE_TRANSCRIPT_CACHE_LOCK:
@@ -1176,7 +1155,6 @@ def list_native_voice_transcripts(
     cancel_event: Optional[threading.Event] = None,
     errors: Optional[list[str]] = None,
     voice_server_ids: Optional[set[int]] = None,
-    target_server_id: Optional[int] = None,
 ) -> dict[int, str]:
     """Read completed WeChat-native transcripts keyed by server ID."""
 
@@ -1184,9 +1162,7 @@ def list_native_voice_transcripts(
 
     result: dict[int, str] = {}
     account_path = Path(account_dir)
-    target_id = int(target_server_id or 0)
     local_errors: list[str] = []
-    local_successes = 0
     for db_path in _numbered_db_shards(resolve_account_database_dir(account_path), "message"):
         if cancel_event is not None and cancel_event.is_set():
             break
@@ -1204,21 +1180,15 @@ def list_native_voice_transcripts(
                     break
                 quoted = '"' + table.replace('"', '""') + '"'
                 try:
-                    target_where = " AND server_id = ?" if target_id > 0 else ""
-                    target_params = (target_id,) if target_id > 0 else ()
                     try:
                         rows = conn.execute(
                             f"SELECT server_id, packed_info_data FROM {quoted} "
                             "WHERE local_type = 34 AND server_id > 0"
-                            + target_where,
-                            target_params,
                         )
                     except sqlite3.OperationalError:
                         rows = conn.execute(
                             f"SELECT server_id, NULL AS packed_info_data FROM {quoted} "
                             "WHERE local_type = 34 AND server_id > 0"
-                            + target_where,
-                            target_params,
                         )
                     for server_id, packed_info in rows:
                         sid = int(server_id or 0)
@@ -1234,39 +1204,15 @@ def list_native_voice_transcripts(
                 except Exception as exc:
                     local_errors.append(f"{db_path.name}/{table}: {type(exc).__name__}")
                     continue
-            local_successes += 1
         except Exception as exc:
             local_errors.append(f"{db_path.name}: {type(exc).__name__}")
         finally:
             if conn is not None:
                 conn.close()
-    if target_id > 0 and target_id in result:
-        return result
-    
+
     if errors is not None:
         errors.extend(local_errors)
     return result
-
-
-def lookup_native_voice_transcript(
-    account_dir: Path,
-    server_id: int,
-    *,
-    errors: Optional[list[str]] = None,
-) -> str:
-    """Read one completed WeChat-native transcript without triggering recognition."""
-
-    target_id = int(server_id or 0)
-    if target_id <= 0:
-        return ""
-    return str(
-        list_native_voice_transcripts(
-            account_dir,
-            errors=errors,
-            target_server_id=target_id,
-        ).get(target_id)
-        or ""
-    ).strip()
 
 
 class VoiceTranscriptionService:
@@ -1803,25 +1749,6 @@ class VoiceTranscriptionService:
         self._active_device = ""
         self._active_compute_type = ""
         gc.collect()
-
-    def _release_loaded_model(self) -> None:
-        """Release only after all leases drain; kept for internal reset callers."""
-
-        with self._inference_condition:
-            while self._model_transitioning and not self._retired:
-                self._inference_condition.wait()
-            if self._retired:
-                return
-            self._model_transitioning = True
-            while self._active_inferences > 0:
-                self._inference_condition.wait()
-        try:
-            self._release_loaded_model_unlocked()
-        finally:
-            with self._inference_condition:
-                self._model_generation += 1
-                self._model_transitioning = False
-                self._inference_condition.notify_all()
 
     def _get_model(self) -> Any:
         if self._model is not None:

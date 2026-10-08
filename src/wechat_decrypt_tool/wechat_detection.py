@@ -253,54 +253,6 @@ def parse_global_config(base_path: str) -> dict:
         return None
 
 
-def find_wechat_databases() -> List[str]:
-    """在新的xwechat_files目录中查找微信数据库文件
-
-    返回值:
-        数据库文件路径列表
-    """
-    db_files = []
-
-    # 获取用户的Documents目录
-    documents_dir = Path.home() / "Documents"
-
-    # 检查新的微信4.0+目录结构
-    wechat_dirs = [
-        documents_dir / "xwechat_files",  # 新版微信4.0+
-        documents_dir / "WeChat Files"  # 旧版微信
-    ]
-
-    for wechat_dir in wechat_dirs:
-        if not wechat_dir.exists():
-            continue
-
-        # 查找用户目录（wxid_*模式）
-        for user_dir in wechat_dir.iterdir():
-            if not user_dir.is_dir():
-                continue
-
-            # 跳过系统目录
-            if user_dir.name in ['All Users', 'Applet', 'WMPF']:
-                continue
-
-            # 查找Msg目录
-            msg_dir = user_dir / "Msg"
-            if msg_dir.exists():
-                # 查找数据库文件
-                for db_file in msg_dir.glob("*.db"):
-                    if db_file.is_file():
-                        db_files.append(str(db_file))
-
-                # 同时检查Multi目录
-                multi_dir = msg_dir / "Multi"
-                if multi_dir.exists():
-                    for db_file in multi_dir.glob("*.db"):
-                        if db_file.is_file():
-                            db_files.append(str(db_file))
-
-    return db_files
-
-
 def get_process_exe_path(process_id):
     """获取进程可执行文件路径"""
     if os.name != "nt":
@@ -1356,12 +1308,3 @@ def detect_current_logged_in_account(base_path: str = None) -> Dict[str, Any]:
             else f"未找到登录信息目录，尝试的路径: {possible_login_paths}"
         ),
     }
-
-
-def get_wechat_info() -> Dict[str, Any]:
-    """获取微信安装和数据库信息
-
-    返回值:
-        包含微信信息的字典
-    """
-    return detect_wechat_installation()

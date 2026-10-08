@@ -18,7 +18,8 @@ describe('chat API performance probe', () => {
     localStorage.setItem('debug.chat.performance', '1')
     vi.spyOn(console, 'info').mockImplementation(() => {})
     const api = {
-      listChatMessages: vi.fn(async () => ({ messages: [], total: 0, hasMore: false }))
+      listChatMessages: vi.fn(async () => ({ messages: [], total: 0, hasMore: false })),
+      getVoiceTranscriptionStatus: vi.fn(async () => ({ available: false, reason: '本地模型尚未下载' }))
     }
     let state
     const wrapper = mount(defineComponent({

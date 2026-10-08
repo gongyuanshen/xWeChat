@@ -130,7 +130,7 @@ import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
-useHead({ title: '小程序 - 微信数据分析助手' })
+useHead({ title: '小程序 - xwechat' })
 
 const api = useApi()
 const chatAccounts = useChatAccountsStore()

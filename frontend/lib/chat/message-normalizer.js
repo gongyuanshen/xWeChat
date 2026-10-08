@@ -53,7 +53,7 @@ const isManualLargeImageUrl = (value) => {
   const text = normalizeMaybeUrl(value)
   if (!/\/api\/chat\/media\/image\b/i.test(text)) return false
   try {
-    const url = new URL(text, 'http://wechat-data-analysis.local')
+    const url = new URL(text, 'http://xwechat.local')
     return (
       String(url.searchParams.get('prefer_live') || '').toLowerCase() === 'true'
       || String(url.searchParams.get('deep_scan') || '').toLowerCase() === 'true'

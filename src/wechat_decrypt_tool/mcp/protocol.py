@@ -29,9 +29,9 @@ def initialize_result() -> dict[str, Any]:
     return {
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {"listChanged": False}},
-        "serverInfo": {"name": "wechat-data-analysis-mcp", "version": "1.0.0"},
+        "serverInfo": {"name": "xwechat-mcp", "version": "1.0.0"},
         "instructions": (
-            "Use this MCP server to inspect local WeChatDataAnalysis data. "
+            "Use this MCP server to inspect local xwechat data. "
             "Prefer resolve tools before broad message queries. Keep list limits small and expand details only when needed."
         ),
     }

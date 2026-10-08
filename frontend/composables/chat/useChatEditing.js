@@ -107,31 +107,8 @@ export const useChatEditing = ({
     const value = String(text ?? '').trim()
     if (!value) return false
 
-    try {
-      await navigator.clipboard.writeText(value)
-      return true
-    } catch {}
-
-    try {
-      const element = document.createElement('textarea')
-      element.value = value
-      element.setAttribute('readonly', 'true')
-      element.style.position = 'fixed'
-      element.style.left = '-9999px'
-      element.style.top = '-9999px'
-      document.body.appendChild(element)
-      element.select()
-      const ok = document.execCommand('copy')
-      document.body.removeChild(element)
-      if (ok) return true
-    } catch {}
-
-    try {
-      window.prompt('复制内容：', value)
-      return true
-    } catch {
-      return false
-    }
+    await navigator.clipboard.writeText(value)
+    return true
   }
 
   const onCopyMessageTextClick = async () => {
@@ -146,8 +123,8 @@ export const useChatEditing = ({
       }
       const ok = await copyTextToClipboard(text)
       if (!ok) showErrorAlert('复制失败：无法写入剪贴板')
-    } catch {
-      showErrorAlert('复制失败')
+    } catch (error) {
+      showErrorAlert(`复制失败：${error.message}`)
     } finally {
       closeContextMenu()
     }
@@ -162,8 +139,8 @@ export const useChatEditing = ({
       const json = JSON.stringify(raw, (_key, value) => (typeof value === 'bigint' ? value.toString() : value), 2)
       const ok = await copyTextToClipboard(json)
       if (!ok) showErrorAlert('复制失败：无法写入剪贴板')
-    } catch {
-      showErrorAlert('复制失败')
+    } catch (error) {
+      showErrorAlert(`复制失败：${error.message}`)
     } finally {
       closeContextMenu()
     }

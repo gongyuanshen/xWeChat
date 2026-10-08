@@ -1,2 +1,1 @@
-"""Card implementations for WeChat Wrapped (年度总结)."""
-
+"""Card implementations for the xwechat annual report (年度总结)."""

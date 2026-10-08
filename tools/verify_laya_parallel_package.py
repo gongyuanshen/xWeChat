@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from verify_laya_official_package import URL, BYTES, SHA256, extract
-from wechat_decrypt_tool.ai.insight_local_models import LocalInsightModels, SPEC
+from wechat_decrypt_tool.ai.insight_local_models import LocalInsightModels
 from wechat_decrypt_tool.ai.storage import AIStore
 from wechat_decrypt_tool.local_search.catalog import file_hash
 

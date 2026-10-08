@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import vm from 'node:vm'
+import { createAiNavigationConsumer } from '../utils/createAiNavigationConsumer.js'
 
 const root = process.env.CHAT_RETURN_SOURCE_ROOT || new URL('../', import.meta.url)
 const read = path => readFileSync(new URL(path, typeof root === 'string' ? `file:///${root.replaceAll('\\', '/')}/` : root), 'utf8')
@@ -47,8 +48,9 @@ test('缓存的聊天页不处理其他页面的路由变化', async () => {
 })
 
 test('年度总结返回实际来源页，直接打开时回聊天', async () => {
-  const start = wrapped.indexOf('const goBack =')
-  const source = wrapped.slice(start, wrapped.indexOf('const next =', start))
+  const start = wrapped.indexOf('async function goBack()')
+  assert.ok(start >= 0, '年度总结必须保留返回入口')
+  const source = wrapped.slice(start, wrapped.indexOf('const detailTitle =', start))
   for (const back of ['/chat/group%40chatroom', '/contacts', null]) {
     const calls = []
     const router = { options: { history: { state: { back } } }, back: () => calls.push('back'), push: async path => calls.push(path) }
@@ -103,16 +105,22 @@ test('异步AI导航加载账号期间离开聊天，不在其他页面切换账
   let resolveAccounts
   const calls = []
   const context = {
+    createAiNavigationConsumer,
     chatPageActive: { value: true }, aiNavigation: { value: { account: 'new-account', task_id: 'task' } },
     aiDiagnosticApi: { diagnostic: (...args) => calls.push(['diagnostic', ...args]) },
     chatAccounts: { ensureLoaded: () => new Promise(resolve => { resolveAccounts = resolve }), setSelectedAccount: value => calls.push(['account', value]) },
     selectedAccount: { value: 'original-account' }, nextTick: async () => {},
     accountBootstrapInProgress: false, accountChangeInProgress: false,
+    snapshotRefreshReady: { value: true }, aiSidebarOpen: { value: false },
+    aiFocusTaskId: { value: '' }, insightsPanelOpen: { value: false },
+    locateAiSource: async () => { calls.push(['locate']); return true },
+    showErrorAlert: message => calls.push(['error', message]),
   }
   const pending = vm.runInNewContext(`${source}\nconsumeAiNavigation()`, context)
   context.chatPageActive.value = false
   resolveAccounts()
   await pending
   assert.equal(calls.some(([type]) => type === 'account'), false)
+  assert.equal(calls.some(([type]) => type === 'locate' || type === 'error'), false)
   assert.equal(context.aiNavigation.value.task_id, 'task')
 })

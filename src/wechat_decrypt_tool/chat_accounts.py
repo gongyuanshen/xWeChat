@@ -364,7 +364,3 @@ def resolve_chat_account_context(account: Optional[str]) -> ChatAccountContext:
         image_aes_key_present=ctx.image_aes_key_present,
         keys_updated_at=ctx.keys_updated_at,
     )
-
-
-def is_decrypted_chat_account_dir(account_dir: Path) -> bool:
-    return _has_decrypted_chat_dbs(Path(account_dir))

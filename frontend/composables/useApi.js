@@ -656,20 +656,6 @@ export const useApi = () => {
     })
   }
 
-  const transcribeChatVoiceNative = async (data) => {
-    return await request('/chat/media/voice/transcription/native', {
-      method: 'POST',
-      body: {
-        account: data.account,
-        username: data.username,
-        display_name: data.display_name,
-        message_id: data.message_id,
-        server_id: data.server_id,
-        create_time: data.create_time
-      }
-    })
-  }
-
   // 批量读取语音转写缓存（仅恢复展示，不触发识别；serverIdStr 精确字符串数组）
   const lookupChatVoiceTranscriptionCache = async (data = {}) => {
     return await request('/chat/media/voice/transcription/cache_lookup', {
@@ -923,7 +909,7 @@ export const useApi = () => {
     return await request(`/account/archive_export/${encodeURIComponent(String(exportId))}`, { method: 'DELETE' })
   }
 
-  // WeChat Wrapped（年度总结）
+  // xwechat 年度总结
   const getWrappedAnnual = async (params = {}) => {
     const query = new URLSearchParams()
     if (params && params.year != null) query.set('year', String(params.year))
@@ -933,17 +919,17 @@ export const useApi = () => {
     return await request(url)
   }
 
-  // WeChat Wrapped（年度总结）- 目录/元信息（轻量，用于按页懒加载）
+  // xwechat 年度总结 - 目录/元信息（轻量，用于按页懒加载）
   const getWrappedAnnualMeta = async (params = {}) => {
     const query = new URLSearchParams()
     if (params && params.year != null) query.set('year', String(params.year))
     if (params && params.account) query.set('account', String(params.account))
     if (params && params.refresh != null) query.set('refresh', String(!!params.refresh))
     const url = '/wrapped/annual/meta' + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url)
+    return await request(url, { retry: 0, ...(params.signal ? { signal: params.signal } : {}) })
   }
 
-  // WeChat Wrapped（年度总结）- 单张卡片（按页加载）
+  // xwechat 年度总结 - 单张卡片（按页加载）
   const getWrappedAnnualCard = async (cardId, params = {}) => {
     if (cardId == null) throw new Error('Missing cardId')
     const query = new URLSearchParams()
@@ -952,7 +938,15 @@ export const useApi = () => {
     if (params && params.refresh != null) query.set('refresh', String(!!params.refresh))
     const safeId = encodeURIComponent(String(cardId))
     const url = `/wrapped/annual/cards/${safeId}` + (query.toString() ? `?${query.toString()}` : '')
-    return await request(url)
+    return await request(url, { retry: 0, ...(params.signal ? { signal: params.signal } : {}) })
+  }
+
+  const getWrappedAnnualDetail = async (params) => {
+    const query = new URLSearchParams()
+    for (const key of ['account', 'year', 'kind', 'value', 'period', 'month', 'offset', 'limit', 'refresh']) {
+      if (params[key] != null) query.set(key, String(params[key]))
+    }
+    return await request(`/wrapped/annual/detail?${query}`, { retry: 0, ...(params.signal ? { signal: params.signal } : {}) })
   }
 
   // 获取数据库密钥
@@ -1160,7 +1154,6 @@ export const useApi = () => {
     getVoiceTranscriptionModelDownload,
     deleteVoiceTranscriptionModel,
     transcribeChatVoice,
-    transcribeChatVoiceNative,
     lookupChatVoiceTranscriptionCache,
     deleteAllVoiceTranscriptionCache,
     startVoiceTranscriptionBatch,
@@ -1185,6 +1178,7 @@ export const useApi = () => {
     getWrappedAnnual,
     getWrappedAnnualMeta,
     getWrappedAnnualCard,
+    getWrappedAnnualDetail,
     getKeys,
     getImageKey,
     getImageKeyMemory,

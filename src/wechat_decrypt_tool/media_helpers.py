@@ -1,4 +1,3 @@
-import ctypes
 import datetime
 import glob
 import hashlib
@@ -888,11 +887,6 @@ def _collect_emoticon_download_catalog(account_dir: Path) -> tuple[dict[str, dic
     return _collect_emoticon_download_catalog_cached(str(database_dir), fingerprint)
 
 
-def _collect_emoticon_download_candidates(account_dir: Path) -> list[str]:
-    catalog, _stats = _collect_emoticon_download_catalog(Path(account_dir))
-    return list(catalog.keys())
-
-
 def _find_emoticon_message_remote_source(account_dir: Path, md5: str) -> dict[str, Any]:
     md5s = _normalize_emoticon_md5(md5)
     if not md5s:
@@ -1593,18 +1587,6 @@ def _resolve_hardlink_entry_path(
             except Exception:
                 return []
             return sorted(result, key=lambda item: str(item.name))
-
-        def _pick_best_hit(hits: list[Path]) -> Optional[Path]:
-            if not hits:
-                return None
-            if file_size is not None and file_size >= 0:
-                for hit in hits:
-                    try:
-                        if hit.stat().st_size == file_size:
-                            return hit
-                    except Exception:
-                        continue
-            return hits[0]
 
         for base in file_base_dirs:
             month_dirs = _iter_month_dirs(base)

@@ -15,7 +15,7 @@
       <div class="mt-2 tm-line">
         <span class="tm-brand avio-mono">
           <svg class="tm-plane" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" transform="rotate(90 12 12)"/></svg>
-          WX AIR · {{ yearLabel }} 关系航线年报
+          xwechat · {{ yearLabel }} 关系航线年报
         </span>
         <template v-if="replyEvents > 0">
           <span class="tm-dot" aria-hidden="true"></span>
@@ -175,7 +175,7 @@
                 <div class="pass-head">
                   <span class="pass-airline avio-mono">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z" transform="rotate(90 12 12)"/></svg>
-                    <i class="pass-foil">WX AIR</i>
+                    <i class="pass-foil">xwechat</i>
                   </span>
                   <span class="pass-class"><i class="pass-foil avio-mono">FIRST CLASS</i><em>头等舱</em></span>
                 </div>
@@ -257,7 +257,7 @@
 
                 <span v-if="stamped" class="pass-stamp" aria-hidden="true">
                   <i>秒回认证</i>
-                  <em class="avio-mono">PRIORITY CARE · WX AIR</em>
+                  <em class="avio-mono">PRIORITY CARE · xwechat</em>
                 </span>
 
                 <span class="pass-glare" aria-hidden="true"></span>

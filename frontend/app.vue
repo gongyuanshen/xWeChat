@@ -56,6 +56,7 @@ const noAccountGuideOpen = ref(false)
 
 const accountDataRoutePrefixes = [
   '/chat',
+  '/agent',
   '/sns',
   '/favorites',
   '/contacts',
@@ -133,7 +134,6 @@ onBeforeUnmount(() => {
 })
 
 const setupShellBackgroundRoutes = new Set([
-  '/',
   '/import',
   '/decrypt',
   '/detection-result',

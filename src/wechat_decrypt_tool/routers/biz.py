@@ -3,13 +3,11 @@ import sqlite3
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict
 import urllib
 from fastapi import APIRouter, HTTPException, Response
-from pydantic import BaseModel
 
-from ..chat_helpers import _quote_ident, _resolve_account_dir
-from ..media_helpers import _resolve_account_db_storage_dir
+from ..chat_helpers import _resolve_account_dir
 from ..path_fix import PathFixRoute
 from ..logging_config import get_logger
 from ..snapshot_registry import resolve_account_database_dir

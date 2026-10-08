@@ -645,12 +645,6 @@ def _sns_media_token_value(media: dict[str, Any]) -> str:
     return _pick_sns_media_str(media.get("token"), url_attrs.get("token"), thumb_attrs.get("token"))
 
 
-def _sns_media_key_value(media: dict[str, Any]) -> str:
-    url_attrs = media.get("urlAttrs") if isinstance(media.get("urlAttrs"), dict) else {}
-    thumb_attrs = media.get("thumbAttrs") if isinstance(media.get("thumbAttrs"), dict) else {}
-    return _pick_sns_media_str(media.get("key"), url_attrs.get("key"), thumb_attrs.get("key"))
-
-
 def _sns_image_source(
     media: dict[str, Any],
     *,
@@ -1828,9 +1822,6 @@ class SnsExportManager:
 
         def _sns_media_token(m: dict[str, Any]) -> str:
             return _sns_media_token_value(m)
-
-        def _sns_media_key(m: dict[str, Any]) -> str:
-            return _sns_media_key_value(m)
 
         def _sns_media_size(m: dict[str, Any]) -> tuple[int, int, int]:
             size = m.get("size") if isinstance(m.get("size"), dict) else {}

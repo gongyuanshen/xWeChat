@@ -30,10 +30,7 @@ class McpToolContext:
 
     @property
     def base_url(self) -> str:
-        try:
-            return str(self.request.base_url).rstrip("/")
-        except Exception:
-            return ""
+        return str(self.request.base_url).rstrip("/")
 
 
 @dataclass(frozen=True)

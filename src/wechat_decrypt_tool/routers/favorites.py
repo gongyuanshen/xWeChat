@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
@@ -12,8 +11,6 @@ from fastapi.responses import Response
 
 from ..chat_accounts import resolve_chat_account_context
 from ..snapshot_registry import resolve_account_database_dir
-from ..chat_helpers import _resolve_msg_table_name_by_map
-from .chat import _append_full_messages_from_rows, _postprocess_full_messages
 from .chat_media import _convert_silk_to_browser_audio
 from .general import _coerce_blob_bytes, _open_db_source, _resolve_general_contacts, _source_meta
 
@@ -420,12 +417,6 @@ def _top_level_display_items(
             )
 
     return data_items
-
-
-def _quote_identifier(value: str) -> str:
-    return '"' + str(value or "").replace('"', '""') + '"'
-
-
 
 
 def _favorite_text_parts(root: ET.Element | None, data_items: list[dict[str, Any]]) -> list[str]:

@@ -58,16 +58,6 @@ class AgentTimeline:
         items.append(dict(id=uuid.uuid4().hex, text=text, status=status, started_at=time.time()))
         self.update(id, activity=items[-100:], stage=text, stage_started_at=time.time())
 
-    def model_feedback(self, id, data):
-        self.guard(id)
-        self.timeline_item(id, 'notice', data['text'], attempt=data['attempt'])
-        self.update(id, stage=data['text'], stage_started_at=time.time())
-        if data['phase'] == 'answer':
-            run = self.run(id)
-            prefix = run.get('answer_resume', '') if run.get('answer_resume_version') == run['version'] else ''
-            self.update(id, answer=prefix)
-            self.timeline_item(id, 'answer', prefix, item_id='answer:' + id, status='running')
-
     @staticmethod
     def public_timeline(run):
         if run.get('timeline'):

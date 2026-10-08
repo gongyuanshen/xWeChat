@@ -16,10 +16,8 @@ import json
 import logging
 import os
 from pathlib import Path
-import re
 import stat
 import sys
-import threading
 import time
 from typing import Any, Callable, Literal, Optional, Union
 
@@ -439,10 +437,6 @@ class WeChatBridge:
                                     code="WECHAT_WINDOW_AMBIGUOUS", status_code=409)
         return main_windows[0] if main_windows else None
 
-    def _find_main_window(self, pid: Optional[int] = None) -> int:
-        hwnd = self._find_main_window_hwnd(pid)
-        return hwnd or 0
-
     def _check_window_locked(self, hwnd: int) -> bool:
         """Check if window title or child windows indicate locked state."""
         if not hwnd or not self.win32gui:
@@ -470,9 +464,6 @@ class WeChatBridge:
         except Exception:
             pass
         return locked
-
-    def _is_locked(self, hwnd: int) -> bool:
-        return self._check_window_locked(hwnd)
 
     def _is_window_hung(self, hwnd: int) -> bool:
         """Check if the WeChat window is frozen or hung (Let-it-fail)."""
@@ -909,7 +900,7 @@ class WeChatBridge:
         return path, hashlib.sha256(data).hexdigest()
 
     @staticmethod
-    async def _await_operation(operation, *args, _on_cancel=None, **kwargs):
+    async def _await_operation(operation, *args, **kwargs):
         task = asyncio.create_task(asyncio.to_thread(operation, *args, **kwargs))
         cancelled = False
         while True:
@@ -920,8 +911,6 @@ class WeChatBridge:
                 # The worker cannot be cancelled. Keep the caller's send lock
                 # until its UI/snapshot operation has actually finished.
                 cancelled = True
-                if _on_cancel is not None:
-                    _on_cancel()
                 if task.cancelled():
                     raise
             except Exception:
@@ -933,120 +922,12 @@ class WeChatBridge:
             raise asyncio.CancelledError
         return result
 
-    async def transcribe_voice_native(self, session_title: str, *, account: str, username: str,
-                                      message_id: str, server_id: str, create_time: int) -> dict[str, Any]:
-        """One native UI action, serialized with sends until exact evidence arrives."""
-        session = session_title.strip()
-        if not session:
-            raise WeChatSessionNotFoundError("会话名称不能为空")
-        cancelled = threading.Event()
-        async with self._get_lock():
-            return await self._await_operation(self._transcribe_voice_native, session,
-                account, username, message_id, server_id, create_time, cancelled,
-                _on_cancel=cancelled.set)
-
-    def _verify_native_voice_process(self, hwnd: int, observation, expected=None):
-        """Positive OS handle evidence binds the window's process to this source."""
-        started = time.monotonic()
-        try:
-            pid = self.win32process.GetWindowThreadProcessId(hwnd)[1]
-            process = self.psutil.Process(pid)
-            identity = (pid, process.create_time())
-            if ((expected is not None and identity != expected)
-                    or process.name().lower() not in {"weixin.exe", "wechat.exe"}):
-                raise ValueError("微信窗口进程身份发生变化")
-            paths = (Path(item.path).resolve() for item in process.open_files())
-            matched = any(path.is_relative_to(observation.source_dir)
-                and re.fullmatch(r'message_\d+\.db(?:-wal|-shm)?', path.name, re.IGNORECASE)
-                for path in paths)
-            if (not matched or not process.is_running() or process.create_time() != identity[1]
-                    or self.win32process.GetWindowThreadProcessId(hwnd)[1] != pid):
-                raise ValueError("微信窗口进程未持有所选账号的消息数据库")
-            if time.monotonic() - started > 5:
-                raise TimeoutError("微信账号进程核验超时")
-            return identity
-        except Exception as exc:
-            raise WeChatBridgeError(f"无法核验微信窗口与当前账号的来源关系：{exc}",
-                code="WECHAT_NATIVE_VOICE_PROCESS_UNVERIFIED", status_code=409) from exc
-
-    def _transcribe_voice_native(self, session, account, username, message_id, server_id, create_time, cancelled):
-        from .app_paths import get_output_dir
-        from .snapshot_refresh import SNAPSHOT_REFRESH, SnapshotRefreshError
-        from .snapshot_registry import begin_account_work, SnapshotRegistryError
-        from .wechat_native_voice import NativeVoiceError, NativeVoiceObservation
-
-        lease, ui = None, None
-        started = time.monotonic()
-        def check_cancelled():
-            if cancelled.is_set():
-                raise asyncio.CancelledError
-        try:
-            check_cancelled()
-            account = SNAPSHOT_REFRESH._validate_account(account)
-            lease = begin_account_work(get_output_dir() / 'databases' / account)
-            observation = NativeVoiceObservation.prepare(account, username, message_id, server_id, create_time)
-            check_cancelled()
-            already_completed = bool(observation.native_text)
-            if already_completed:
-                result = dict(text=observation.native_text, model='wechat-native', generation=observation.generation)
-            else:
-                import uiautomation as auto
-                from .wechat_qt_ui import WeChatQtUI
-
-                with auto.UIAutomationInitializerInThread():
-                    check_cancelled()
-                    hwnd = self._prepare_send_window()
-                    if not self.win32gui.GetClassName(hwnd).lower().startswith('qt'):
-                        raise WeChatBridgeError("原生转写目前仅适配 Windows 微信 4.x 中文界面",
-                            code="WECHAT_NATIVE_VOICE_UNSUPPORTED", status_code=501)
-                    identity = self._verify_native_voice_process(hwnd, observation)
-                    ui = WeChatQtUI(hwnd, auto, 20)
-
-                    def before_trigger():
-                        check_cancelled()
-                        observation.revalidate()
-                        self._verify_native_voice_process(hwnd, observation, identity)
-                        check_cancelled()
-
-                    ui.trigger_voice_transcription(session, observation.username,
-                        date_label=observation.date_label, minute_label=observation.minute_label,
-                        duration_ms=observation.duration_ms, is_sender=observation.is_sender, window_api=self.win32gui,
-                        process_api=self.win32process, before_trigger=before_trigger)
-                result = observation.wait_result(timeout_s=20)
-            logger.info("Native voice result confirmed: account=%s message_id=%s generation=%s existing=%s duration_ms=%.1f",
-                account, message_id, result['generation'], already_completed, (time.monotonic() - started) * 1000)
-            return dict(result, status='success', already_completed=already_completed,
-                account=observation.account, username=observation.username, message_id=observation.message_id,
-                server_id=observation.server_id, create_time=observation.create_time)
-        except NativeVoiceError as exc:
-            logger.exception("Native voice observation failed: stage=%s", ui.stage if ui else 'prepare')
-            raise WeChatBridgeError(exc.message, code='WECHAT_NATIVE_VOICE_' + exc.code.upper(),
-                status_code=504 if exc.code.endswith('timeout') else 409) from exc
-        except (SnapshotRefreshError, SnapshotRegistryError) as exc:
-            raise WeChatBridgeError(f"原生转写账号当前不可用：{exc}",
-                code="WECHAT_NATIVE_VOICE_ACCOUNT_UNAVAILABLE", status_code=409) from exc
-        except WeChatBridgeError:
-            raise
-        except Exception as exc:
-            attempted = ui is not None and ui.voice_trigger_attempted
-            stage = ui.stage if ui is not None else 'prepare'
-            logger.exception("Native voice operation failed: stage=%s triggered=%s", stage, attempted)
-            raise WeChatBridgeError(f"微信原生转写失败（阶段：{stage}），请查看日志"
-                + ("；已尝试触发，请在微信核对，不会自动重试" if attempted else ""),
-                code="WECHAT_NATIVE_VOICE_UNCONFIRMED" if attempted else "WECHAT_NATIVE_VOICE_FAILED",
-                status_code=504 if attempted else 502) from exc
-        finally:
-            if lease is not None:
-                lease.release()
-
     async def send_image(self, session_title: str, image_path: str, *,
-                         account: str | None = None, username: str | None = None) -> ImageSendReceipt:
-        """Submit once and confirm exact local evidence when an account is supplied."""
+                         account: str, username: str) -> ImageSendReceipt:
+        """Submit once and confirm exact local evidence for the target account/chat."""
         session = str(session_title or "").strip()
         if not session:
             raise WeChatSessionNotFoundError("会话名称不能为空")
-        if (account is None) != (username is None):
-            raise WeChatBridgeError("图片确认需要同时指定账号和会话", code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=400)
         path, fingerprint = await asyncio.to_thread(self._validate_image_path, image_path)
         image_key = (session, fingerprint)
         if image_key in self._images_in_flight:
@@ -1057,19 +938,17 @@ class WeChatBridge:
         started = time.monotonic()
         try:
             async with self._get_lock():
-                confirmation = None
                 try:
-                    if account is not None:
-                        from .image_send_confirmation import ImageSendConfirmation
-                        try:
-                            confirmation = await self._await_operation(ImageSendConfirmation.prepare, account, username, path)
-                            await self._await_operation(confirmation.capture)
-                            logger.info("Image send preparation completed before window activation: duration_ms=%.1f",
-                                        (time.monotonic() - started) * 1000)
-                        except Exception as exc:
-                            logger.exception("Image confirmation baseline failed before submission")
-                            raise WeChatBridgeError(f"发送前无法准备图片确认：{exc}",
-                                code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
+                    from .image_send_confirmation import ImageSendConfirmation
+                    try:
+                        confirmation = await self._await_operation(ImageSendConfirmation.prepare, account, username, path)
+                        await self._await_operation(confirmation.capture)
+                        logger.info("Image send preparation completed before window activation: duration_ms=%.1f",
+                                    (time.monotonic() - started) * 1000)
+                    except Exception as exc:
+                        logger.exception("Image confirmation baseline failed before submission")
+                        raise WeChatBridgeError(f"发送前无法准备图片确认：{exc}",
+                            code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
                     foreground_started = time.monotonic()
                     hwnd = self._prepare_send_window()
                     if not self.win32gui.GetClassName(hwnd).lower().startswith("qt"):
@@ -1079,23 +958,17 @@ class WeChatBridge:
                     self.rate_limiter.rollback_message(session, fingerprint, message_kind="image")
                     raise
                 def before_submit():
-                    if confirmation is not None:
-                        try:
-                            confirmation.revalidate()
-                        except Exception as exc:
-                            raise WeChatBridgeError(f"发送前无法固定图片确认基线：{exc}",
-                                code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
+                    try:
+                        confirmation.revalidate()
+                    except Exception as exc:
+                        raise WeChatBridgeError(f"发送前无法固定图片确认基线：{exc}",
+                            code="WECHAT_IMAGE_CONFIRMATION_UNAVAILABLE", status_code=409) from exc
 
                 self._send_qt_image(hwnd, session, str(path), fingerprint, before_submit=before_submit)
                 submitted = True
                 logger.info("Image send foreground submission completed: duration_ms=%.1f",
                             (time.monotonic() - foreground_started) * 1000)
                 self.rate_limiter.retain_uncertain_message(session, fingerprint, message_kind="image")
-                if confirmation is None:
-                    raise WeChatBridgeError(
-                        "微信图片草稿已清空并出现新图片，但当前接口未提供可验证的发送方向和图片内容；请在微信核对结果，避免重复发送",
-                        code="WECHAT_SEND_UNCONFIRMED", status_code=504,
-                    )
                 try:
                     record = await self._await_operation(confirmation.confirm, timeout_s=15)
                     # Source validation also proves it was not replaced while confirming.

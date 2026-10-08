@@ -2,8 +2,6 @@ from bisect import bisect_left, bisect_right
 from ..account_workers import account_to_thread
 from functools import lru_cache
 from pathlib import Path
-import asyncio
-import os
 import base64
 import hashlib
 import json
@@ -11,18 +9,16 @@ import re
 import httpx
 import html # 修复&amp;转义的问题！！！
 import sqlite3
-import subprocess
 import threading
 import time
-import uuid
 import xml.etree.ElementTree as ET
 from typing import Any, Optional
 from urllib.parse import urlparse
 
 from starlette.background import BackgroundTask
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import Response, FileResponse, StreamingResponse  # 返回视频文件
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response, FileResponse
 
 from ..account_identity import resolve_account_self_username
 from ..chat_helpers import _load_contact_rows, _pick_display_name, _resolve_account_dir

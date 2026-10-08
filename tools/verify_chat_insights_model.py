@@ -21,7 +21,6 @@ import sqlite3
 import sys
 import threading
 import time
-from unittest.mock import patch
 import uuid
 
 

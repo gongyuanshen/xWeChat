@@ -30,7 +30,7 @@ from .data_source import normalize_data_source
 
 logger = get_logger(__name__)
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _INDEX_DB_NAME = "chat_search_index.db"
 _INDEX_DB_TMP_NAME = "chat_search_index.tmp.db"
 _LEGACY_INDEX_DB_NAME = "message_fts.db"
@@ -294,24 +294,27 @@ def start_chat_search_index_build(account_dir: Path, *, rebuild: bool = False, s
     now = int(time.time())
     with _BUILD_LOCK:
         st = _BUILD_STATE.get(key)
-        if st and st.get("status") == "building":
-            return get_chat_search_index_status(account_dir, source=source_norm)
-        _BUILD_STATE[key] = {
-            "status": "building",
-            "rebuild": bool(rebuild),
-            "source": source_norm,
-            "startedAt": now,
-            "finishedAt": None,
-            "indexedMessages": 0,
-            "fetchedMessages": 0,
-            "fetchCalls": 0,
-            "totalConversations": 0,
-            "completedConversations": 0,
-            "messagesPerSec": 0,
-            "currentDb": "",
-            "currentConversation": "",
-            "error": "",
-        }
+        already_building = bool(st and st.get("status") == "building")
+        if not already_building:
+            _BUILD_STATE[key] = {
+                "status": "building",
+                "rebuild": bool(rebuild),
+                "source": source_norm,
+                "startedAt": now,
+                "finishedAt": None,
+                "indexedMessages": 0,
+                "fetchedMessages": 0,
+                "fetchCalls": 0,
+                "totalConversations": 0,
+                "completedConversations": 0,
+                "messagesPerSec": 0,
+                "currentDb": "",
+                "currentConversation": "",
+                "error": "",
+            }
+
+    if already_building:
+        return get_chat_search_index_status(account_dir, source=source_norm)
 
     try:
         start_snapshot_thread(account_dir, _build_worker,
@@ -558,6 +561,12 @@ def _init_index_db(conn: sqlite3.Connection) -> None:
 def _create_message_meta_indexes(conn: sqlite3.Connection) -> None:
     # Create these after the bulk insert. Maintaining secondary B-tree indexes
     # during the first full SQLite scan noticeably slows index builds on large accounts.
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_message_meta_time
+        ON message_meta(create_time DESC, sort_seq DESC, local_id DESC)
+        """
+    )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_message_meta_visible_time

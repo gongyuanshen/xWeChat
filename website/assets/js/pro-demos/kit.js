@@ -187,10 +187,16 @@ export function createKit(gsap, root, { reduced = false } = {}) {
   };
 
   /* ── 窗口：应用窗 / 微信窗 ── */
-  K.window = ({ title = "WeChatDataAnalysis", kind = "app", cls = "" } = {}) => {
+  K.window = ({ title = "xwechat", kind = "app", cls = "" } = {}) => {
     const el = h("div", `pd-win pd-win--${kind} ${cls}`);
     const bar = h("div", "pd-win__bar");
     bar.innerHTML = '<i></i><i></i><i></i>';
+    if (kind === "app") {
+      const brandIcon = h("img", "pd-ic");
+      brandIcon.src = new URL("../../img/logo.png", import.meta.url).href;
+      brandIcon.alt = "";
+      bar.appendChild(brandIcon);
+    }
     bar.appendChild(h("b", "pd-win__title", title));
     const body = h("div", "pd-win__body");
     el.append(bar, body);
@@ -466,10 +472,14 @@ export function createKit(gsap, root, { reduced = false } = {}) {
   };
 
   /* ── 通知横幅 ── */
-  K.toast = ({ title = "微信", body = "", app = "WeChatDataAnalysis", parent, width } = {}) => {
+  K.toast = ({ title = "微信", body = "", app = "xwechat", parent, width } = {}) => {
     const el = h("div", "pd-toast");
     if (width) el.style.width = width + "px";
-    const ic = h("i", "pd-toast__ic"); ic.appendChild(icon("bell"));
+    const ic = h("i", "pd-toast__ic");
+    const brandIcon = h("img", "pd-ic");
+    brandIcon.src = new URL("../../img/logo.png", import.meta.url).href;
+    brandIcon.alt = "";
+    ic.appendChild(brandIcon);
     const t = h("div", "pd-toast__txt");
     t.append(h("b", "", title), h("span", "", body), h("i", "", app));
     el.append(ic, t);
@@ -620,7 +630,7 @@ export function createKit(gsap, root, { reduced = false } = {}) {
 
   /* ── 双窗口：左「本应用」右「微信」，发送类场景用；fly() 让一粒琥珀光点从 A 飞到 B ── */
   K.twin = ({ title = "老地方", group = false } = {}) => {
-    const app = K.window({ title: "WECHATDATAANALYSIS", kind: "app", cls: "pd-twin__app" });
+    const app = K.window({ title: "xwechat", kind: "app", cls: "pd-twin__app" });
     const wx = K.window({ title: "WECHAT · 微信", kind: "wechat", cls: "pd-twin__wx" });
     mount(app.el); mount(wx.el);
     const appChat = K.chat({ title, rail: false, group, parent: app.body });

@@ -63,23 +63,6 @@ def _compute_page_hmac(mac_key: bytes, page: bytes, page_num: int) -> bytes:
     return mac.digest()
 
 
-def _compute_page_hmac_variant(
-    mac_key: bytes,
-    page: bytes,
-    page_num: int,
-    *,
-    endian: str = "little",
-    include_iv: bool = True,
-) -> bytes:
-    """用于诊断的 HMAC 变体计算，不参与实际解密决策。"""
-    offset = SALT_SIZE if page_num == 1 else 0
-    data_end = PAGE_SIZE - RESERVE_SIZE + (IV_SIZE if include_iv else 0)
-    mac = hmac.new(mac_key, digestmod=hashlib.sha512)
-    mac.update(page[offset:data_end])
-    mac.update(page_num.to_bytes(4, endian))
-    return mac.digest()
-
-
 def _hash_prefix(data: bytes, *, length: int = 16) -> str:
     """返回 SHA256 前缀，避免日志输出明文数据。"""
     try:
@@ -166,97 +149,6 @@ def _read_plain_sqlite_header_debug(path: str | Path) -> dict[str, Any]:
             )
     except Exception as exc:
         out["error"] = f"{type(exc).__name__}: {' '.join(str(exc).split())[:180]}"
-    return out
-
-
-def _plain_page_btree_debug(page_plain: bytes, page_num: int) -> dict[str, Any]:
-    """解析明文页 B-tree 页头摘要，不输出任何业务明文。"""
-    out: dict[str, Any] = {"page": int(page_num), "plain_sha256": _hash_prefix(page_plain, length=24)}
-    try:
-        hdr = 100 if int(page_num) == 1 else 0
-        if len(page_plain) >= hdr + 12:
-            page_type = int(page_plain[hdr])
-            out["btree_header_offset"] = int(hdr)
-            out["btree_page_type"] = page_type
-            out["btree_page_type_name"] = {
-                2: "interior_index",
-                5: "interior_table",
-                10: "leaf_index",
-                13: "leaf_table",
-            }.get(page_type, "unknown")
-            out["first_freeblock"] = int.from_bytes(page_plain[hdr + 1 : hdr + 3], "big")
-            out["cell_count"] = int.from_bytes(page_plain[hdr + 3 : hdr + 5], "big")
-            out["cell_content_area"] = int.from_bytes(page_plain[hdr + 5 : hdr + 7], "big")
-            out["fragmented_free_bytes"] = int(page_plain[hdr + 7])
-            if page_type in (2, 5):
-                out["right_most_pointer"] = int.from_bytes(page_plain[hdr + 8 : hdr + 12], "big")
-    except Exception as exc:
-        out["btree_parse_error"] = f"{type(exc).__name__}: {' '.join(str(exc).split())[:160]}"
-    return out
-
-
-def _build_page_anomaly_debug(
-    enc_key: bytes,
-    mac_key: bytes,
-    page: bytes,
-    page_num: int,
-    *,
-    stored_hmac: bytes | None = None,
-    expected_hmac: bytes | None = None,
-    reason: str = "hmac",
-) -> dict[str, Any]:
-    """构造异常页诊断信息，默认只记录哈希/页头摘要。"""
-    page = bytes(page or b"")
-    stored = stored_hmac if stored_hmac is not None else page[PAGE_SIZE - HMAC_SIZE : PAGE_SIZE]
-    expected = expected_hmac if expected_hmac is not None else _compute_page_hmac(mac_key, page, page_num)
-    iv = page[PAGE_SIZE - RESERVE_SIZE : PAGE_SIZE - RESERVE_SIZE + IV_SIZE]
-    encrypted_payload = page[SALT_SIZE if page_num == 1 else 0 : PAGE_SIZE - RESERVE_SIZE]
-    out: dict[str, Any] = {
-        "reason": str(reason),
-        "page": int(page_num),
-        "byte_start": int((int(page_num) - 1) * PAGE_SIZE),
-        "byte_end_exclusive": int(int(page_num) * PAGE_SIZE),
-        "page_size": int(len(page)),
-        "page_sha256": _hash_prefix(page, length=24),
-        "encrypted_payload_sha256": _hash_prefix(encrypted_payload, length=24),
-        "iv_hex": _hex_prefix(iv, length=16),
-        "stored_hmac_prefix": _hex_prefix(stored, length=16),
-        "expected_hmac_prefix": _hex_prefix(expected, length=16),
-        "hmac_match_current": bool(hmac.compare_digest(stored, expected)),
-    }
-
-    variants: dict[str, bool] = {}
-    for candidate_page in (page_num - 1, page_num, page_num + 1):
-        if candidate_page <= 0:
-            continue
-        for endian in ("little", "big"):
-            for include_iv in (True, False):
-                key = f"page={candidate_page};endian={endian};include_iv={int(include_iv)}"
-                try:
-                    variants[key] = bool(
-                        hmac.compare_digest(
-                            stored,
-                            _compute_page_hmac_variant(
-                                mac_key,
-                                page,
-                                int(candidate_page),
-                                endian=endian,
-                                include_iv=include_iv,
-                            ),
-                        )
-                    )
-                except Exception:
-                    variants[key] = False
-    out["hmac_variant_matches"] = [k for k, v in variants.items() if v]
-
-    try:
-        plain_page = _decrypt_page(enc_key, page, int(page_num))
-        out["aes_decrypt_ok"] = True
-        out["plain"] = _plain_page_btree_debug(plain_page, int(page_num))
-    except Exception as exc:
-        out["aes_decrypt_ok"] = False
-        out["aes_error"] = f"{type(exc).__name__}: {' '.join(str(exc).split())[:180]}"
-
     return out
 
 

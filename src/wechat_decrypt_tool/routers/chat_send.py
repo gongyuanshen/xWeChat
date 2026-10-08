@@ -7,11 +7,10 @@ Adheres strictly to Debug-First Policy (no silent fallbacks, Let-it-Fail, fail-f
 from __future__ import annotations
 
 from datetime import datetime
-import logging
 import time
-from typing import Any, Literal, Optional
+from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.routing import APIRoute
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, field_validator
@@ -25,7 +24,6 @@ from ..wechat_ui_bridge import (
     FileSendReceipt,
     SendReceipt,
     WeChatBridge,
-    WeChatBridgeError,
     WeChatStatus,
 )
 

@@ -7,7 +7,7 @@ import time
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from .agent_budget import size, message_payload, input_limit
-from .deep_partition import AnalysisPlans, PLAN_VERSION, QUEUE_LIMIT, WORKERS, fingerprint, capacity, covered_part
+from .deep_partition import AnalysisPlans, PLAN_VERSION, QUEUE_LIMIT, WORKERS, fingerprint, capacity
 from .deep_tools import ChatGateway
 from .providers import ProviderFailure
 from .agent_schemas import AgentControl
@@ -105,6 +105,7 @@ class ParallelAnalysis:
         else:
             description += '\n只完成这个独立检索或核查目标；证据足够即结束，不能把搜索命中声称为全量覆盖。'
         child = {k: parent[k] for k in ('account', 'profile', 'vision', 'timezone', 'timezone_offset', 'cutoff', 'effort', 'input_budget')}
+        child.update(origin=parent.get('origin', 'chat'), chat_scope=parent.get('chat_scope'))
         child.update(id=job['child_run_id'], thread_id='deep-thread:' + job['id'], parent_run_id=parent['id'],
             parent_version=parent['version'], version=1, applied_version=1, engine='deepagents', engine_version=3,
             checkpoint_schema=2, subtask_plan_version=PLAN_VERSION, child_role=job['role'], subtask_id=job['id'],
@@ -115,6 +116,7 @@ class ParallelAnalysis:
             read_count=0, used={'tools': 0, 'models': 0, 'media': 0}, observations=[], activity=[],
             scope_revision=0, required_conversations=[], coverage_state='not_applicable', request_ids=[])
         self.store.put('agent_thread', {'id': child['thread_id'], 'account': parent['account'], 'username': users[0],
+            'origin': child['origin'], 'chat_scope': child['chat_scope'],
             'parent_run_id': parent['id'], 'scope': users, 'scope_revision': 0, 'messages': [],
             'latest_run': child['id'], 'title': job['name']})
         self.store.put('agent_run', child)

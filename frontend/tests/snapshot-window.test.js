@@ -57,6 +57,24 @@ const setup = () => {
 }
 
 describe('快照发布后的消息窗口', () => {
+  it('搜索响应缺少状态时显示失败，不伪装成成功的空结果', async () => {
+    const { api, search } = setup()
+    api.searchChatMessages = vi.fn(async () => ({ hits: [], total: 0 }))
+    search.messageSearchQuery.value = '合成查询'
+    await search.runMessageSearch({ reset: true })
+    expect(search.messageSearchError.value).toBe('搜索失败')
+    expect(search.messageSearchBackendStatus.value).not.toBe('success')
+    expect(search.messageSearchLoading.value).toBe(false)
+  })
+
+  it('发送者列表响应缺少状态时暴露错误', async () => {
+    const { api, search } = setup()
+    api.listChatSearchSenders = vi.fn(async () => ({ senders: [] }))
+    await search.fetchMessageSearchSenders()
+    expect(search.messageSearchSenderError.value).toBe('加载发送者失败')
+    expect(search.messageSearchSenderOptionsKey.value).toBe('')
+  })
+
   it('历史浏览收到快照后直接读取最新消息，不建立定位上下文，并清除旧代缓存', async () => {
     const { search, messages, context, api, container } = setup()
     await search.refreshSnapshotWindow({ signal: new AbortController().signal })

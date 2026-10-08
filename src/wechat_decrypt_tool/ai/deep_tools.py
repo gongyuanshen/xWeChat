@@ -12,7 +12,7 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field, StrictInt, StrictStr
 from typing import Annotated, Literal
 
-from .agent_budget import input_limit, message_payload, size
+from .agent_budget import message_payload, size
 from .agent_context import explicit_clock_range
 from .agent_global import resolve_directory_name, comparable_name
 from .agent_references import material_references, reference_id
@@ -20,19 +20,7 @@ from .deep_synchronization import serialized
 from .deep_validation import requires_complete_analysis, requires_findings
 from .deep_calculation import CalculationTerm, calculate
 from .deep_planning import REVISION, MainWork, BranchWork
-from .model_execution import MICRO_BATCH_MIN_BYTES, MICRO_BATCH_MAX_BYTES
-
-
-def capacity(service, run) -> int:
-    """Enforce micro-batch budget strictly bounded between 12 KiB and 16 KiB."""
-    raw = run.get('material_batch_bytes') or run.get('capacity')
-    if raw is None:
-        try:
-            profile = service.profile(run)
-            raw = input_limit(profile) // 3
-        except (KeyError, AttributeError, TypeError, Exception):
-            raw = MICRO_BATCH_MAX_BYTES
-    return max(MICRO_BATCH_MIN_BYTES, min(MICRO_BATCH_MAX_BYTES, raw))
+from .deep_partition import capacity
 
 
 class ScopeError(ValueError):
@@ -197,10 +185,18 @@ class ChatGateway:
             else:
                 complete = complete or (not run.get('parent_run_id') and requires_complete_analysis(run.get('input_digest', '')))
             thread = self.service.thread(run['thread_id'], run['account'])
-            contacts = self.get('directory:conversations')
+            standalone = run.get('origin') == 'agent'
+            contacts = None if standalone else self.get('directory:conversations')
             if contacts is None:
-                contacts = await self.service.tools.conversations(run['account'])
+                contacts = await self.service.agent_directory(run['account'], run['chat_scope']) if standalone else await self.service.tools.conversations(run['account'])
                 self.guard()
+                if standalone:
+                    full_directory = contacts
+                    if run['chat_scope'] is not None:
+                        contacts = [c for c in contacts if c['username'] in run['chat_scope']]
+                    standalone_allowed = {c['username'] for c in contacts}
+                if run.get('bound_scope'):
+                    contacts = [c for c in contacts if c['username'] in run['bound_scope']['conversations']]
                 # 同一输入版本复用名称目录；补充要求生成新版本后重新获取。
                 self.put('directory:conversations', 'deep_directory', contacts)
             self.guard()
@@ -208,7 +204,7 @@ class ChatGateway:
             # 在真正查询时才匹配用户点名的对象；模型失败后不能改用全账号范围。
             # 只采用足够长的明确名称，避免“我”“妈妈”等短词误识别为本轮对象。
             question_name = comparable_name(run.get('input_digest', ''))
-            named = [c for c in contacts if (len(comparable_name(c['name'])) >= 4 and comparable_name(c['name']) in question_name)
+            named = [c for c in (full_directory if standalone else contacts) if (len(comparable_name(c['name'])) >= 4 and comparable_name(c['name']) in question_name)
                 or c['username'] in run.get('input_digest', '')]
             named_ids = {c['username'] for c in named}
             exclusion_clauses = [comparable_name(m[1]) for m in re.finditer(
@@ -216,6 +212,14 @@ class ChatGateway:
             explicit_excluded = {c['username'] for c in named if any(
                 comparable_name(c['name']) in clause or c['username'] in clause for clause in exclusion_clauses)}
             positive_ids = named_ids - explicit_excluded
+            if standalone:
+                permitted_names = {comparable_name(c['name']) for c in full_directory if c['username'] in standalone_allowed}
+                if any(c['username'] in positive_ids and c['username'] not in standalone_allowed
+                    and (c['username'] in run.get('input_digest', '') or comparable_name(c['name']) not in permitted_names) for c in named):
+                    raise ScopeError('chat_scope_violation', '请求的会话超出此独立 Agent 对话的固定范围，请新建对话')
+                named = [c for c in named if c['username'] in allowed]
+                named_ids &= allowed.keys()
+                positive_ids &= allowed.keys()
             inherited = run.get('restart_filters') or {}
             if reuse_previous:
                 inherited = self.previous_filters()
@@ -231,6 +235,8 @@ class ChatGateway:
             for name in requested:
                 matches = resolve_directory_name(contacts, name)
                 if len(matches) != 1:
+                    if standalone and not matches:
+                        raise ScopeError('chat_scope_violation', '请求的会话不在此独立 Agent 对话的可读范围内')
                     return {'clarification': '会话名称不唯一或不存在', 'candidates': matches[:8]}
                 selected.append(matches[0]['username'])
             if not requested:

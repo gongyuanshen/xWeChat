@@ -142,8 +142,6 @@ def decode_wxgf(data: bytes, *, checkpoint: Callable[[], None] | None = None) ->
         raise ValueError("Invalid WXGF header")
     if len(data) > 0x7fffffff:
         raise ValueError("WXGF input exceeds the codec's signed 32-bit length")
-    if getattr(sys, "frozen", False):
-        raise RuntimeError("WXGF local decoding requires the Python backend; frozen backend worker is not packaged")
     if sys.platform != "win32":
         raise RuntimeError("WXGF local decoding requires Windows and VoipEngine.dll")
     if not DLL_PATH.is_file():
@@ -155,8 +153,9 @@ def decode_wxgf(data: bytes, *, checkpoint: Callable[[], None] | None = None) ->
         source.write_bytes(data)
         if checkpoint:
             checkpoint()
+        worker = "--wxgf-decode-worker" if getattr(sys, "frozen", False) else str(Path(__file__).resolve())
         with subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), str(source), str(output)],
+            [sys.executable, worker, str(source), str(output)],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         ) as process:
@@ -199,8 +198,12 @@ def decode_wxgf(data: bytes, *, checkpoint: Callable[[], None] | None = None) ->
         return decoded
 
 
-if __name__ == "__main__":
-    # Run as a file so the child imports neither package startup nor a broker.
-    if len(sys.argv) != 3:
+def worker_main(args: list[str]) -> None:
+    if len(args) != 2:
         raise ValueError("WXGF worker requires input and output paths")
-    Path(sys.argv[2]).write_bytes(_decode_with_dll(Path(sys.argv[1]).read_bytes(), DLL_PATH))
+    Path(args[1]).write_bytes(_decode_with_dll(Path(args[0]).read_bytes(), DLL_PATH))
+
+
+if __name__ == "__main__":
+    # Source launches keep the decoder isolated from application startup.
+    worker_main(sys.argv[1:])

@@ -905,12 +905,6 @@ def _official_account_kind(type_value: Any) -> str:
     return "unknown"
 
 
-def _contact_kind_is_official_subscription_bucket(kind: Any) -> bool:
-    # UI 只展示“公众号/服务号”两张卡；企业号/未知公众号归入“公众号”卡，
-    # 避免出现无法通过 6 分类筛选到的官方账号。
-    return _normalize_text(kind) != "service"
-
-
 def _resolve_official_filter(
     include_officials: bool,
     include_official_subscriptions: Optional[bool],
@@ -1369,42 +1363,6 @@ def _matches_keyword(contact: dict[str, Any], keyword: str) -> bool:
         if kw in _normalize_text(field).lower():
             return True
     return False
-
-
-def _contact_item_from_session(
-    *,
-    account_dir: Path,
-    base_url: str,
-    username: str,
-    display_name: str,
-    avatar_link: str,
-    sort_ts: int,
-) -> dict[str, Any]:
-    contact_type = "group" if "@chatroom" in username else ("official" if username.startswith("gh_") or username == "weixin" else "friend")
-    display_name = _normalize_text(display_name) or username
-    return {
-        "username": username,
-        "displayName": display_name,
-        "remark": "",
-        "nickname": display_name if display_name != username else "",
-        "alias": "",
-        "gender": 0,
-        "signature": "",
-        "type": contact_type,
-        "country": "",
-        "province": "",
-        "city": "",
-        "region": "",
-        "sourceScene": None,
-        "source": "",
-        "addTime": None,
-        "addTimeText": "",
-        "commonChatroomCount": None,
-        "commonChatrooms": [],
-        "avatar": base_url + _build_avatar_url(account_dir.name, username),
-        "avatarLink": _normalize_text(avatar_link),
-        "_sortTs": int(sort_ts or 0),
-    }
 
 
 def _attach_official_account_kind(

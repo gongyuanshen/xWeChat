@@ -11,7 +11,7 @@
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(x64)-0078D6?logo=windows&logoColor=white)](https://github.com/gongyuanshen/xWeChat)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22.12+-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Vue.js](https://img.shields.io/badge/Frontend-Nuxt%203%20%2F%20Vue%203-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
+[![Vue.js](https://img.shields.io/badge/Frontend-Nuxt%204%20%2F%20Vue%203-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
 [![License](https://img.shields.io/badge/License-Personal%20Hobby%20Only-lightgrey)](#免责声明与严禁商用)
 
 <br />
@@ -22,22 +22,263 @@
 
 ---
 
-## 📖 项目简介与血缘说明
+## 项目简介
 
-**xwechat** 是一个面向 Windows 平台的个人本地微信数据分析与交互实验工具。本项目纯粹源于个人对客户端架构、本地数据库处理以及端侧 AI 模型的学习研究兴趣，旨在提供一个轻量、纯本地、私密的聊天数据浏览与分析环境。
+**xwechat** 是一个面向 Windows 平台的个人微信记录整理、备份与分析工具。你可以解密或导入自己的本地数据，回看聊天与朋友圈，搜索和导出记录，生成年度总结，也可以按需使用本地模型或配置的 AI 服务。
 
-聊天数据库的解密与存储在本机进行。项目只保留独立数据链路，旧 client／broker 运行模式及其授权链已移除；WXGF 静态图片与动画复用本地解码库。使用 API 模型时，所选内容仍会发送到配置的模型服务。运行方式与格式边界见[源码开发说明](docs/development-windows.md)。
+数据库解密、快照读取和存储在本机进行；旧 client／broker 数据运行模式及其授权链已移除。图片解码、媒体转换、语音识别仍各有本地组件和模型依赖。**“本地数据处理”不代表应用所有功能都不联网**：远端 AI 服务会接收本次分析所需的材料，模型下载、媒体下载及外部链接也需要网络。
 
-### 🧬 项目衍生与技术来源
-- **基础项目**：本项目是在 [LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)（微信4.x数据解密并生成年度总结）的基础上进行的**二次开发**。
-- **AI 画像与意图洞察**：项目中的 **AI 聊天画像与意图洞察** 核心功能，是基于开源项目 [tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)（微信聊天分析工具，支持本地 Laya 与 API 模型，提供意图识别、情绪感知、人物画像、群聊画像、好感度分析和 MBTI 聊天推测）进行深度集成与二次开发实现。
+本项目用于个人业余学习和娱乐探索，是非官方实验工具。部分功能依赖微信版本、窗口状态、本地资源和模型能力，不能代替微信客户端。
 
----
+[功能清单](#当前功能) · [快速开始](#快速开始) · [AI 与语音](#ai-与语音) · [源码运行](#源码运行) · [Windows 打包](#windows-打包) · [已知限制](#已知限制) · [问题反馈](#问题反馈)
 
-## ✨ 当前核心功能
-> *项目从一开始就是娱乐性质的，很多功能看起来有用但其实使用起来是限制很多的，用起来很难受的，因此本项目不可拿来当成真正的客户端使用，只适合娱乐使用。秉着可以不用但是不能没有的原则才加上了这些看着有用实则用起来很难受的功能。*
+## 当前功能
 
-## ⚖️ 免责声明与严禁商用
+下表说明当前源码中的功能。已下载的历史安装包未必包含这些更新，安装版能力以对应 Release 说明和实际验收为准。
+
+| 功能 | 当前提供的能力 |
+| --- | --- |
+| 数据解密与导入 | 检测本机微信账号，扫描并验证数据库密钥；解密微信 4.x 本地数据库；预览并导入账号归档 ZIP 或已解密账号目录 |
+| 多账号与同步 | 切换本地账号；具备源目录和密钥绑定的账号定时同步验证快照、手动刷新；导入的历史归档可独立浏览 |
+| 聊天浏览与搜索 | 浏览私聊、群聊、图片、视频、语音、表情、引用和合并记录等；按关键词、会话、发送者、日期、消息类型搜索，查看上下文、月历热力图及历史浮窗 |
+| 联系人与服务号 | 查看联系人分类、个人资料、群成员、好友验证记录及服务号消息；导出联系人资料 |
+| 朋友圈 | 浏览本地时间线、历史封面、图片、视频、实况、点赞和评论；支持全量及增量导出 |
+| 收藏与其他记录 | 搜索并导出本地收藏、小程序资料、视频号直播缓存及收付款记录；查看撤回相关记录 |
+| 记录导出与账号备份 | 导出 HTML、JSON、TXT、Excel；聊天与朋友圈提供 ZIP 全量归档及目录增量导出；完整账号可导出数据库与资源归档 |
+| AI 助手 | 独立助手和聊天内助手；按指定聊天范围检索、梳理和追问，查看原文引用，保留任务进度与历史；聊天内另有总结、自动任务和关注提醒 |
+| 聊天画像与意图识别 | 本地 Laya 或明确选择的 API 分析；人物／群聊画像、情绪与意图标签、聊天特征及 MBTI 推测；自动识别需主动开启 |
+| 本地语义检索 | 下载检索模型并启用后，逐步整理当前账号全部聊天；关键词与语义检索结合，支持暂停和继续整理，查询时可限制聊天及日期 |
+| 本地语音转文字 | 下载并选择 CPU 或 NVIDIA GPU 模型，转写单条或批量语音，保留已有微信转写并区分结果来源 |
+| 回声异境年度总结 | 按账号与年份进入十章三维年度体验，查看消息规模、活跃时段、文字、互动联系人、回复节奏和表情统计，展开明细并回到原消息 |
+| 实验性微信发送 | 借助已登录的 Windows 微信窗口发送文本、PNG/JPEG 图片和文件；支持附件多选、粘贴及逐项队列发送 |
+| MCP 接入 | 为支持 HTTP MCP 的客户端提供本地账号、聊天、朋友圈、媒体及年度统计等只读查询工具 |
+
+## 快速开始
+
+### 获取桌面版
+
+从 [GitHub Releases](https://github.com/gongyuanshen/xwechat/releases) 查看已发布版本及其说明。Windows x64 提供以下打包形式：
+
+- **安装版**：运行 `xwechat-<版本>-Setup.exe`，按安装向导选择目录。
+- **免安装版**：完整解压 `xwechat-<版本>-Setup.zip`，在解压目录中运行 `xwechat.exe`。请保留同目录的全部资源。
+
+桌面包包含 Electron、Python 后端和基础运行组件，无需另装 Python 或 Node.js。Laya、语音和语义检索的**模型权重需单独准备**；Qwen GPU 语音模型还需要包含相应运行组件的版本。构建方式见 [Windows 打包](#windows-打包)。
+
+### 第一次接入本机数据
+
+1. 保持电脑版微信运行，登录需要读取的账号，在首页点击 **“检测本机微信”**。
+2. 核对账号与数据目录，进入解密页面。获取数据库密钥前，填写该账号完整 `db_storage` 目录的绝对路径；也可以手动输入已知密钥。
+3. 获取密钥后，退出微信，复制完整账号的 `db_storage`，保留 `.db` 及对应的 `-wal` 文件，再对稳定副本执行普通解密。普通解密不保证在线跨库事务一致性。
+4. 图片使用单独的图片密钥。批量图片解密、表情下载和语音转文字均为可选步骤，可以先跳过并进入聊天页面。
+5. 在账号列表选择已解密账号，浏览、搜索或导出记录；需要 AI 或语音功能时，再准备相应服务和模型。
+
+持续同步使用账号绑定的源目录和密钥，在聊天页自动启动验证快照同步，每轮检查结束后等待约 30 秒。**绑定的是备份副本时，同步检查的也是该副本**；从归档导入且没有源目录绑定的账号不会获得本机微信的新消息。顶部刷新按钮用于主动刷新，自动同步保持安静，失败时显示原因和重试入口。
+
+### 导入已有备份
+
+首页选择 **“导入备份”**，选择本应用导出的原始账号 ZIP（无需解压），或已解密的账号目录。也可选择仅包含一个账号的 `output` 根目录。
+
+先查看识别出的账号、数据库和资源，再确认导入。数据会复制到应用本地数据区；已有同名账号会先备份，原备份目录不会被直接修改。普通聊天阅读导出与完整账号归档用途不同，导入账号请使用账号归档或符合要求的已解密目录。
+
+## 导出与年度分享
+
+聊天导出可选择会话、日期和消息类型，再选择 HTML、JSON、TXT 或 Excel，按需包含本地媒体。朋友圈支持全量及增量导出；联系人、收藏等页面也提供相应导出入口。完整备份使用首页的 **“导出归档”**。
+
+- 导出可以按选项获取图片密钥、下载可用媒体或生成本地语音转写；这些步骤需要对应客户端、资源、网络或已就绪的转写模型。
+- 本地不存在的附件会记录缺失；不能据此保证历史附件全部完整。HTML 中未打包为本地文件的远程图片及外部链接，打开时仍可能联网。
+- 归档中的 SHA-256 清单用于检查内容一致性，不是作者签名或来源认证。完整账号归档导入会检查文件集合、摘要和数据库完整性。
+- 现有导出 API 支持 WEC1 整包加密，需显式提供独立的 32 字节内容密钥。增量目录不支持整包加密；图形导入接收 ZIP／目录，加密文件须先解密。
+
+“回声异境”分享面板提供独立排版的 **PNG 海报**和 **离线 HTML 阅读档案**。桌面版还可导出当前三维场景截图或全部十章截图 ZIP；浏览器端的海报／HTML 分享与桌面场景截图是不同输出。
+
+海报／HTML 分享面板默认使用匿名摘要；聊天正文、人物信息和私人图片需按界面选项明确选择。桌面场景截图沿用年度页面的匿名开关，不会自动套用分享面板设置。分享前请检查实际输出内容。
+
+## AI 与语音
+
+### AI 服务与助手
+
+在 **“设置 → AI 服务 → 模型服务”** 添加服务，填写接口地址和密钥，获取并选择模型，保存后测试连接。支持 OpenAI 兼容、Claude Messages 等接口，也可连接自行启动的 Ollama 或 LM Studio 本地服务。
+
+- **侧栏“AI 助手”**：无需先打开联系人，可选择当前账号的全部可读聊天或指定聊天；支持搜索、追问、引用预览和历史对话。每个独立 AI 对话的聊天范围固定，改变范围会进入新对话。
+- **聊天内 AI 面板**：从当前聊天开始提问；其 **“工具与任务”** 菜单提供消息总结、自动总结任务、关注提醒和历史。定时任务仅在应用运行期间执行，托盘运行仍可工作。
+- **图片与附件理解**：可处理聊天中的本地图片，以及 TXT、Markdown、CSV、PDF、DOCX、XLSX、PPTX 等附件。图片、扫描 PDF 和文档插图需要所选模型支持图片理解；缺失、超限或不支持的内容会说明处理缺口。
+
+连接测试和分析请求可能产生用量。调用明细见 **“设置 → AI 服务 → 用量记录”**；费用以服务商账单为准，未返回用量的请求会单独标明。使用远端服务时，相关聊天、附件文字或图片会发送给你配置的接口。
+
+### 本地 Laya 画像与自动识别
+
+在聊天工具栏打开 **“聊天画像”**，进入分析设置，选择时间范围、对象和分析方式，再开始分析。默认使用本地 Laya；约 681 MB 的模型可下载或离线导入，准备完成后在 CPU 上本地运行。需要更详细的文字分析时，明确选择 API 方式。
+
+私聊画像只分析对方消息；群聊可选择群整体或具体成员，成员画像只读取该成员的消息。Laya 属于分类和统计模型，情绪、意图、亲近倾向及 MBTI 都是实验性聊天推测，应结合原文核对。
+
+聊天页 **“意图识别”** 是独立开关，默认关闭。主动开启后才分析已加载、翻页及新出现的文本，本人消息不进入自动识别及其上下文。已有标签可复用；选择 API 方式会发送相关材料并可能产生费用。
+
+### 本地语义检索
+
+在 **“设置 → AI 服务 → 本地检索”** 下载并选择检索模型，再点击 **“开启并开始整理”**。功能默认关闭；启用后在后台逐步整理当前账号全部聊天，暂停或重启保留进度。提问中的聊天与日期条件限制本次查询，不改变已启用的全账号索引范围。
+
+索引和向量推理在本机运行，CPU 即可使用，NVIDIA 加速可选。关闭功能保留模型与索引，清理索引不会删除聊天记录。检索范围受已整理资料和账号权限约束；**本地检索不改变 AI 助手生成回答所使用的模型服务**。
+
+### 本地语音转文字
+
+在 **“设置 → 语音转文字”** 下载并选择模型，再对单条语音转文字，或从聊天工具栏进入批量转写。
+
+| 模型 | 下载体积约 | 设备与特点 |
+| --- | ---: | --- |
+| Zipformer CTC | 29 MB | 默认 CPU 模型，适合低配和中英文短语音，输出不含标点 |
+| Qwen3-ASR 0.6B · CPU | 2.03 GB | CPU，中文转写质量优先；界面建议 16 GB 内存 |
+| Qwen3-ASR 0.6B · GPU | 1.58 GB | NVIDIA GPU，需额外 Qwen GPU 运行组件 |
+| Turbo | 1.6 GB | 支持 CPU／NVIDIA GPU，速度优先 |
+
+语音在本机处理。批量转写保留已有文字，区分微信原生转写和本项目生成的结果。删除本项目转写结果会保留原语音、微信原生转写及模型。Qwen GPU 不会自动换成另一个 CPU 模型；模型与设备可用性以设置页检测结果为准。
+
+## MCP 接入
+
+打开 **“设置 → MCP 接入”**，复制当前地址、Token、接入提示词或 Skill，配置支持 HTTP MCP 的客户端。常见本机地址为 `http://127.0.0.1:10392/mcp`，请求使用 `Authorization: Bearer <Token>`，实际地址以设置页为准。
+
+只有其他设备需要连接时才开启 **“允许局域网接入 MCP”**，并使用界面提供的局域网地址。Token 可以重置，请勿把真实 Token 放入公开配置或反馈材料。
+
+MCP 工具提供只读查询，不提供微信发送。媒体链接代表资源入口，不代表外部模型已读取内容；外部客户端如何处理返回的聊天材料，应以该客户端及模型服务的配置为准。仓库附带 [MCP Copilot Skill](skills/wechat-mcp-copilot/SKILL.md)。
+
+## 源码运行
+
+### 环境与启动
+
+使用 **Windows 10／11 x64、Python 3.11+、uv、Node.js 22.12+**；仓库的 Python 开发版本固定为 3.11。先克隆仓库，随后在项目根目录安装依赖并启动：
+
+```powershell
+git clone https://github.com/gongyuanshen/xwechat.git
+Set-Location .\xwechat
+
+uv sync --locked --extra voice-transcription
+npm --prefix frontend ci
+npm --prefix desktop ci
+npm --prefix desktop run dev
+```
+
+`dev` 同时启动 Nuxt 开发服务、Electron 和 Python 后端。默认从前端 3000、后端 10392 开始寻找可用端口，实际地址见终端输出。
+
+需要 Qwen GPU 语音运行组件时使用：
+
+```powershell
+uv sync --locked --extra voice-transcription --extra voice-transcription-gpu
+npm --prefix desktop run dev:gpu
+```
+
+`dev:gpu` 指语音运行依赖，不是三维界面的图形加速开关。独立启动后端可执行 `uv run --extra voice-transcription main.py`，默认接口文档位于 `http://127.0.0.1:10392/docs`。单独启动 Python 默认使用当前工作目录下的 `output`，可通过环境变量指定数据路径；媒体处理还需可用的 FFmpeg 和 Node.js，完整桌面启动会配置这些运行路径。
+
+### 项目结构
+
+```text
+xwechat/
+├── frontend/                 # Nuxt 4 / Vue 3 界面
+├── desktop/                  # Electron 主进程、桌面桥与打包脚本
+├── src/wechat_decrypt_tool/   # FastAPI、数据处理、AI、媒体与年度统计
+├── tests/                    # Python 测试
+├── docs/                     # 专题说明及分阶段验收记录
+├── skills/                   # MCP 客户端配套 Skill
+├── tools/                    # 开发与验证工具
+├── website/                  # 项目介绍网站
+├── main.py                   # 源码后端启动入口
+├── pyproject.toml            # Python 依赖与版本
+└── uv.lock                   # Python 依赖锁文件
+```
+
+### 常用验证命令
+
+```powershell
+# 后端、前端和桌面自动化测试
+uv run --locked --group dev --extra voice-transcription python -m pytest
+npm --prefix frontend test
+node --test (Get-ChildItem -LiteralPath .\desktop\tests -Filter *.test.cjs).FullName
+
+# 桌面使用的前端静态生成
+npm --prefix frontend run generate
+```
+
+按改动范围运行相关检查。自动化测试、真实模型推理、真实微信操作和安装包验收分别验证不同层面，不能互相代替。
+
+## Windows 打包
+
+完成上述依赖准备后，当前 Windows x64 基础包使用：
+
+```powershell
+npm --prefix desktop run dist
+```
+
+该命令依次生成图标、生成并复制前端静态资源、构建 Python 后端，再打包 NSIS 安装器与 ZIP。基础包包含 CPU 语音运行组件，不包含 Qwen GPU 所需的 PyTorch／Transformers；模型权重不随包分发。
+
+需要包含 Qwen GPU 运行组件时，按顺序执行：
+
+```powershell
+npm --prefix desktop run build:icon
+npm --prefix desktop run build:ui
+npm --prefix desktop run build:backend:gpu
+npm --prefix desktop run dist:fast
+```
+
+`dist:fast` 只包装已有资源，不重新构建前端或后端；首次打包或源码变化后应完成相应构建。产物位于：
+
+```text
+desktop/dist/
+├── xwechat-<版本>-Setup.exe
+├── xwechat-<版本>-Setup.zip
+└── win-unpacked/
+```
+
+CPU 与 GPU 构建使用同一输出目录和文件名，应分别保存产物后再构建另一种版本。版本取自 `desktop/package.json`，发布前需与 `pyproject.toml` 同步。当前脚本关闭代码签名并使用 `--publish never`，**打包命令不会自动发布到 GitHub**。
+
+构建中的后端冒烟检查只验证 API 导入和进程启动信息。WXGF 已接入冻结后端的独立解码 worker，并通过真实冻结程序的静态 JPEG、透明 PNG 和多帧 GIF 验证。实际安装、真实账号数据、模型推理及微信交互仍需分别验收，不能由打包成功推断全部通过。
+
+## 数据目录与升级
+
+| 运行方式 | 默认数据位置 |
+| --- | --- |
+| 全新 Windows 安装版 | `%APPDATA%\xwechat`，默认输出在其 `output` 子目录 |
+| 源码 Electron 开发版 | `%APPDATA%\wechat-data-analysis-desktop`，默认输出在其 `output` 子目录 |
+| 单独运行 Python 后端 | 当前工作目录下的 `output` |
+
+安装版已有 `xwechat` 持久状态时优先沿用它；只有旧目录有持久状态时沿用 `%APPDATA%\wechat-data-analysis-desktop`。两边均有数据时不会自动合并。也可以通过桌面设置指定输出目录；已有 `WECHAT_TOOL_DATA_DIR`／`WECHAT_TOOL_OUTPUT_DIR` 配置仍会生效。详见 [桌面品牌与持久数据目录](docs/desktop-brand-profile.md)。
+
+升级前从托盘完整退出旧程序，再安装或完整解压新版。**保留现有用户数据目录和设置中指定的输出目录，不要因应用更名而重命名、移动或删除数据库、密钥和快照目录，也不需要重新解密已有账号。**
+
+账号归档适合备份数据库与资源，不包含数据库密钥、来源路径、快照指针和全部应用设置。密钥、AI 服务配置及模型需要另行妥善保管。快照历史会占用磁盘，当前不设固定累计容量上限，构建前检查实际可用空间。
+
+## 已知限制
+
+- **微信版本**：功能面向 Windows 微信 4.x，已有真实数据验收记录包含 4.1.15.13；这不等于所有 4.x 版本都兼容。密钥扫描、数据库格式、媒体和窗口自动化均可能受版本变化影响。
+- **同步与实时性**：聊天默认读取已解密验证快照，旧实时 WCDB 路径已移除。周期同步有延迟，也不构成跨库全局事务或即时消息通知。
+- **WXGF 与平台**：Windows x64 源码及桌面冻结后端均使用随项目提供的 `VoipEngine.dll`，在独立子进程中解码 WXGF；透明图片和完整动画已用受控样本验证。未知格式、损坏内容、原生崩溃与超时明确报错，不代表任意微信媒体或其他平台都已兼容。
+- **媒体与三维界面**：图片密钥、原始附件、FFmpeg 和图形环境影响可用性。视频无法显示时可按提示手动生成本地预览；年度三维体验依赖可用的 WebGL 环境，统计明细与离线分享是独立能力。
+- **微信发送**：需要运行、登录、解锁且可访问的微信窗口，会短暂激活微信。发送回执不代表对方已收到或已读；结果待确认时先核对微信，不连续点击重发。
+- **记录页面范围**：小程序页展示资料，不运行小程序；视频号页主要展示本地直播缓存；收付款页展示记录，不执行交易；撤回候选缓存不等于真实撤回通知。
+- **AI 结果与覆盖**：模型会误判，引用和统计应回查原文。附件缺失、索引范围不足、任务未完成及未知用量需分别看待，不能当作完整分析。
+- **平台与发布状态**：当前说明与打包入口面向 Windows x64。仓库中的其他平台实验或历史验收记录不代表本版提供相同的安装包及微信功能；旧 Release 和本地旧产物也不会随源码改动自动更新。
+
+## 文档导航
+
+| 文档 | 内容 |
+| --- | --- |
+| [源码开发说明](docs/development-windows.md) | Windows 环境、数据链路、快照同步、导入导出及阶段验收 |
+| [聊天 Agent](docs/chat-agent.md) | 独立助手、聊天范围、引用、上下文与任务恢复 |
+| [聊天 AI](docs/chat-ai.md) | 总结、自动任务、关注提醒与桌面通知 |
+| [聊天画像与消息标签](docs/chat-insights.md) | Laya／API、对象边界、标签复用和质量限制 |
+| [本地语义检索](docs/local-semantic-search.md) | 模型、索引、设备、下载与离线导入 |
+| [AI 诊断](docs/ai-diagnostics.md) | 模型调用与故障定位 |
+| [微信文本发送](docs/wechat-qt-send.md)／[附件发送](docs/wechat-file-send.md) | 窗口适配、发送确认及附件队列 |
+| [年度画幅与导出](docs/wrapped-frames.md) | 桌面场景截图与画幅处理 |
+
+专题文档包含不同阶段的实现和验收记录；阅读时请区分记录日期、源码验证与对应安装包的实际能力。
+
+## 问题反馈
+
+通过 [GitHub Issues](https://github.com/gongyuanshen/xwechat/issues) 提交可复现的问题，附应用版本（源码运行时附提交 Hash）、Windows 与微信版本、操作步骤、准确发生时间和完整错误。
+
+桌面版可在 **“设置 → 桌面行为 → 日志文件 → 打开日志”** 定位实际日志。请提供问题发生前后至少一分钟的相关完整日志，上传前删除密钥、Token、聊天正文和其他敏感信息；不要上传微信数据库。截图和导出样例也应先脱敏。
+
+提交代码时仅包含本次相关源码、测试、依赖锁文件和必要公开资源。数据库、账号密钥、个人配置、模型权重、日志、缓存、验收材料和生成的安装产物应留在本地；`.gitignore` 不会自动移除已被跟踪的文件，提交前仍需检查暂存区。
+
+## 免责声明与严禁商用
 
 在使用本项目前，请仔细阅读并充分理解本声明：
 
@@ -49,11 +290,14 @@
 
 ---
 
-## 💖 致谢与开源基石
+## 致谢与技术来源
 
 本项目离不开开源社区的先驱工作，在此特别感谢以下基石项目与技术分享者：
 
-### 核心上游与功能基石
-- **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**：微信 4.x 数据解密与分析工具，本项目二次开发的底层基础项目。
-- **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**：微信聊天分析工具，本项目 AI 聊天画像、情绪感知、意图识别与 MBTI 推测功能的直接来源与核心基石。
-- **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**：一个本地的微信聊天记录导出和年度报告应用
+- **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**：本项目二次开发的基础，提供微信 4.x 数据处理与年度分析的原有实现和展示资源。
+- **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**：聊天画像、情绪、意图及 MBTI 聊天推测等功能的参考来源；当前项目自行实现分析服务、提示词和界面，并集成本地 Laya 流程。
+- **[mizchi/laya-mlx](https://github.com/mizchi/laya-mlx)**：本地 Laya ONNX 输入构造与校准逻辑的来源之一；相关来源和许可保留在 [本地许可目录](src/wechat_decrypt_tool/resources/licenses)。
+- **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**：本地聊天导出、媒体处理和年度报告等实现的参考。
+- **[vuepont/ai-elements-vue](https://github.com/vuepont/ai-elements-vue)**：AI 对话界面的按需源码组件，来源、固定提交与许可见 [组件说明](frontend/components/ai-elements/README.md)。
+
+技术栈采用 Nuxt 4、Vue 3、Tailwind CSS 4、Three.js、Electron、FastAPI、SQLite 和 DeepAgents 等。第三方代码、资源、模型及运行组件各自的许可和来源声明应予保留，不因本项目的使用声明而改变。

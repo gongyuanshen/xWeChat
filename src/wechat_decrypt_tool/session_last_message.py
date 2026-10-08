@@ -116,43 +116,6 @@ def get_session_last_message_status(account_dir: Path) -> dict[str, Any]:
         conn.close()
 
 
-def load_session_last_messages(account_dir: Path, usernames: list[str]) -> dict[str, str]:
-    if not usernames:
-        return {}
-
-    account_dir = Path(account_dir)
-    session_db_path = _session_db_path(account_dir)
-    if not session_db_path.exists():
-        return {}
-
-    uniq = list(dict.fromkeys([str(u or "").strip() for u in usernames if str(u or "").strip()]))
-    if not uniq:
-        return {}
-
-    out: dict[str, str] = {}
-    conn = sqlite3.connect(str(session_db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        chunk_size = 900
-        for i in range(0, len(uniq), chunk_size):
-            chunk = uniq[i : i + chunk_size]
-            placeholders = ",".join(["?"] * len(chunk))
-            rows = conn.execute(
-                f"SELECT username, preview FROM {_TABLE_NAME} WHERE username IN ({placeholders})",
-                chunk,
-            ).fetchall()
-            for r in rows:
-                u = str(r["username"] or "").strip()
-                if not u:
-                    continue
-                out[u] = str(r["preview"] or "")
-        return out
-    except Exception:
-        return {}
-    finally:
-        conn.close()
-
-
 def build_session_last_message_table(
     account_dir: Path,
     *,

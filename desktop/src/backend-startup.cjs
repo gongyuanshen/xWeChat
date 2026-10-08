@@ -5,11 +5,11 @@ const MIN_BACKEND_STARTUP_TIMEOUT_MS = 5_000;
 const MAX_BACKEND_STARTUP_TIMEOUT_MS = 600_000;
 
 function resolveBackendStartupTimeoutMs({ isPackaged = false, envValue } = {}) {
-  const fallback = isPackaged
+  const defaultTimeout = isPackaged
     ? PACKAGED_BACKEND_STARTUP_TIMEOUT_MS
     : DEVELOPMENT_BACKEND_STARTUP_TIMEOUT_MS;
   const raw = String(envValue ?? "").trim();
-  if (!raw) return fallback;
+  if (!raw) return defaultTimeout;
 
   const parsed = Number(raw);
   if (
@@ -17,7 +17,7 @@ function resolveBackendStartupTimeoutMs({ isPackaged = false, envValue } = {}) {
     parsed < MIN_BACKEND_STARTUP_TIMEOUT_MS ||
     parsed > MAX_BACKEND_STARTUP_TIMEOUT_MS
   ) {
-    return fallback;
+    throw new RangeError(`后端启动超时必须为 ${MIN_BACKEND_STARTUP_TIMEOUT_MS}-${MAX_BACKEND_STARTUP_TIMEOUT_MS} 毫秒的整数`);
   }
   return parsed;
 }
@@ -46,7 +46,7 @@ function parseHealthJson(response) {
 
 function isBackendHealthResponse(response) {
   const payload = parseHealthJson(response);
-  return payload?.status === "healthy" && payload?.service === "微信解密工具";
+  return payload?.status === "healthy" && payload?.service === "xwechat";
 }
 
 module.exports = {

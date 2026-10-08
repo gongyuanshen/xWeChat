@@ -142,13 +142,6 @@ def _safe_json_dumps(value: Any) -> str:
         return str(value)
 
 
-def _has_decrypted_export_dbs(account_dir: Path) -> bool:
-    try:
-        return bool((resolve_account_database_dir(account_dir) / "session.db").exists() and (resolve_account_database_dir(account_dir) / "contact.db").exists())
-    except Exception:
-        return False
-
-
 def _safe_trace(trace_log: Optional[Callable[..., None]], phase: str, **fields: Any) -> None:
     if trace_log is None:
         return
@@ -885,23 +878,6 @@ def _html_export_page_fragment_js(*, export_id: str, arc_js: str, page_no: int, 
 
 
 
-def _sha256_hex_bytes(data: bytes) -> str:
-    return hashlib.sha256(bytes(data or b"")).hexdigest()
-
-
-def _sha256_hex_file(path: Path) -> tuple[int, str]:
-    h = hashlib.sha256()
-    size = 0
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            size += len(chunk)
-            h.update(chunk)
-    return size, h.hexdigest()
-
-
 def _zip_arcname(value: Any) -> str:
     s = str(value or "").strip().replace("\\", "/").lstrip("/")
     while "//" in s:
@@ -967,63 +943,6 @@ def _html_export_folder_sessions_js(session_items: list[dict[str, Any]]) -> str:
         sort_keys=True,
     ).replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
     return f"window.__WCE_FOLDER_SESSIONS__={payload};\n"
-
-
-class _ZipIntegrityWriter:
-    """Small ZipFile proxy that records hashes for the exported integrity bundle."""
-
-    def __init__(self, zf: zipfile.ZipFile):
-        self._zf = zf
-        self._entries: dict[str, dict[str, Any]] = {}
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._zf, name)
-
-    def _record_bytes(self, arcname: Any, data: Any) -> None:
-        arc = _zip_arcname(arcname)
-        if not arc or arc.endswith("/"):
-            return
-        if isinstance(data, str):
-            raw = data.encode("utf-8")
-        elif isinstance(data, bytes):
-            raw = data
-        elif isinstance(data, bytearray):
-            raw = bytes(data)
-        elif isinstance(data, memoryview):
-            raw = data.tobytes()
-        else:
-            raw = bytes(data or b"")
-        entry = {"path": arc, "size": len(raw), "sha256": _sha256_hex_bytes(raw)}
-        self._entries[arc] = entry
-
-    def _record_file(self, src: Any, arcname: Any) -> None:
-        arc = _zip_arcname(arcname)
-        if not arc or arc.endswith("/"):
-            return
-        try:
-            size, digest = _sha256_hex_file(Path(src))
-        except Exception:
-            return
-        entry = {"path": arc, "size": int(size), "sha256": digest}
-        self._entries[arc] = entry
-
-    def writestr(self, zinfo_or_arcname: Any, data: Any, *args: Any, **kwargs: Any) -> Any:
-        result = self._zf.writestr(zinfo_or_arcname, data, *args, **kwargs)
-        arc = getattr(zinfo_or_arcname, "filename", zinfo_or_arcname)
-        self._record_bytes(arc, data)
-        return result
-
-    def write(self, filename: Any, arcname: Any = None, *args: Any, **kwargs: Any) -> Any:
-        if arcname is None:
-            result = self._zf.write(filename, *args, **kwargs)
-        else:
-            result = self._zf.write(filename, arcname, *args, **kwargs)
-        arc = arcname if arcname is not None else filename
-        self._record_file(filename, arc)
-        return result
-
-    def integrity_entries(self) -> list[dict[str, Any]]:
-        return [self._entries[k] for k in sorted(self._entries)]
 
 
 def _minify_css_for_export(css: str) -> str:
@@ -1544,6 +1463,8 @@ class ChatExportManager:
         encrypt: bool = False,
         content_key: bytearray | None = None,
     ) -> ExportJob:
+        if source != "decrypted":
+            raise ValueError("Prepared archive source must be decrypted.")
         if bool(encrypt) != (content_key is not None):
             raise ValueError("encrypted chat export requires one validated content key")
         if export_format not in {"html", "json", "txt", "excel"}:
@@ -2047,10 +1968,7 @@ class ChatExportManager:
 
             phase_started = time.perf_counter()
             _safe_trace(trace, "zip_open_start", tmpZip=str(tmp_zip))
-            with zipfile.ZipFile(tmp_zip, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as raw_zf:
-                zf = _ZipIntegrityWriter(
-                    raw_zf,
-                )
+            with zipfile.ZipFile(tmp_zip, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
                 _safe_trace(trace, "zip_opened", durationMs=_elapsed_ms(phase_started))
                 # Keep the indexes keyed by conversation directory while the
                 # export is running.  Folder exports replace existing entries
@@ -3133,7 +3051,7 @@ class ChatExportManager:
                 zf.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
                 zf.writestr("report.json", json.dumps(report, ensure_ascii=False, indent=2))
                 if folder_context is None:
-                    write_zip_checksums(raw_zf, job.export_id, check_cancel=lambda: _raise_if_job_cancelled(job, "checksums"))
+                    write_zip_checksums(zf, job.export_id, check_cancel=lambda: _raise_if_job_cancelled(job, "checksums"))
                 _safe_trace(
                     trace,
                     "manifest_written",
@@ -3518,16 +3436,13 @@ def build_chat_export_targets_preview(
     session_hidden_by_username: dict[str, int] = {}
     session_rows, session_hidden_by_username = _load_export_session_targets(account_dir)
     session_usernames = {u for u, _sort_ts in session_rows}
-    wcdb_names = {}
     contact_rows = _load_contact_rows(resolve_account_database_dir(account_dir) / "contact.db", targets)
     base = str(base_url or "").rstrip("/")
 
     conversations: list[dict[str, Any]] = []
     for u in targets:
         row = contact_rows.get(u)
-        display_name = str(wcdb_names.get(u) or "").strip()
-        if not display_name:
-            display_name = _pick_display_name(row, u) if row is not None else u
+        display_name = _pick_display_name(row, u) if row is not None else u
         avatar_path = _build_avatar_url(account_dir.name, u)
         conversations.append(
             {
@@ -6532,7 +6447,11 @@ def _write_conversation_html(
                 elif rt == "link":
                     url = str(msg.get("url") or "").strip()
                     safe_url = url if is_http_url(url) else ""
-                    if safe_url:
+                    is_finder = msg.get("linkType") == "finder"
+                    if safe_url or is_finder:
+                        tag = "div" if is_finder else "a"
+                        attrs = "" if is_finder else f' href="{esc_attr(safe_url)}" target="_blank" rel="noreferrer"'
+                        cursor_style = "cursor:default;" if is_finder else ""
                         heading = str(msg.get("title") or msg.get("content") or safe_url).strip()
                         abstract = str(msg.get("content") or "").strip()
                         preview = str(msg.get("thumbUrl") or "").strip()
@@ -6550,8 +6469,8 @@ def _write_conversation_html(
                         if variant == "cover":
                             cls = f"wechat-link-card-cover wechat-special-card msg-radius{sent_side_cls}"
                             tw.write(
-                                f'                  <a href="{esc_attr(safe_url)}" target="_blank" rel="noreferrer" class="{esc_attr(cls)}" '
-                                'style="width:137px;min-width:137px;max-width:137px;display:flex;flex-direction:column;box-sizing:border-box;flex:0 0 auto;background:#fff;border:none;box-shadow:none;text-decoration:none;outline:none">\n'
+                                f'                  <{tag}{attrs} class="{esc_attr(cls)}" '
+                                f'style="{cursor_style}width:137px;min-width:137px;max-width:137px;display:flex;flex-direction:column;box-sizing:border-box;flex:0 0 auto;background:#fff;border:none;box-shadow:none;text-decoration:none;outline:none">\n'
                             )
                             if preview_url:
                                 tw.write('                    <div class="wechat-link-cover-image-wrap">\n')
@@ -6573,18 +6492,22 @@ def _write_conversation_html(
                                 tw.write(f'                      <div class="wechat-link-cover-from-name">{esc_text(from_text)}</div>\n')
                                 tw.write("                    </div>\n")
                             tw.write(f'                    <div class="wechat-link-cover-title">{esc_text(heading or safe_url)}</div>\n')
-                            tw.write("                  </a>\n")
+                            if is_finder:
+                                tw.write('                    <div class="wechat-link-cover-title">请在微信中打开原消息播放</div>\n')
+                            tw.write(f"                  </{tag}>\n")
                         else:
                             cls = f"wechat-link-card wechat-special-card msg-radius{sent_side_cls}"
                             tw.write(
-                                f'                  <a href="{esc_attr(safe_url)}" target="_blank" rel="noreferrer" class="{esc_attr(cls)}" '
-                                'style="width:210px;min-width:210px;max-width:210px;display:flex;flex-direction:column;box-sizing:border-box;flex:0 0 auto;background:#fff;border:none;box-shadow:none;text-decoration:none;outline:none">\n'
+                                f'                  <{tag}{attrs} class="{esc_attr(cls)}" '
+                                f'style="{cursor_style}width:210px;min-width:210px;max-width:210px;display:flex;flex-direction:column;box-sizing:border-box;flex:0 0 auto;background:#fff;border:none;box-shadow:none;text-decoration:none;outline:none">\n'
                             )
                             tw.write('                    <div class="wechat-link-content">\n')
                             tw.write('                      <div class="wechat-link-info">\n')
                             tw.write(f'                        <div class="wechat-link-title">{esc_text(heading or safe_url)}</div>\n')
                             if abstract:
                                 tw.write(f'                        <div class="wechat-link-desc">{esc_text(abstract)}</div>\n')
+                            if is_finder:
+                                tw.write('                        <div class="wechat-link-desc">请在微信中打开原消息播放</div>\n')
                             tw.write("                      </div>\n")
                             if preview_url:
                                 tw.write('                      <div class="wechat-link-thumb">\n')
@@ -6599,7 +6522,7 @@ def _write_conversation_html(
                             )
                             tw.write(f'                      <div class="wechat-link-from-name">{esc_text(from_text)}</div>\n')
                             tw.write("                    </div>\n")
-                            tw.write("                  </a>\n")
+                            tw.write(f"                  </{tag}>\n")
                     else:
                         tw.write(f'                  <div class="{esc_attr(bubble_base_cls + " " + bubble_dir_cls)}">{render_text_with_emojis(msg.get("content") or "")}</div>\n')
                 elif rt == "voip":
@@ -7004,7 +6927,7 @@ def _write_conversation_html(
 
 def _write_conversation_html_append(
     *,
-    zf: _ZipIntegrityWriter,
+    zf: zipfile.ZipFile,
     conv_dir: str,
     existing_snapshot: dict[str, Any],
     old_state: dict[str, Any],
@@ -7025,9 +6948,8 @@ def _write_conversation_html_append(
 
     temp_buffer = io.BytesIO()
     with zipfile.ZipFile(temp_buffer, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as temp_archive:
-        temp_writer = _ZipIntegrityWriter(temp_archive)
         added_count = _write_conversation_html(
-            zf=temp_writer,
+            zf=temp_archive,
             conv_dir=conv_dir,
             prepared_messages=new_messages,
             **writer_options,

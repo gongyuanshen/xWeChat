@@ -76,6 +76,7 @@ export const useChatHistoryWindows = ({
       info: payload?.info || { isChatRoom: false },
       records: Array.isArray(payload?.records) ? payload.records : [],
       url: String(payload?.url || ''),
+      linkType: String(payload?.linkType || ''),
       content: String(payload?.content || ''),
       preview: String(payload?.preview || ''),
       from: String(payload?.from || ''),
@@ -88,7 +89,7 @@ export const useChatHistoryWindows = ({
       zIndex: floatingWindowZ
     }
     floatingWindows.value = [...floatingWindows.value, windowItem]
-    return windowItem
+    return floatingWindows.value.at(-1)
   }
 
   const startFloatingWindowDrag = (id, event) => {
@@ -349,6 +350,7 @@ export const useChatHistoryWindows = ({
     const windowItem = openFloatingWindow({
       kind: 'link',
       title: title || '链接',
+      linkType: String(record?.linkType || '').trim(),
       url,
       content: String(record?.content || '').trim(),
       preview,

@@ -8,18 +8,29 @@ class AgentControl(RuntimeError):
     pass
 
 
-class AgentSettings(BaseModel):
-    # 仅用于接收旧客户端请求，忽略历史额度字段。
-    pass
-
-
 class ThreadInput(BaseModel):
     account: str = Field(min_length=1)
     username: str = ''
     title: str = Field('新的对话', min_length=1, max_length=100)
+    origin: Literal['chat', 'agent'] = 'chat'
+    chat_scope: list[str] | None = Field(None, min_length=1, max_length=2000)
+
+    @model_validator(mode='after')
+    def standalone_scope(self):
+        if self.origin == 'agent' and self.username:
+            raise ValueError('独立 Agent 对话不能绑定当前聊天')
+        if self.origin == 'chat' and self.chat_scope is not None:
+            raise ValueError('聊天对话不能设置独立 Agent 范围')
+        if self.chat_scope is not None and (
+            len(set(self.chat_scope)) != len(self.chat_scope)
+            or any(not value.strip() or value != value.strip() for value in self.chat_scope)
+        ):
+            raise ValueError('会话范围必须包含唯一且有效的会话 ID')
+        return self
 
 
 class ThreadUpdate(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     title: str | None = Field(None, min_length=1, max_length=100)
     scope: list[str] | None = Field(None, min_length=1, max_length=2000)
 

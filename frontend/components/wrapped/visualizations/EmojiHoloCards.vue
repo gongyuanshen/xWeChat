@@ -408,7 +408,7 @@
                   </p>
 
                   <footer class="hc-back-foot wrapped-label">
-                    WECHAT WRAPPED · {{ year }}
+                    xwechat · {{ year }}
                   </footer>
                 </div>
               </div>
@@ -539,7 +539,7 @@ const cardBackDataUri = computed(() => {
 <rect x="21.5" y="8.85" width="6.5" height="0.5" rx="0.25" fill="url(#au)" opacity="0.65"/>
 <rect x="35" y="8.85" width="6.5" height="0.5" rx="0.25" fill="url(#au)" opacity="0.65"/>
 <rect x="30.7" y="74.9" width="1.6" height="1.6" transform="rotate(45 31.5 75.7)" fill="url(#au)"/>
-<text x="31.5" y="80.4" text-anchor="middle" font-family="Menlo, SFMono-Regular, ui-monospace, monospace" font-size="2.6" letter-spacing="1.1" fill="#E9D9A8" fill-opacity="0.85">WECHAT WRAPPED</text>
+<text x="31.5" y="80.4" text-anchor="middle" font-family="Menlo, SFMono-Regular, ui-monospace, monospace" font-size="2.6" letter-spacing="1.1" fill="#E9D9A8" fill-opacity="0.85">xwechat</text>
 <text x="31.5" y="83.9" text-anchor="middle" font-family="Menlo, SFMono-Regular, ui-monospace, monospace" font-size="1.9" letter-spacing="1.5" fill="#CBB877" fill-opacity="0.55">EMOJI PACK · ${year.value}</text>
 </svg>`
   return `data:image/svg+xml,${encodeURIComponent(svg)}`

@@ -46,6 +46,19 @@
         </span>
       </button>
 
+      <button
+        type="button"
+        class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center cursor-pointer group"
+        title="AI 助手"
+        aria-label="AI 助手"
+        :aria-current="isAgentRoute ? 'page' : undefined"
+        @click="goAgent"
+      >
+        <span :class="{ 'sidebar-rail-plate-active': isAgentRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center transition-colors bg-transparent">
+          <Bot class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isAgentRoute }" :stroke-width="1.7" aria-hidden="true" />
+        </span>
+      </button>
+
       <!-- Moments -->
       <button
         type="button"
@@ -497,6 +510,7 @@
 
 <script setup>
 import { storeToRefs } from 'pinia'
+import { Bot } from '@lucide/vue'
 import { buildAccountAvatarUrl } from '~/lib/account-avatar'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
@@ -538,8 +552,6 @@ const accountInfoError = ref('')
 const accountInfo = ref(null)
 const accountDeleteLoading = ref(false)
 const accountDeleteError = ref('')
-const accountInfoApiUnsupported = ref(false)
-const deleteAccountApiUnsupported = ref(false)
 const brokenAvatarUrls = ref({})
 
 const normalizeAccountName = (value) => String(value || '').trim()
@@ -623,24 +635,6 @@ const sessionUpdatedAtText = computed(() => {
   }
 })
 
-const isNotFoundError = (error) => {
-  const status = Number(
-    error?.statusCode
-    ?? error?.status
-    ?? error?.response?.status
-    ?? error?.data?.statusCode
-    ?? 0
-  )
-  return status === 404
-}
-
-const loadAccountInfoByDesktopBridge = async (account) => {
-  if (!process.client || typeof window === 'undefined') return null
-  if (!window.wechatDesktop?.getAccountInfo) return null
-  const res = await window.wechatDesktop.getAccountInfo(account)
-  return res && typeof res === 'object' ? res : null
-}
-
 const loadAccountInfo = async () => {
   accountInfoLoading.value = true
   accountInfoError.value = ''
@@ -651,53 +645,17 @@ const loadAccountInfo = async () => {
     return
   }
   try {
-    let lastError = null
-    if (!accountInfoApiUnsupported.value) {
-      try {
-        const res = await getChatAccountInfo({ account })
-        if (res?.status !== 'success') {
-          throw new Error(res?.message || '读取账号信息失败')
-        }
-        accountInfo.value = res
-        return
-      } catch (e) {
-        lastError = e
-        if (isNotFoundError(e)) {
-          accountInfoApiUnsupported.value = true
-        }
-      }
+    const res = await getChatAccountInfo({ account })
+    if (res?.status !== 'success') {
+      throw new Error(res?.message || '读取账号信息失败：接口未返回成功状态')
     }
-
-    try {
-      const fallback = await loadAccountInfoByDesktopBridge(account)
-      if (fallback?.status === 'success') {
-        accountInfo.value = fallback
-        accountInfoError.value = ''
-        return
-      }
-      if (fallback && fallback?.status && fallback.status !== 'success') {
-        lastError = new Error(fallback?.message || '读取账号信息失败')
-      } else if (!lastError) {
-        lastError = new Error('读取账号信息失败')
-      }
-    } catch (fallbackErr) {
-      if (!lastError) {
-        lastError = fallbackErr
-      }
-    }
-
+    accountInfo.value = res
+  } catch (error) {
     accountInfo.value = null
-    accountInfoError.value = lastError?.message || '读取账号信息失败'
+    accountInfoError.value = error?.message || '读取账号信息失败'
   } finally {
     accountInfoLoading.value = false
   }
-}
-
-const deleteAccountDataByDesktopBridge = async (account) => {
-  if (!process.client || typeof window === 'undefined') return null
-  if (!window.wechatDesktop?.deleteAccountData) return null
-  const res = await window.wechatDesktop.deleteAccountData(account)
-  return res && typeof res === 'object' ? res : { status: 'success' }
 }
 
 const openAccountDialog = async () => {
@@ -766,6 +724,7 @@ const selectAccountFromDialog = async (account) => {
 }
 
 const isChatRoute = computed(() => route.path?.startsWith('/chat'))
+const isAgentRoute = computed(() => route.path === '/agent' || route.path?.startsWith('/agent/'))
 const isSnsRoute = computed(() => route.path?.startsWith('/sns'))
 const isFavoritesRoute = computed(() => route.path?.startsWith('/favorites'))
 const isContactsRoute = computed(() => route.path?.startsWith('/contacts'))
@@ -776,6 +735,7 @@ const isPaymentsRoute = computed(() => route.path?.startsWith('/payments'))
 const isWrappedRoute = computed(() => route.path?.startsWith('/wrapped'))
 
 const goChat = async () => { await navigateTo('/chat') }
+const goAgent = async () => { await navigateTo('/agent') }
 const goSns = async () => { await navigateTo('/sns') }
 const goFavorites = async () => { await navigateTo('/favorites') }
 const goContacts = async () => { await navigateTo('/contacts') }
@@ -812,32 +772,9 @@ const deleteCurrentAccountData = async () => {
   accountDeleteLoading.value = true
   accountDeleteError.value = ''
   try {
-    let deleted = false
-    let lastError = null
-
-    if (!deleteAccountApiUnsupported.value) {
-      try {
-        const apiRes = await deleteChatAccount({ account })
-        if (apiRes?.status && apiRes.status !== 'success') {
-          throw new Error(apiRes?.message || '删除账号数据失败')
-        }
-        deleted = true
-      } catch (apiErr) {
-        lastError = apiErr
-        if (isNotFoundError(apiErr)) {
-          deleteAccountApiUnsupported.value = true
-        }
-      }
-    }
-
-    if (!deleted) {
-      const desktopRes = await deleteAccountDataByDesktopBridge(account)
-      if (!desktopRes) {
-        throw lastError || new Error('删除账号数据失败')
-      }
-      if (desktopRes?.status && desktopRes.status !== 'success') {
-        throw new Error(desktopRes?.message || '删除账号数据失败')
-      }
+    const result = await deleteChatAccount({ account })
+    if (result?.status !== 'success') {
+      throw new Error(result?.message || '删除账号数据失败：接口未返回成功状态')
     }
 
     accountDialogOpen.value = false

@@ -3115,8 +3115,8 @@ wheels = [
 ]
 
 [[package]]
-name = "wechat-decrypt-tool"
-version = "2.7.1"
+name = "xwechat"
+version = "2.7.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

@@ -123,14 +123,11 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         if path.exists():
             with sqlite3.connect(f'file:{path.as_posix()}?mode=ro', uri=True) as db:
                 values.append(db.execute("SELECT coalesce(max(updated),0) FROM records WHERE kind='local_media_text' AND account=?", (account,)).fetchone()[0])
-        try:
-            from ..chat_helpers import _resolve_account_dir
-            path = _resolve_account_dir(account) / '_cache/voice_transcripts.sqlite3'
-            if path.exists():
-                with sqlite3.connect(f'file:{path.as_posix()}?mode=ro', uri=True) as db:
-                    values.append(db.execute('SELECT coalesce(max(updated_at),0) FROM transcript').fetchone()[0])
-        except (ValueError, OSError, sqlite3.Error):
-            pass
+        from ..chat_helpers import _resolve_account_dir
+        path = _resolve_account_dir(account) / '_cache/voice_transcripts.sqlite3'
+        if path.exists():
+            with sqlite3.connect(f'file:{path.as_posix()}?mode=ro', uri=True) as db:
+                values.append(db.execute('SELECT coalesce(max(updated_at),0) FROM transcript').fetchone()[0])
         return values
 
     def local_text(self, account, messages):

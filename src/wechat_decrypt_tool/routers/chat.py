@@ -4,19 +4,16 @@ from ..account_workers import account_to_thread
 import os
 import re
 import sqlite3
-import asyncio
 import json
 import shutil
 import time
 import threading
 from datetime import datetime, timedelta
-from os import scandir
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from ..account_identity import (
     canonical_account_name,
     is_internal_account_directory_name,
@@ -32,7 +29,6 @@ from ..chat_search_index import (
 from ..chat_accounts import list_chat_account_contexts, resolve_chat_account_context
 from ..chat_helpers import (
     _build_avatar_url,
-    _build_latest_message_preview,
     _build_fts_query,
     _decode_message_content,
     _decode_sqlite_text,
@@ -52,7 +48,6 @@ from ..chat_helpers import (
     _list_decrypted_accounts,
     _make_search_tokens,
     _make_snippet,
-    _match_tokens,
     _load_contact_rows,
     _load_group_nickname_map_from_contact_db,
     _load_usernames_by_display_names,
@@ -60,7 +55,6 @@ from ..chat_helpers import (
     _build_group_sender_display_name_map,
     _normalize_session_preview_text,
     _extract_group_preview_sender_username,
-    _replace_preview_sender_prefix,
     _lookup_resource_md5,
     _normalize_xml_url,
     _parse_app_message,
@@ -72,14 +66,12 @@ from ..chat_helpers import (
     _quote_ident,
     _resolve_account_dir,
     _resolve_msg_table_name,
-    _resolve_msg_table_name_by_map,
     _row_to_search_hit,
     _resource_lookup_chat_id,
     _should_keep_session,
     _split_group_sender_prefix,
     _to_char_token_text,
 )
-from ..media_helpers import _resolve_account_db_storage_dir, _try_find_decrypted_resource
 from ..app_paths import get_output_dir
 from ..database_filters import list_countable_database_names
 from ..key_store import remove_account_family_keys_from_store
@@ -88,16 +80,13 @@ from ..perf_trace import create_perf_trace, get_request_perf_context
 from ..session_last_message import (
     build_session_last_message_table,
     get_session_last_message_status,
-    load_session_last_messages,
 )
-from ..sqlite_diagnostics import collect_sqlite_diagnostics, format_sqlite_diagnostics
 from ..anti_revoke import (
     format_revoked_message_as_chat_item,
     get_revoked_messages_list,
     get_revoked_messages_map,
     parse_revoke_xml,
     process_revocation_event,
-    save_messages_to_archive,
 )
 from .chat_contacts import _load_enterprise_contact_info
 
@@ -116,22 +105,6 @@ router = APIRouter(route_class=PathFixRoute)
 def _is_hex_md5(value: Any) -> bool:
     s = str(value or "").strip().lower()
     return len(s) == 32 and all(c in "0123456789abcdef" for c in s)
-
-
-_HEX_RE = re.compile(r"^[0-9a-fA-F]+$")
-
-
-def _hex_to_bytes(value: str) -> Optional[bytes]:
-    s = str(value or "").strip()
-    if not s.startswith("0x"):
-        return None
-    hex_part = s[2:]
-    if (not hex_part) or (len(hex_part) % 2 != 0) or (_HEX_RE.match(hex_part) is None):
-        return None
-    try:
-        return bytes.fromhex(hex_part)
-    except Exception:
-        return None
 
 
 def _bytes_to_hex(value: bytes) -> str:
@@ -189,23 +162,6 @@ def _pick_case_insensitive_value(item: Any, *keys: str) -> Any:
             if str(actual_key or "").strip().lower() == key_lc and actual_value is not None:
                 return actual_value
     return None
-
-
-def _table_exists_case_insensitive(conn: sqlite3.Connection, table_name: str) -> bool:
-    try:
-        row = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1",
-            (str(table_name or "").strip(),),
-        ).fetchone()
-        return bool(row)
-    except Exception:
-        return False
-
-
-
-
-
-
 
 
 def _avatar_url_unified(
@@ -551,54 +507,6 @@ def _load_contact_top_flags(contact_db_path: Path, usernames: list[str]) -> dict
         return out
     finally:
         conn.close()
-
-
-def _coerce_message_blob_value(value: Any, *, allow_bare_hex: bool = True) -> Any:
-    if value is None:
-        return None
-    if isinstance(value, memoryview):
-        value = value.tobytes()
-    if isinstance(value, bytearray):
-        return bytes(value)
-    if isinstance(value, bytes):
-        try:
-            s = value.decode("ascii").strip()
-        except Exception:
-            return value
-        if not s:
-            return value
-        b = _hex_to_bytes(s)
-        if b is not None:
-            return b
-        if allow_bare_hex and (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
-            try:
-                return bytes.fromhex(s)
-            except Exception:
-                return value
-        return value
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return value
-        b = _hex_to_bytes(s)
-        if b is not None:
-            return b
-        if allow_bare_hex and (len(s) % 2 == 0) and (_HEX_RE.fullmatch(s) is not None):
-            try:
-                return bytes.fromhex(s)
-            except Exception:
-                return value
-        return value
-    return value
-
-
-
-
-
-
-
-
-
 
 
 def _normalize_session_type(value: Optional[str]) -> Optional[str]:

@@ -333,6 +333,33 @@ describe('MessageInputWorkspace & useApi Chat Suite', () => {
     wrapper.unmount()
   })
 
+  it.each([undefined, {}, { success: false }])('发送返回未确认结果时保留草稿并显示真实状态：%j', async (receipt) => {
+    mockApi.sendChatMessage.mockResolvedValueOnce(receipt)
+    const state = reactive({ selectedAccount: 'wx_user_001',
+      selectedContact: { username: 'wxid_test', name: '张三' }, messages: [], refreshSelectedMessages: vi.fn() })
+    const wrapper = mount(MessageInputWorkspace, { props: { state, api: mockApi } })
+    await wrapper.find('textarea').setValue('请保留这条草稿')
+    await wrapper.vm.handleSend()
+    expect(wrapper.vm.draftText).toBe('请保留这条草稿')
+    expect(wrapper.vm.errorInfo.code).toBe('WECHAT_SEND_UNCONFIRMED')
+    expect(state.refreshSelectedMessages).not.toHaveBeenCalled()
+    expect(mockApi.sendChatMessage).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it.each([undefined, {}, { suggestion: '' }, { suggestion: '  ' }])('AI 建议空响应保留草稿并显示失败：%j', async (response) => {
+    mockApi.getAiSuggestedReply.mockResolvedValueOnce(response)
+    const state = reactive({ selectedAccount: 'wx_user_001',
+      selectedContact: { username: 'wxid_test', name: '张三' }, messages: [] })
+    const wrapper = mount(MessageInputWorkspace, { props: { state, api: mockApi } })
+    await wrapper.find('textarea').setValue('请保留这条草稿')
+    await wrapper.vm.handleAiSuggest()
+    expect(wrapper.vm.draftText).toBe('请保留这条草稿')
+    expect(wrapper.vm.errorInfo.message).toBe('AI 建议未返回有效的回复草稿')
+    expect(mockApi.sendChatMessage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('10. Debug-First / Let-It-Fail：发送异常时严格保留草稿绝不丢失，并展示真实后端错误码和提示', async () => {
     mockApi.sendChatMessage.mockRejectedValueOnce({
       code: 'WECHAT_NOT_RUNNING',

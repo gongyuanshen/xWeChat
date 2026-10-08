@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-微信解密工具主启动脚本
+xwechat 主启动脚本
 
 使用方法:
     uv run main.py
@@ -35,7 +35,7 @@ from wechat_decrypt_tool.runtime_settings import (
 
 
 def main():
-    """启动微信解密工具API服务"""
+    """启动 xwechat API 服务"""
     import wechat_decrypt_tool
     print(f"Backend source: {wechat_decrypt_tool.__file__}", flush=True)
     start_desktop_parent_watchdog_from_env()
@@ -45,7 +45,7 @@ def main():
     lan_access_host = get_lan_access_host(default="127.0.0.1") if host in {"0.0.0.0", "::"} else access_host
 
     print("=" * 60)
-    print("微信解密工具 API 服务")
+    print("xwechat API 服务")
     print("=" * 60)
     print("正在启动服务...")
     if port_source == "env":

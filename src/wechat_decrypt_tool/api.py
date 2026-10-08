@@ -1,4 +1,4 @@
-"""微信解密工具的FastAPI Web服务器"""
+"""xwechat FastAPI Web服务器"""
 
 import asyncio
 import mimetypes
@@ -51,8 +51,8 @@ from .routers.biz import router as _biz_router
 from .routers.system import router as _system_router
 
 app = FastAPI(
-    title="微信数据库解密工具",
-    description="现代化的微信数据库解密工具，支持微信信息检测和数据库解密功能",
+    title="xwechat",
+    description="xwechat 本地微信数据浏览、导出与交互工具",
     version=APP_VERSION,
 )
 

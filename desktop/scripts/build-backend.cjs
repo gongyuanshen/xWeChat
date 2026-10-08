@@ -94,7 +94,11 @@ function main() {
     "--specpath",
     specDir,
     "--add-data",
-    pyInstallerAddData(nativeDir, "wechat_decrypt_tool/native"),
+    pyInstallerAddData(path.join(nativeDir, "*.dll"), "wechat_decrypt_tool/native"),
+    "--add-data",
+    pyInstallerAddData(path.join(nativeDir, "weflow_wasm", "*.js"), "wechat_decrypt_tool/native/weflow_wasm"),
+    "--add-data",
+    pyInstallerAddData(path.join(nativeDir, "weflow_wasm", "*.wasm"), "wechat_decrypt_tool/native/weflow_wasm"),
     "--add-data",
     pyInstallerAddData(skillDir, "skills/wechat-mcp-copilot"),
     "--add-data",
@@ -162,8 +166,14 @@ function main() {
 
   // Smoke test the packaged backend
   console.log("Running packaged backend smoke test...");
+  const smokeDataDir = path.join(workDir, "smoke-data");
   const smoke = spawnSync(packagedBackend, ["--smoke-backend"], {
-    cwd: distDir,
+    cwd: workDir,
+    env: {
+      ...process.env,
+      WECHAT_TOOL_DATA_DIR: smokeDataDir,
+      WECHAT_TOOL_OUTPUT_DIR: path.join(smokeDataDir, "output"),
+    },
     encoding: "utf8",
     windowsHide: true,
     timeout: 30000,

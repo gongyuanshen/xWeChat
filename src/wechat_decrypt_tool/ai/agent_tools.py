@@ -2,6 +2,8 @@
 from .diagnostics import observed, executor_call
 from .agent_budget import MAX_READ_MESSAGES, size, message_payload
 from .messages import message_identity
+from ..account_workers import account_to_thread
+from ..app_paths import get_output_databases_dir
 import asyncio
 import hashlib
 import threading
@@ -79,7 +81,7 @@ class ChatTools:
                     self._time_pages.pop(key)
 
     async def group_people(self, account, usernames, people):
-        return await asyncio.to_thread(group_people_directory, account, usernames, people)
+        return await account_to_thread(get_output_databases_dir() / account, group_people_directory, account, usernames, people)
 
     @foreground_read
     async def latest(self, account, usernames, start, end, *, sender=None, kind=None, offsets=None, limit=20, checkpoint=None):
@@ -118,7 +120,7 @@ class ChatTools:
                 next_offsets[username] += 1
             return {'messages': [x[3] for x in selected], 'has_more': more or len(candidates) > limit,
                 'next_offsets': next_offsets, 'warning': '；'.join(dict.fromkeys(warnings))}
-        return await asyncio.to_thread(collect)
+        return await account_to_thread(get_output_databases_dir() / account, collect)
 
 
 
@@ -172,7 +174,7 @@ class ChatTools:
             return {'messages': [x[2] for x in sorted(heap)], 'warning': '；'.join(dict.fromkeys(warnings)),
                     'selection': {'bounds_available': bounds is not None, 'pruned_conversations': pruned,
                                   'read_conversations': len(usernames) - pruned}}
-        return await asyncio.to_thread(collect)
+        return await account_to_thread(get_output_databases_dir() / account, collect)
 
     async def time_window(self, account, username, start, end, capacity, state=None, checkpoint=None, *, session=None, probe_budget=None):
         from .agent_reading import read_window
@@ -222,7 +224,7 @@ class ChatTools:
             finally:
                 stream.close()
         async def read_page(lo, hi, budget, cursor):
-            return await asyncio.to_thread(page, lo, hi, budget, cursor)
+            return await account_to_thread(get_output_databases_dir() / account, page, lo, hi, budget, cursor)
         return await read_window(read_page, start, end, capacity, state, probe_budget=probe_budget)
 
     @asynccontextmanager
@@ -250,13 +252,14 @@ class ChatTools:
     @observed('agent.read.conversations')
     async def conversations(self, account):
         from ..chat_export_service import get_chat_export_targets_preview
-        result = await asyncio.to_thread(get_chat_export_targets_preview, account=account, include_hidden=True, include_official=False)
+        result = await account_to_thread(get_output_databases_dir() / account, get_chat_export_targets_preview,
+            account=account, include_hidden=True, include_official=False)
         targets = {x['username']: x for x in result['targets']}
         return [{'username': x['username'], 'name': x.get('name') or x.get('displayName') or x['username'],
                  'isGroup': x.get('isGroup', x['username'].endswith('@chatroom'))} for x in targets.values()]
 
     async def people(self, account):
-        return await asyncio.to_thread(self.people_directory, account)
+        return await account_to_thread(get_output_databases_dir() / account, self.people_directory, account)
 
     def people_directory(self, account):
         """人物目录独立于会话列表；备注和昵称均保留，仅以只读连接访问原联系人库。"""
@@ -305,7 +308,7 @@ class ChatTools:
     async def read(self, account, username, start, end, offset, count=None, *, max_batch_bytes=None):
         # 直接复用范围读取器，固定截止时间。分页按稳定来源排序，避免同秒消息遗漏。
         from .messages import read_messages
-        result = await asyncio.to_thread(read_messages, account, username, start, end, count, page_offset=offset,
+        result = await account_to_thread(get_output_databases_dir() / account, read_messages, account, username, start, end, count, page_offset=offset,
             page_size=MAX_READ_MESSAGES if max_batch_bytes is not None else 50, max_batch_bytes=max_batch_bytes,
             message_weight=lambda m: size(message_payload(m)))
         # 数据渠道与单条消息编号分开命名，避免模型把 realtime 当作消息引用。

@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 from pytest import MonkeyPatch
 from langchain_core.messages import AIMessage, message_to_dict
 import tiktoken
-from test_ai_deepagents import make_service, action, last_result
+from test_ai_deepagents import make_service, action
 from test_ai_planned_work import prepare, make_plan
 from test_ai_parallel_analysis import Data
 from wechat_decrypt_tool.ai.deep_partition import fingerprint

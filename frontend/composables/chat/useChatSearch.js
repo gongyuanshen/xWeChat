@@ -462,7 +462,7 @@ logSearchPhase('search-senders:start', {
 })
 try {
   const resp = await api.listChatSearchSenders(params)
-  const status = String(resp?.status || 'success')
+  const status = String(resp?.status || '')
   if (status !== 'success') {
     logSearchPhase('search-senders:non-success', {
       scope,
@@ -1111,7 +1111,7 @@ try {
   messageSearchCoverage.value = resp?.coverage?.message || ''
   messageSearchTicket.value = resp?.searchTicket || ''
 
-  const status = String(resp?.status || 'success')
+  const status = String(resp?.status || '')
   messageSearchBackendStatus.value = status
 
   if (status === 'index_building') {

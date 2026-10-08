@@ -1,10 +1,8 @@
 """微信 Agent 任务服务：唯一生产执行引擎为官方 DeepAgents。"""
 import asyncio
-import json
 import logging
 import re
 import time
-import uuid
 from .diagnostics import observed, event as diagnostic_event
 from .agent_timeline import AgentTimeline
 from .agent_schemas import AgentControl
@@ -12,12 +10,14 @@ from .agent_tools import ChatTools
 from .agent_workspace import Workspace, Evidence
 from .deep_runtime import DeepAgentRuntime
 from .deep_projection import DeepProjection
-from .providers import ProviderFailure
+from ..app_paths import get_output_dir
+from ..snapshot_registry import create_account_task
 
 class Revised(AgentControl):
     pass
 
 ACTIVE = {'queued', 'running'}
+UNCHANGED_SCOPE = object()
 STREAM_PATCH_FIELDS = {
     'stage', 'stage_started_at', 'segment_started', 'finished_at', 'elapsed_seconds',
     'error', 'error_info', 'used', 'read_count', 'index_status', 'query_scope',
@@ -30,11 +30,9 @@ from .deep_synchronization import serialized
 
 
 class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
-    def __init__(self, ai, tools=None, model=None):
+    def __init__(self, ai, tools=None):
         self.ai, self.store = ai, ai.store
         self.tools = tools or ChatTools()
-        # 兼容外部测试夹具的构造参数；生产模型请求只经过 DeepChatModel。
-        self.model = model
         self.workers = {}
         self.locks = {}
         self.stopping = False
@@ -45,15 +43,23 @@ class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
         from .deep_subtasks import DeepSubtasks
         self.subtasks = DeepSubtasks(self)
 
-    def settings(self):
-        # 兼容旧客户端读取；历史额度不再参与执行。
-        return {'unlimited': True, 'context_source': 'models.dev'}
-
     def thread(self, id, account):
         record = self.store.get('agent_thread', id)
         if not record or record['account'] != account:
             raise ValueError('对话不存在')
+        record.setdefault('origin', 'chat')
+        record.setdefault('chat_scope', None)
         return record
+
+    async def agent_directory(self, account, chat_scope):
+        """账号可读目录是独立 Agent 范围的唯一校验入口。"""
+        contacts = await self.tools.conversations(account)
+        if chat_scope is None:
+            return contacts
+        allowed = {contact['username'] for contact in contacts}
+        if not set(chat_scope) <= allowed:
+            raise ValueError('会话范围无效：包含不属于当前账号或已不可读的会话')
+        return contacts
 
     def run(self, id, account=None):
         record = self.store.get('agent_run', id)
@@ -126,12 +132,14 @@ class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
         diagnostic_event('agent.usage.consumed', run_id=id, kind=kind, count=used[kind])
 
     @observed('agent.edit_thread', id_field='thread_id')
-    async def edit_thread(self, id, account, title=None, scope=None):
+    async def edit_thread(self, id, account, title=None, scope=UNCHANGED_SCOPE):
         async with self.locks.setdefault(id, asyncio.Lock()):
             thread = self.thread(id, account)
+            if thread['origin'] == 'agent' and scope is not UNCHANGED_SCOPE:
+                raise ValueError('独立 Agent 会话范围不可修改，请新建对话')
             if title is not None:
                 thread['title'] = title
-            if scope is not None:
+            if scope is not UNCHANGED_SCOPE and scope is not None:
                 allowed = {x['username'] for x in await self.tools.conversations(account)}
                 if not scope or not set(scope) <= allowed:
                     raise ValueError('会话范围无效')
@@ -167,7 +175,8 @@ class AgentService(DeepAgentRuntime, DeepProjection, AgentTimeline):
 
     def launch(self, id):
         if id not in self.workers or self.workers[id].done():
-            self.workers[id] = asyncio.create_task(self.execute(id))
+            run = self.run(id)
+            self.workers[id] = create_account_task(get_output_dir() / 'databases' / run['account'], self.execute, id)
 
     @observed('agent.stop_run', id_field='run_id')
     async def stop_run(self, id, account):

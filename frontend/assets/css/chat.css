@@ -1370,12 +1370,15 @@
   border: none;
   box-shadow: none;
   outline: none;
-  cursor: pointer;
+  cursor: default;
   text-decoration: none;
 }
 
-.wechat-link-card-finder.wechat-link-card--disabled {
-  cursor: default;
+.wechat-link-finder-hint {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--message-list-status);
 }
 
 .wechat-link-finder-cover {
@@ -1408,7 +1411,7 @@
   color: rgba(255, 255, 255, 0.92);
 }
 
-.wechat-link-finder-cover-placeholder svg {
+.wechat-link-finder-cover-placeholder img {
   width: 34px;
   height: 34px;
 }
@@ -1417,28 +1420,6 @@
   position: absolute;
   inset: 0;
   background: linear-gradient(180deg, rgba(0, 0, 0, 0.04) 0%, rgba(0, 0, 0, 0.12) 42%, rgba(0, 0, 0, 0.68) 100%);
-}
-
-.wechat-link-finder-play {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -66%);
-  width: 40px;
-  height: 40px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.42);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-}
-
-.wechat-link-finder-play svg {
-  width: 20px;
-  height: 20px;
-  margin-left: 2px;
 }
 
 .wechat-link-finder-meta {

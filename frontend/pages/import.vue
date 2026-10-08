@@ -201,7 +201,7 @@
             <div class="rounded-lg border border-[#CFEEDB] bg-[#EAF8EF]/82 p-4 sm:p-5">
               <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                 <div class="flex min-w-0 items-center gap-3">
-                  <img :src="importPreview.avatar_url || '/Contact.png'" class="h-16 w-16 shrink-0 rounded-md border border-[#EDEDED] bg-white object-cover" alt="头像" />
+                  <img :src="importPreview.avatar_url || '/logo.png'" class="h-16 w-16 shrink-0 rounded-md border border-[#EDEDED] bg-white object-cover" alt="头像" />
                   <div class="min-w-0">
                     <p class="text-[12px] font-medium tracking-[0.12em] text-[#07C160]">检测到的账号</p>
                     <div class="mt-1 truncate text-[24px] font-semibold tracking-[-0.03em] text-[#000000e6]">{{ importPreview.nick || '未命名账号' }}</div>

@@ -321,8 +321,8 @@ const drawPoster = (ctx, index) => {
 
     ctx.fillStyle = 'rgba(255,255,255,0.34)'
     ctx.letterSpacing = `${u(9)}px`
-    fitFont(ctx, '微信年度总结 呈现', inner, u(26), '600', SANS, u(18))
-    ctx.fillText('微信年度总结 呈现', cx, artH + u(54))
+    fitFont(ctx, 'xwechat 年度总结 呈现', inner, u(26), '600', SANS, u(18))
+    ctx.fillText('xwechat 年度总结 呈现', cx, artH + u(54))
     ctx.letterSpacing = '0px'
 
     ctx.fillStyle = 'rgba(255,255,255,0.62)'
@@ -388,7 +388,7 @@ const drawPoster = (ctx, index) => {
     ctx.fillStyle = 'rgba(255,255,255,0.34)'
     ctx.font = `600 22px ${SANS}`
     ctx.letterSpacing = '8px'
-    ctx.fillText('微信年度总结 呈现', cx, artH + 52)
+    ctx.fillText('xwechat 年度总结 呈现', cx, artH + 52)
     ctx.letterSpacing = '0px'
 
     // 标语

@@ -12,6 +12,7 @@ from xml.etree import ElementTree as ET
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..chat_accounts import resolve_chat_account_context
+from ..data_source import normalize_data_source
 from ..chat_helpers import (
     _build_avatar_url,
     _decode_message_content,
@@ -60,11 +61,6 @@ def _general_context(account: Optional[str]):
     return ctx, db_path
 
 
-def _general_db_path(account: Optional[str]) -> tuple[str, Path]:
-    ctx, db_path = _general_context(account)
-    return ctx.name, db_path
-
-
 def _connect(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -72,15 +68,6 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     # bad value does not break list endpoints.
     conn.text_factory = lambda b: b.decode("utf-8", "replace")
     return conn
-
-
-def _source_requested(value: Any = "auto") -> str:
-    value = str(value or "auto").strip().lower()
-    if value in {"auto", "default", "decrypted", "local", "sqlite"}:
-        return "decrypted"
-    raise HTTPException(status_code=400, detail="Invalid source; only decrypted snapshots are supported.")
-
-
 
 
 def _quote_ident(ident: str) -> str:
@@ -121,7 +108,7 @@ class _SQLiteSource:
 def _open_db_source(
     ctx: Any, *, source: str = "auto", db_group: str, db_name: str, decrypted_name: str,
 ) -> _SQLiteSource:
-    source_norm = _source_requested(source)
+    source_norm = normalize_data_source(source)
     db_path = resolve_account_database_dir(ctx.account_dir) / decrypted_name
     if not db_path.exists():
         raise HTTPException(status_code=404, detail=f"{decrypted_name} not found for account: {ctx.name}")
@@ -141,7 +128,7 @@ def _open_general_source(ctx: Any, source: str = "auto") -> _SQLiteSource:
 
 
 def _source_meta(conn: Any) -> dict[str, Any]:
-    return {"source": conn.source}
+    return {"dataSource": conn.source}
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -1236,7 +1223,7 @@ def list_friend_verifications(
     contact_memberships, contact_membership_available = (
         _load_friend_verification_contact_memberships(
             ctx,
-            source=_text(meta.get("dataSource")) or "decrypted",
+            source=meta["dataSource"],
             usernames=usernames,
         )
     )
@@ -1455,7 +1442,7 @@ def list_finder_records(
             """
         ).fetchall()]
 
-    sns_finder_map, sns_live_map = _load_finder_sns_maps(ctx, source=meta.get("dataSource", "decrypted"))
+    sns_finder_map, sns_live_map = _load_finder_sns_maps(ctx, source=meta["dataSource"])
     finder_map: dict[str, dict[str, Any]] = dict(page_finder_map)
     for username, identity in sns_finder_map.items():
         finder_map[username] = _merge_finder_identity(identity, finder_map.get(username)) or identity
@@ -1654,14 +1641,14 @@ def list_payment_records(
     _hydrate_and_sort_payment_items(
         ctx.account_dir,
         items,
-        source=meta.get("dataSource", "decrypted"),
+        source=meta["dataSource"],
     )
     sliced, has_more = _page(items, limit=limit, offset=offset)
     visible_transfers = [item for item in sliced if item.get("kind") == "transfer"]
     _attach_payment_message_details(
         ctx.account_dir,
         visible_transfers,
-        source=meta.get("dataSource", "decrypted"),
+        source=meta["dataSource"],
     )
     return {"status": "success", "account": account_name, "total": len(items), "hasMore": has_more, "stats": stats, "items": sliced, **meta}
 
@@ -1755,7 +1742,7 @@ def list_revoke_records(
     ]
     items.sort(key=lambda x: _safe_int(x.get("msgCreateTime") or x.get("revokeTime"), 0), reverse=True)
     sliced, has_more = _page(items, limit=limit, offset=offset)
-    _attach_revoke_message_details(ctx.account_dir, sliced, source=meta.get("dataSource", "decrypted"))
+    _attach_revoke_message_details(ctx.account_dir, sliced, source=meta["dataSource"])
     actual_total = sum(1 for item in items if item.get("isActualRevoke"))
     candidate_total = sum(1 for item in items if item.get("recordType") == "batch_revoke_candidate")
     return {

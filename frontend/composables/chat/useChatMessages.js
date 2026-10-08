@@ -171,6 +171,7 @@ export const useChatMessages = ({
           available: false,
           reason: String(error?.message || '无法读取本地语音转文字状态').trim()
         }
+        throw error
       } finally {
         voiceTranscriptionStatusLoading.value = false
         voiceTranscriptionStatusPromise = null
@@ -1269,7 +1270,9 @@ export const useChatMessages = ({
     const accountAtStart = String(selectedAccount.value || '').trim()
     const key = String(username || '').trim()
     if (!key || privacyMode?.value) return
-    void refreshVoiceTranscriptionStatus()
+    void refreshVoiceTranscriptionStatus().catch((error) => {
+      console.error('读取本地语音转文字状态失败:', error)
+    })
     const list = allMessages.value[key]
     if (!Array.isArray(list) || !list.length) return
 
@@ -1281,7 +1284,6 @@ export const useChatMessages = ({
     })
     if (!pending.length) return
 
-    if (typeof api?.lookupChatVoiceTranscriptionCache !== 'function') return
     try {
       const resp = await api.lookupChatVoiceTranscriptionCache({
         account: accountAtStart,
@@ -1308,12 +1310,12 @@ export const useChatMessages = ({
         m.voiceTranscriptModel = String(hit.model || '').trim()
         m.voiceTranscriptStatus = 'success'
       }
-    } catch {}
+    } catch (error) {
+      console.error('恢复语音转写缓存失败:', error)
+    }
   }
 
-  const transcribeVoice = async (message, { force = false, source = 'local' } = {}) => {
-    const native = source === 'wechat'
-    const sourceLabel = native ? '微信' : '本地'
+  const transcribeVoiceLocally = async (message, { force = false } = {}) => {
     const transcriptRevision = projectTranscriptRevision
     const accountAtStart = String(selectedAccount.value || '').trim()
     const usernameAtStart = String(selectedContact.value?.username || '').trim()
@@ -1323,7 +1325,7 @@ export const useChatMessages = ({
     const usableServerId = serverId && serverId !== '0' ? serverId : ''
     if (
       !message
-      || (!native && (!accountAtStart || !usernameAtStart || !usableServerId))
+      || !accountAtStart || !usernameAtStart || !usableServerId
       || message.voiceTranscriptStatus === 'loading'
     ) return
 
@@ -1341,7 +1343,6 @@ export const useChatMessages = ({
     })
     target.voiceTranscriptStatus = 'loading'
     target.voiceTranscriptError = ''
-    target._voiceTranscriptionSource = source
 
     const requestIsCurrent = () => !(
       target[VOICE_DISPATCH_TOKEN] !== dispatchToken
@@ -1350,7 +1351,7 @@ export const useChatMessages = ({
       || String(selectedContact.value?.username || '').trim() !== usernameAtStart
     )
 
-    const setVoiceError = (error, fallback = `${sourceLabel}语音转文字失败`) => {
+    const setVoiceError = (error, fallback = '本地语音转文字失败') => {
       if (!requestIsCurrent()) return
       const detail = voiceErrorDetail(error)
       target.voiceTranscriptError = String((typeof detail === 'string' ? detail : detail?.message) || error?.message || fallback).trim()
@@ -1358,51 +1359,21 @@ export const useChatMessages = ({
     }
 
     try {
-      let result
-      if (native) {
-        if (!accountAtStart || !usernameAtStart
-          || typeof message.serverIdStr !== 'string' || !/^[1-9]\d*$/.test(serverIdStr)
-          || !/^[^:]+:[^:]+:[1-9]\d*$/.test(String(message.id || ''))
-          || !Number.isSafeInteger(message.createTime) || message.createTime <= 0) {
-          throw new Error('此消息缺少完整、精确的消息身份，暂不支持微信转文字。')
-        }
-        if (typeof api?.transcribeChatVoiceNative !== 'function') {
-          throw new Error('当前版本未提供微信语音转文字接口。')
-        }
-        result = await api.transcribeChatVoiceNative({
-          account: accountAtStart,
-          username: usernameAtStart,
-          display_name: String(selectedContact.value?.name || '').trim() || undefined,
-          message_id: message.id,
-          server_id: serverIdStr,
-          create_time: message.createTime
-        })
-        if (!requestIsCurrent()) return
-        if (result?.status !== 'success' || result?.model !== 'wechat-native'
-          || result?.account !== accountAtStart || result?.username !== usernameAtStart
-          || result?.message_id !== message.id || result?.server_id !== serverIdStr) {
-          throw new Error('微信转文字响应与请求的消息身份不一致。')
-        }
-      } else {
-        if (typeof api?.transcribeChatVoice !== 'function') {
-          throw new Error('当前版本未提供本地语音转文字接口。')
-        }
-        const capability = await refreshVoiceTranscriptionStatus({ force: true })
-        if (!requestIsCurrent()) return
-        if (!capability?.available) {
-          throw new Error(String(capability?.reason || '本地语音模型尚未准备好。').trim())
-        }
-        result = await api.transcribeChatVoice({
-          account: accountAtStart,
-          server_id: usableServerId,
-          force: !!force
-        })
+      const capability = await refreshVoiceTranscriptionStatus({ force: true })
+      if (!requestIsCurrent()) return
+      if (!capability?.available) {
+        throw new Error(String(capability?.reason || '本地语音模型尚未准备好。').trim())
       }
+      const result = await api.transcribeChatVoice({
+        account: accountAtStart,
+        server_id: usableServerId,
+        force: !!force
+      })
       if (!requestIsCurrent()) return
 
       const text = String(result?.text || '').trim()
       if (!text) {
-        setVoiceError(null, `${sourceLabel}语音转文字未返回文字。`)
+        setVoiceError(null, '本地语音转文字未返回文字。')
         return
       }
       target.voiceTranscript = text
@@ -1422,9 +1393,6 @@ export const useChatMessages = ({
       }
     }
   }
-
-  const transcribeVoiceLocally = (message, { force = false } = {}) => transcribeVoice(message, { force })
-  const transcribeVoiceNatively = (message) => transcribeVoice(message, { source: 'wechat' })
 
   const getQuoteVoiceId = (message) => `quote-${String(message?.quoteServerId || message?.id || '')}`
 
@@ -2818,7 +2786,6 @@ export const useChatMessages = ({
     setVoiceRef,
     playVoice,
     transcribeVoiceLocally,
-    transcribeVoiceNatively,
     restoreVoiceTranscripts,
     invalidateProjectVoiceTranscripts,
     playQuoteVoice,

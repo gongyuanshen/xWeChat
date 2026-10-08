@@ -10,7 +10,6 @@ from .model_execution import (
     MICRO_BATCH_MIN_BYTES,
     MICRO_BATCH_MAX_BYTES,
     MICRO_BATCH_MAX_MESSAGES,
-    STEP_HARD_TIMEOUT_SECONDS,
 )
 
 PLAN_VERSION = 1
@@ -25,11 +24,7 @@ def fingerprint(value):
 def capacity(service, run):
     raw = run.get('material_batch_bytes') or run.get('capacity')
     if raw is None:
-        try:
-            profile = service.profile(run)
-            raw = input_limit(profile) // 3
-        except (KeyError, AttributeError, TypeError, Exception):
-            raw = MICRO_BATCH_MAX_BYTES
+        raw = input_limit(service.profile(run)) // 3
     return max(MICRO_BATCH_MIN_BYTES, min(MICRO_BATCH_MAX_BYTES, raw))
 
 
@@ -38,10 +33,6 @@ def fragment(message):
     return {'source': message['source'], 'start': start, 'end': start + len(message.get('text', '')),
             'username': message['username'], 'time': message['time'],
             'weight': size(message_payload(message)) + 2}
-
-
-def covered_part(ref):
-    return {k: ref[k] for k in ('source', 'start', 'end')}
 
 
 def uncommitted(ref, covered):
@@ -62,10 +53,6 @@ class AnalysisPlans:
         self.locks = {}
         self.slots = {}
         self.events = {}
-
-    def capacity(self, service, run) -> int:
-        """Returns batch budget strictly bounded between 12 KiB and 16 KiB."""
-        return capacity(service, run)
 
     def gateway(self, run):
         from .deep_tools import ChatGateway

@@ -62,7 +62,7 @@ if (typeof window !== "undefined") {
 
 contextBridge.exposeInMainWorld("wechatDesktop", {
   // Marker used by the frontend to distinguish the Electron desktop shell from the pure web build.
-  __brand: "WeChatDataAnalysisDesktop",
+  __brand: "xwechat",
   platform: process.platform,
   takeAiNavigation: () => ipcRenderer.invoke('ai:takeNavigation'),
   aiDiagnosticFallback: (entries) => ipcRenderer.invoke('ai:diagnosticFallback', entries),
@@ -152,8 +152,6 @@ contextBridge.exposeInMainWorld("wechatDesktop", {
     }),
 
   openExternalUrl: (url) => ipcRenderer.invoke("app:openExternalUrl", String(url ?? "")),
-  getAccountInfo: (account) => ipcRenderer.invoke("app:getAccountInfo", String(account || "")),
-  deleteAccountData: (account) => ipcRenderer.invoke("app:deleteAccountData", String(account || "")),
   onOutputDirChangeProgress: (callback) => {
     const handler = (_event, progress) => callback(progress);
     ipcRenderer.on("app:outputDirChangeProgress", handler);

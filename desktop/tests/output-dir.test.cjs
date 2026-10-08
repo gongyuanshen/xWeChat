@@ -194,7 +194,7 @@ test("rollbackOutputDirectoryChange restores the previous directory", async () =
 });
 
 test("isPathLexicallyInsideOrEqual detects install-directory targets without following junctions", () => {
-  const root = path.join(path.parse(process.cwd()).root, "Apps", "WeChatDataAnalysis");
+  const root = path.join(path.parse(process.cwd()).root, "Apps", "xwechat");
   assert.equal(isPathLexicallyInsideOrEqual(root, root), true);
   assert.equal(isPathLexicallyInsideOrEqual(root, path.join(root, "output")), true);
   assert.equal(

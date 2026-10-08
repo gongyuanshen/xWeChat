@@ -94,6 +94,17 @@
                     <div class="wechat-chat-history-bottom"><span>聊天记录</span></div>
                   </div>
 
+                  <LinkCard
+                    v-else-if="rec.renderType === 'link' && rec.linkType === 'finder'"
+                    :href="rec.url"
+                    :heading="rec.title || rec.content"
+                    :preview="rec.preview"
+                    :from="rec.from"
+                    link-type="finder"
+                    @preview-error="onChatHistoryLinkPreviewError(rec)"
+                    @contextmenu="openMediaContextMenu($event, rec, 'message')"
+                  />
+
                   <div
                     v-else-if="rec.renderType === 'link'"
                     class="wechat-link-card wechat-special-card msg-radius cursor-pointer"
@@ -219,6 +230,17 @@
 
         <template v-else-if="win.kind === 'link'">
           <div class="p-4 space-y-3">
+            <LinkCard
+              v-if="win.linkType === 'finder'"
+              :href="win.url"
+              :heading="win.title || win.content"
+              :preview="win.preview"
+              :from="win.from"
+              link-type="finder"
+              @preview-error="onChatHistoryLinkPreviewError(win)"
+              @contextmenu="openMediaContextMenu($event, win, 'message')"
+            />
+            <template v-else>
             <div
               class="wechat-link-card wechat-special-card msg-radius cursor-pointer"
               @click.stop="win.url && openRecordUrl(win.url)"
@@ -252,7 +274,6 @@
               </div>
             </div>
 
-            <div v-if="win.loading" class="text-xs text-gray-500">解析中...</div>
             <div v-if="win.url" class="text-xs text-gray-500 break-all">{{ win.url }}</div>
             <div class="flex gap-2">
               <button
@@ -274,6 +295,8 @@
                 复制链接
               </button>
             </div>
+            </template>
+            <div v-if="win.loading" class="text-xs text-gray-500">解析中...</div>
           </div>
         </template>
       </div>
@@ -284,11 +307,13 @@
 <script>
 import { defineComponent } from 'vue'
 import MessageContent from '~/components/chat/MessageContent.vue'
+import LinkCard from '~/components/chat/LinkCard.vue'
+import { showErrorAlert } from '~/composables/useErrorNotice'
 import { linkifyMessageSegments, openMessageExternalUrl } from '~/lib/chat/message-links'
 
 export default defineComponent({
   name: 'ChatHistoryFloatingWindows',
-  components: { MessageContent },
+  components: { MessageContent, LinkCard },
   props: {
     state: { type: Object, required: true }
   },
@@ -310,11 +335,11 @@ export default defineComponent({
     }
 
     const copyRecordUrl = async (url) => {
-      if (typeof props.state?.copyTextToClipboard === 'function') {
-        await props.state.copyTextToClipboard(url)
-        return
+      try {
+        await navigator.clipboard.writeText(String(url || ''))
+      } catch (error) {
+        showErrorAlert(`复制失败：${error.message}`)
       }
-      try { await navigator.clipboard.writeText(String(url || '')) } catch {}
     }
 
     const voiceRecordMessage = (win, record, index) => {
@@ -335,7 +360,7 @@ export default defineComponent({
     return {
       ...props.state,
       // 合并转发浮窗只提供播放和已有转写，不在浮窗内发起新的转写任务。
-      messageState: { ...props.state, transcribeVoiceLocally: undefined, transcribeVoiceNatively: undefined },
+      messageState: { ...props.state, transcribeVoiceLocally: undefined },
       recordTextSegments,
       openRecordUrl,
       copyRecordUrl,

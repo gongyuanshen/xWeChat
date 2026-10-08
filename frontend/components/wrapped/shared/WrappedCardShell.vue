@@ -22,7 +22,7 @@
   <section v-else class="relative h-full w-full overflow-hidden">
     <!-- 影院底：铺满整张 slide，标题和内容都在同一片暗场里 -->
     <div v-if="dark" class="wrapped-stage-dark" :class="`wrapped-stage-dark--${tone}`" aria-hidden="true" />
-    <WrappedCinemaOverlay v-if="dark" :grain="0.05" />
+    <WrappedCinemaOverlay v-if="dark" />
     <!-- ⚠️ 这里以前用的是 Tailwind 的 sm:/lg:/2xl: 断点，判的是**浏览器窗口宽度**。
          画幅框定之后那是错的对象：9:16 舞台可以在 2560px 宽的窗口里，于是 2xl:px-40
          从两侧各吃掉 160px（900px 宽的舞台被吃掉 36%），而窗口被拖窄时又会突然掉档。
@@ -80,7 +80,7 @@ const props = defineProps({
   bleed: { type: Boolean, default: false },
   // 影院模式：内容区铺一层满幅深色影院底（页头仍留在浅色底上，如年度台历）。
   dark: { type: Boolean, default: false },
-  // 暗场配色：'cinema' 暖绿影厅（海报长廊）/ 'foil' 冷蓝开卡桌（表情卡包）
+  // 暗场配色：沿用深绿基底，以不同聚光位置区分海报、航站楼和开卡桌。
   tone: { type: String, default: 'cinema' },
   // 本卡是否正处在 deck 的当前页（决定要不要把顶栏也切成浅色）
   active: { type: Boolean, default: false },
@@ -162,54 +162,24 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-/* 影厅：暖绿聚光，给电影海报长廊 */
+/* 暗场共用主界面的深绿基底，静态薄荷色光晕维持各页空间层次。 */
 .wrapped-stage-dark--cinema {
   background:
-    radial-gradient(64% 62% at 50% 46%, rgba(150, 226, 186, 0.12), rgba(150, 226, 186, 0) 70%),
-    radial-gradient(94% 58% at 50% 106%, rgba(4, 8, 7, 0.92), rgba(4, 8, 7, 0) 74%),
-    linear-gradient(180deg, #101A16 0%, #0C1410 46%, #070C0A 100%);
+    radial-gradient(64% 62% at 50% 46%, rgba(157, 220, 185, 0.09), transparent 70%),
+    #19241f;
 }
 
-/* 夜航航站楼：绿黑夜空 + 停机坪远灯 + 地平线跑道灯带 + 边缘暗角，
-   与影厅（中央聚光）/开卡桌（冷蓝射灯）拉开距离 */
+/* 航站楼的微光落在地平线。 */
 .wrapped-stage-dark--terminal {
   background:
-    radial-gradient(circle 52px at 79% 26%, rgba(232, 181, 74, 0.05), rgba(232, 181, 74, 0) 72%),
-    radial-gradient(circle 68px at 10% 20%, rgba(150, 200, 235, 0.04), rgba(150, 200, 235, 0) 72%),
-    radial-gradient(circle 40px at 91% 58%, rgba(62, 229, 138, 0.05), rgba(62, 229, 138, 0) 72%),
-    radial-gradient(140% 110% at 50% 38%, rgba(0, 0, 0, 0) 56%, rgba(0, 0, 0, 0.42) 100%),
-    radial-gradient(72% 46% at 50% 108%, rgba(62, 229, 138, 0.12), rgba(62, 229, 138, 0) 72%),
-    radial-gradient(52% 38% at 84% -8%, rgba(120, 180, 150, 0.07), rgba(120, 180, 150, 0) 70%),
-    linear-gradient(180deg, #0B1210 0%, #08100C 52%, #040906 100%);
+    radial-gradient(72% 46% at 50% 108%, rgba(157, 220, 185, 0.1), transparent 72%),
+    #19241f;
 }
 
-/* 打磨过的航站楼地面：底部一条微弱反光带 */
-.wrapped-stage-dark--terminal::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 24%;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0) 0%, rgba(214, 255, 231, 0.025) 34%, rgba(0, 0, 0, 0.3) 100%);
-}
-
-/* 开卡桌：冷蓝夜色 + 桌面射灯 + 卡垫网点，和影厅拉开距离 */
+/* 开卡桌保留集中于卡包附近的柔光。 */
 .wrapped-stage-dark--foil {
   background:
-    radial-gradient(46% 40% at 50% 40%, rgba(150, 180, 255, 0.16), rgba(150, 180, 255, 0) 72%),
-    radial-gradient(70% 44% at 50% 96%, rgba(120, 200, 255, 0.07), rgba(120, 200, 255, 0) 76%),
-    radial-gradient(120% 86% at 50% 50%, rgba(0, 0, 0, 0) 44%, rgba(0, 0, 0, 0.62) 100%),
-    linear-gradient(180deg, #0B1020 0%, #080C18 48%, #04060D 100%);
-}
-/* 网点卡垫：极淡，只在近处才看得出纹理 */
-.wrapped-stage-dark--foil::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.055) 1px, transparent 1px);
-  background-size: 26px 26px;
-  mask-image: radial-gradient(58% 52% at 50% 46%, #000 0%, transparent 78%);
-  -webkit-mask-image: radial-gradient(58% 52% at 50% 46%, #000 0%, transparent 78%);
+    radial-gradient(46% 40% at 50% 40%, rgba(198, 243, 223, 0.11), transparent 72%),
+    #19241f;
 }
 </style>

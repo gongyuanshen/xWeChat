@@ -448,15 +448,6 @@
     mix-blend-mode: multiply;
   }
 
-  /* Wrapped 增强噪点纹理（动态抖动） */
-  .wrapped-noise-enhanced {
-    background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyMDAiIGhlaWdodD0iMjAwIj4KICA8ZmlsdGVyIGlkPSJuIj4KICAgIDxmZVR1cmJ1bGVuY2UgdHlwZT0iZnJhY3RhbE5vaXNlIiBiYXNlRnJlcXVlbmN5PSIwLjkiIG51bU9jdGF2ZXM9IjUiIHN0aXRjaFRpbGVzPSJzdGl0Y2giLz4KICAgIDxmZUNvbG9yTWF0cml4IHR5cGU9InNhdHVyYXRlIiB2YWx1ZXM9IjAiLz4KICA8L2ZpbHRlcj4KICA8cmVjdCB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgZmlsdGVyPSJ1cmwoI24pIiBvcGFjaXR5PSIwLjUiLz4KPC9zdmc+");
-    background-repeat: repeat;
-    background-size: 200px 200px;
-    mix-blend-mode: multiply;
-    animation: noise-jitter 0.5s steps(3) infinite;
-  }
-
   /* Wrapped typography */
   .wrapped-title {
     font-weight: 700;
@@ -2803,23 +2794,6 @@
 
   html[data-theme='dark'] .theme-scope [class*="hover:bg-[#EAF8FE]"]:hover {
     background-color: rgba(16, 174, 239, 0.14);
-  }
-}
-
-/* Wrapped 动画关键帧 */
-
-@keyframes noise-jitter {
-  0% {
-    transform: translate(0, 0);
-  }
-  33% {
-    transform: translate(-1px, 1px);
-  }
-  66% {
-    transform: translate(1px, -1px);
-  }
-  100% {
-    transform: translate(0, 0);
   }
 }
 

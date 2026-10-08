@@ -11,7 +11,7 @@ def get_data_dir() -> Path:
     """Base writable directory for all runtime output (logs, databases, key store).
 
     - Desktop (Electron) should set `WECHAT_TOOL_DATA_DIR` to a per-user directory
-      (e.g. `%APPDATA%/WeChatDataAnalysis`).
+      (new profiles use `%APPDATA%/xwechat`; existing profiles retain their path).
     - Dev defaults to the current working directory (repo root).
     """
 

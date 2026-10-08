@@ -1,5 +1,5 @@
 <template>
-  <div class="bits-grid-motion w-full h-full overflow-hidden">
+  <div ref="rootEl" class="bits-grid-motion w-full h-full overflow-hidden">
     <section class="relative flex h-full w-full items-center justify-center overflow-hidden" :style="sectionStyle">
       <div class="bits-grid-motion-grid">
         <div
@@ -33,11 +33,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, inject, onMounted, onUnmounted, ref, watch } from 'vue'
 import gsap from 'gsap'
+import { useReducedMotion } from '~/composables/useReducedMotion'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
+  active: { type: Boolean, default: true },
   gradientColor: { type: String, default: 'rgba(7, 193, 96, 0.2)' },
   rowCount: { type: Number, default: 8 },
   columnCount: { type: Number, default: 10 },
@@ -47,10 +49,16 @@ const props = defineProps({
   rowGap: { type: Number, default: 12 }
 })
 
-let removeTicker = null
+const rootEl = ref(null)
+const reducedMotion = useReducedMotion()
+const exportMode = inject('wrappedExportMode', ref(false))
+const inView = ref(false)
+let observer = null
+let mounted = false
+const running = ref(false)
 let lastTickAt = 0
 let loopDistance = 0
-const marqueeX = ref(0)
+let marqueeX = 0
 
 const safeRowCount = computed(() => Math.max(1, Number(props.rowCount) || 1))
 const safeColumnCount = computed(() => Math.max(1, Number(props.columnCount) || 1))
@@ -82,8 +90,8 @@ const loopedItems = computed(() => {
 })
 
 const rowInlineStyle = computed(() => ({
-  willChange: 'transform',
-  transform: `translate3d(${props.baseOffsetX + marqueeX.value}px, 0, 0)`
+  willChange: running.value ? 'transform' : 'auto',
+  transform: `translate3d(calc(${props.baseOffsetX}px + var(--bits-marquee-x, 0px)), 0, 0)`
 }))
 
 const sectionStyle = computed(() => ({
@@ -101,48 +109,71 @@ const loopSpan = computed(() => (
 ))
 
 watch(loopSpan, (next) => {
-  loopDistance = next > 0 ? next : 0
-  if (loopDistance <= 0) {
-    marqueeX.value = 0
-    return
-  }
+  loopDistance = next
   // 把当前位移折回新周期内，避免换画幅那一帧整排跳一下
-  marqueeX.value = -(Math.abs(marqueeX.value) % loopDistance)
+  marqueeX = -(Math.abs(marqueeX) % loopDistance)
+  if (running.value) writePosition()
 })
 
-const updateMotion = () => {
-  if (typeof window === 'undefined') return
+const writePosition = () => {
+  // 只更新行位移，不让 112 个预告插槽跟着每帧重新渲染。
+  rootEl.value.style.setProperty('--bits-marquee-x', `${marqueeX}px`)
+}
 
-  const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+const updateMotion = () => {
+  if (!running.value) return
+
+  const now = performance.now()
   const dt = lastTickAt > 0 ? Math.min((now - lastTickAt) / 1000, 0.08) : 0
   lastTickAt = now
 
   if (loopDistance <= 0 || safeScrollSpeed.value <= 0 || dt <= 0) return
 
-  marqueeX.value -= safeScrollSpeed.value * dt
-  if (marqueeX.value <= -loopDistance) {
-    marqueeX.value += loopDistance
+  marqueeX -= safeScrollSpeed.value * dt
+  if (marqueeX <= -loopDistance) {
+    marqueeX += loopDistance
   }
+  writePosition()
 }
 
-onMounted(() => {
-  if (typeof window === 'undefined') return
-
-  loopDistance = loopSpan.value
-  marqueeX.value = 0
+const stopMotion = () => {
+  gsap.ticker.remove(updateMotion)
+  running.value = false
   lastTickAt = 0
+}
 
-  // Kick one frame immediately to avoid initial static delay.
-  marqueeX.value = -Math.min(loopDistance * 0.02, 8)
+const syncMotion = () => {
+  if (!mounted) return
+  const shouldRun = props.active && inView.value && !document.hidden && !reducedMotion.value && !exportMode.value && safeScrollSpeed.value > 0
+  if (!shouldRun) {
+    stopMotion()
+    return
+  }
+  if (running.value) return
+  running.value = true
+  lastTickAt = 0
+  writePosition()
+  gsap.ticker.add(updateMotion)
+}
 
-  gsap.ticker.lagSmoothing(1000, 33)
-  removeTicker = gsap.ticker.add(updateMotion)
+watch([() => props.active, inView, reducedMotion, exportMode, safeScrollSpeed], syncMotion)
+
+onMounted(() => {
+  mounted = true
+  loopDistance = loopSpan.value
+  // 保留原始首帧位移；暂停和恢复不重置跑马灯相位。
+  marqueeX = -Math.min(loopDistance * 0.02, 8)
+  writePosition()
+  observer = new IntersectionObserver(([entry]) => { inView.value = entry.isIntersecting })
+  observer.observe(rootEl.value)
+  document.addEventListener('visibilitychange', syncMotion)
 })
 
 onUnmounted(() => {
-  loopDistance = 0
-  lastTickAt = 0
-  if (typeof removeTicker === 'function') removeTicker()
+  mounted = false
+  stopMotion()
+  observer.disconnect()
+  document.removeEventListener('visibilitychange', syncMotion)
 })
 </script>
 
@@ -191,10 +222,10 @@ onUnmounted(() => {
   inset: 0;
   pointer-events: none;
   background:
-    linear-gradient(180deg, rgba(243, 255, 248, 0.78) 0%, rgba(243, 255, 248, 0.12) 20%, rgba(243, 255, 248, 0) 38%),
-    linear-gradient(90deg, rgba(243, 255, 248, 0.86) 0%, rgba(243, 255, 248, 0.12) 24%, rgba(243, 255, 248, 0) 44%),
-    linear-gradient(270deg, rgba(243, 255, 248, 0.9) 0%, rgba(243, 255, 248, 0.14) 30%, rgba(243, 255, 248, 0) 48%),
-    linear-gradient(0deg, rgba(243, 255, 248, 0.88) 0%, rgba(243, 255, 248, 0.16) 36%, rgba(243, 255, 248, 0) 58%);
+    linear-gradient(180deg, rgba(250, 250, 246, 0.78) 0%, rgba(250, 250, 246, 0.12) 20%, rgba(250, 250, 246, 0) 38%),
+    linear-gradient(90deg, rgba(250, 250, 246, 0.86) 0%, rgba(250, 250, 246, 0.12) 24%, rgba(250, 250, 246, 0) 44%),
+    linear-gradient(270deg, rgba(250, 250, 246, 0.9) 0%, rgba(250, 250, 246, 0.14) 30%, rgba(250, 250, 246, 0) 48%),
+    linear-gradient(0deg, rgba(250, 250, 246, 0.88) 0%, rgba(250, 250, 246, 0.16) 36%, rgba(250, 250, 246, 0) 58%);
   z-index: 3;
 }
 </style>

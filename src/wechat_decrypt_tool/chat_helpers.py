@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from .account_identity import resolve_account_self_username
 from .chat_accounts import list_chat_account_names, resolve_chat_account_context
 from .logging_config import get_logger
-from .sqlite_diagnostics import collect_sqlite_diagnostics, format_sqlite_diagnostics, is_usable_sqlite_db
+from .sqlite_diagnostics import is_usable_sqlite_db
 from .snapshot_registry import resolve_account_database_dir
 
 try:
@@ -1417,16 +1417,6 @@ def _parse_pat_message(text: str, contact_rows: dict[str, sqlite3.Row]) -> str:
         name = _pick_display_name(row, wxid)
         rendered = rendered.replace(f"${{{wxid}}}", name)
     return rendered.strip() or "[拍一拍]"
-
-
-def _parse_quote_message(text: str) -> str:
-    title = _extract_xml_tag_text(text, "title")
-    if title:
-        return title
-    refer = _extract_xml_tag_text(text, "content")
-    if refer:
-        return refer
-    return "[引用消息]"
 
 
 def _parse_app_message(text: str) -> dict[str, Any]:

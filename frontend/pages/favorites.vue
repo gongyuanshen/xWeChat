@@ -167,7 +167,7 @@ import { parseTextWithEmoji } from '~/lib/wechat-emojis'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
-useHead({ title: '收藏 - 微信数据分析助手' })
+useHead({ title: '收藏 - xwechat' })
 
 const api = useApi()
 const apiBase = String(useApiBase() || '/api').replace(/\/$/, '')

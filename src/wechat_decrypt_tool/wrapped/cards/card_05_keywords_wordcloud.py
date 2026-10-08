@@ -16,7 +16,7 @@ import jieba
 
 from ...chat_helpers import _decode_message_content, _decode_sqlite_text, _iter_message_db_paths, _quote_ident
 from ...logging_config import get_logger
-from .. import resolve_wrapped_self_username
+from .. import require_wrapped_self_rowid
 
 logger = get_logger(__name__)
 try:
@@ -44,7 +44,7 @@ _DATEISH_RE = re.compile(
 
 # Align with WeFlow Annual Report "年度常用语" logic.
 # WeFlow counts repeated *phrases* (full short sent messages), not jieba tokens.
-_WEFLOW_COMMON_PHRASE_LOCAL_TYPES = (1, 244813135921)
+_WEFLOW_COMMON_PHRASE_LOCAL_TYPES = (1,)
 
 # Small but practical stopword list for chat keywords.
 _STOPWORDS_ZH = {
@@ -171,10 +171,7 @@ def _stable_seed(account_name: str, year: int) -> int:
 
 
 def _list_message_tables(conn: sqlite3.Connection) -> list[str]:
-    try:
-        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    except Exception:
-        return []
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     names: list[str] = []
     for r in rows:
         if not r or not r[0]:
@@ -489,19 +486,13 @@ def build_common_phrases_payload(
     rnd.shuffle(bubble_candidates)
     bubble_messages = bubble_candidates[: max(0, int(bubble_limit or 0))]
 
-    # Examples: prefer real sampled messages; fallback to phrase itself.
-    if example_texts:
-        per_word = max(1, int(examples_per_word or 1))
-        examples = pick_examples(keywords, list(example_texts), per_word=per_word)
-        for ex in examples:
-            msgs = [str(m or "").strip() for m in (ex.get("messages") or []) if str(m or "").strip()]
-            if not msgs:
-                w = str(ex.get("word") or "").strip()
-                ex["messages"] = [w] if w else []
-            else:
-                ex["messages"] = msgs[:per_word]
-    else:
-        examples = [{"word": kw["word"], "count": int(kw["count"]), "messages": [kw["word"]]} for kw in keywords]
+    # Phrase evidence is a complete matching sent message. An empty sample stays empty.
+    examples = [
+        {"word": kw["word"], "count": int(kw["count"]), "messages": [
+            text for text in (example_texts or []) if text == kw["word"]
+        ][:max(1, int(examples_per_word))]}
+        for kw in keywords
+    ]
 
     top_kw = {"word": str(keywords[0]["word"]), "count": int(keywords[0]["count"])} if keywords else None
 
@@ -520,9 +511,8 @@ def _scan_common_phrase_counts(
     outgoing_only: bool,
     seed: int,
     max_seen: int | None = None,
-) -> tuple[Counter[str], dict[str, Any]]:
+) -> tuple[Counter[str], dict[str, list[int]], dict[str, Any]]:
     start_ts, end_ts = _year_range_epoch_seconds(int(year))
-    my_username = resolve_wrapped_self_username(account_dir) if outgoing_only else ""
     _ = seed  # 保留参数以兼容现有调用；扫描顺序不再使用随机。
 
     db_paths = _iter_message_db_paths(account_dir)
@@ -530,6 +520,7 @@ def _scan_common_phrase_counts(
     db_paths = [p for p in db_paths if not p.name.lower().startswith("biz_message")]
 
     phrase_counts: Counter[str] = Counter()
+    monthly_counts: dict[str, list[int]] = {}
     scanned = 0
     matched = 0
     capped = False
@@ -545,24 +536,14 @@ def _scan_common_phrase_counts(
             conn.row_factory = sqlite3.Row
             conn.text_factory = bytes
 
-            my_rowid: int | None = None
-            if outgoing_only:
-                try:
-                    r = conn.execute(
-                        "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
-                        (my_username,),
-                    ).fetchone()
-                    if r is not None and r[0] is not None:
-                        my_rowid = int(r[0])
-                except Exception:
-                    my_rowid = None
-                if my_rowid is None:
-                    continue
-
             tables = _list_message_tables(conn)
             if not tables:
                 continue
             tables.sort()
+
+            my_rowid: int | None = None
+            if outgoing_only:
+                my_rowid = require_wrapped_self_rowid(conn, account_dir, database=db_path.name)
 
             ts_expr = (
                 "CASE "
@@ -589,17 +570,14 @@ def _scan_common_phrase_counts(
                     params = (start_ts, end_ts)
 
                 sql = (
-                    "SELECT message_content, compress_content "
+                    f"SELECT message_content, compress_content, {ts_expr} AS timestamp "
                     f"FROM {qt} "
                     f"WHERE CAST(local_type AS INTEGER) IN ({local_types_csv}) "
                     f"  AND {ts_expr} >= ? AND {ts_expr} < ?"
                     f"{where_sender}"
                 )
 
-                try:
-                    cur = conn.execute(sql, params)
-                except Exception:
-                    continue
+                cur = conn.execute(sql, params)
 
                 for r in cur:
                     if max_seen is not None and scanned >= int(max_seen):
@@ -607,15 +585,14 @@ def _scan_common_phrase_counts(
                         break
 
                     scanned += 1
-                    try:
-                        raw_txt = _decode_message_content(r["compress_content"], r["message_content"])
-                    except Exception:
-                        continue
+                    raw_txt = _decode_message_content(r["compress_content"], r["message_content"])
 
                     phrase = _weflow_common_phrase_or_empty(raw_txt)
                     if not phrase:
                         continue
                     phrase_counts[phrase] += 1
+                    month_counts = monthly_counts.setdefault(phrase, [0] * 12)
+                    month_counts[datetime.fromtimestamp(int(r["timestamp"])).month - 1] += 1
                     matched += 1
         finally:
             if conn is not None:
@@ -636,7 +613,7 @@ def _scan_common_phrase_counts(
         "elapsedSec": round(float(elapsed), 3),
         "localTypes": list(_WEFLOW_COMMON_PHRASE_LOCAL_TYPES),
     }
-    return phrase_counts, meta
+    return phrase_counts, monthly_counts, meta
 
 
 def _scan_message_pool(
@@ -649,7 +626,6 @@ def _scan_message_pool(
     max_seen: int = 120_000,
 ) -> tuple[list[str], dict[str, Any]]:
     start_ts, end_ts = _year_range_epoch_seconds(int(year))
-    my_username = resolve_wrapped_self_username(account_dir) if outgoing_only else ""
     _ = seed  # 保留参数以兼容现有调用；抽样本身使用非确定性随机。
     rnd = random.SystemRandom()
 
@@ -672,24 +648,14 @@ def _scan_message_pool(
             conn.row_factory = sqlite3.Row
             conn.text_factory = bytes
 
-            my_rowid: int | None = None
-            if outgoing_only:
-                try:
-                    r = conn.execute(
-                        "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
-                        (my_username,),
-                    ).fetchone()
-                    if r is not None and r[0] is not None:
-                        my_rowid = int(r[0])
-                except Exception:
-                    my_rowid = None
-                if my_rowid is None:
-                    continue
-
             tables = _list_message_tables(conn)
             if not tables:
                 continue
             rnd.shuffle(tables)
+
+            my_rowid: int | None = None
+            if outgoing_only:
+                my_rowid = require_wrapped_self_rowid(conn, account_dir, database=db_path.name)
 
             ts_expr = (
                 "CASE "
@@ -718,20 +684,13 @@ def _scan_message_pool(
                     f"{where_sender}"
                 )
 
-                try:
-                    cur = conn.execute(sql, params)
-                except Exception:
-                    continue
+                cur = conn.execute(sql, params)
 
                 for r in cur:
                     if seen >= int(max_seen):
                         break
-                    raw_txt = ""
-                    try:
-                        raw_txt = _decode_message_content(r["compress_content"], r["message_content"]).strip()
-                    except Exception:
-                        raw_txt = ""
-                    cleaned = _clean_text(raw_txt)
+                    raw_txt = _decode_message_content(r["compress_content"], r["message_content"])
+                    cleaned = _weflow_common_phrase_or_empty(raw_txt)
                     if not cleaned:
                         continue
                     seen += 1
@@ -768,44 +727,23 @@ def build_card_05_keywords_wordcloud(*, account_dir: Path, year: int) -> dict[st
     title = "这一年，你把哪些话说了一遍又一遍？"
     seed = _stable_seed(str(account_dir.name or ""), int(year))
 
-    phrase_counts, scan_meta = _scan_common_phrase_counts(
+    phrase_counts, monthly_counts, scan_meta = _scan_common_phrase_counts(
         account_dir=account_dir,
         year=year,
         outgoing_only=True,
         seed=seed,
     )
-    # Fallback only when we cannot scan any candidate rows (e.g. Name2Id row missing).
-    if int(scan_meta.get("scannedCandidates") or 0) <= 0:
-        phrase_counts, scan_meta = _scan_common_phrase_counts(
-            account_dir=account_dir,
-            year=year,
-            outgoing_only=False,
-            seed=seed ^ 0x1234,
-        )
-        scan_meta["outgoingOnlyFallback"] = True
-
     example_pool: list[str] = []
     pool_meta: dict[str, Any] = {}
     if phrase_counts:
-        use_outgoing_only = not bool(scan_meta.get("outgoingOnlyFallback") or False)
         example_pool, pool_meta = _scan_message_pool(
             account_dir=account_dir,
             year=year,
-            outgoing_only=use_outgoing_only,
+            outgoing_only=True,
             seed=seed ^ 0x9E37,
             max_pool=3000,
             max_seen=120_000,
         )
-        if (not example_pool) and use_outgoing_only:
-            example_pool, pool_meta = _scan_message_pool(
-                account_dir=account_dir,
-                year=year,
-                outgoing_only=False,
-                seed=seed ^ 0xA53C,
-                max_pool=3000,
-                max_seen=120_000,
-            )
-            pool_meta["outgoingOnlyFallback"] = True
 
     payload = build_common_phrases_payload(
         phrase_counts=phrase_counts,
@@ -814,6 +752,8 @@ def build_card_05_keywords_wordcloud(*, account_dir: Path, year: int) -> dict[st
         # 例句候选池：前端每次点击从中随机抽 3 条展示，池子越大重复感越低。
         examples_per_word=10,
     )
+    for keyword in payload["keywords"]:
+        keyword["monthlyCounts"] = monthly_counts[keyword["word"]]
 
     logger.info(
         "Wrapped card#6 common phrases computed: account=%s year=%s phrases=%s bubble=%s scanned=%s matched=%s capped=%s elapsed=%.2fs",
@@ -844,10 +784,9 @@ def build_card_05_keywords_wordcloud(*, account_dir: Path, year: int) -> dict[st
                 "uniquePhrases": int(scan_meta.get("uniquePhrases") or 0),
                 "capped": bool(scan_meta.get("capped") or False),
                 "localTypes": list(scan_meta.get("localTypes") or []),
-                "outgoingOnlyFallback": bool(scan_meta.get("outgoingOnlyFallback") or False),
+                "outgoingOnly": True,
                 "examplePoolScannedMessages": int(pool_meta.get("scannedMessages") or 0),
                 "examplePoolSampledMessages": int(pool_meta.get("sampledMessages") or 0),
-                "examplePoolOutgoingOnlyFallback": bool(pool_meta.get("outgoingOnlyFallback") or False),
             },
         },
     }

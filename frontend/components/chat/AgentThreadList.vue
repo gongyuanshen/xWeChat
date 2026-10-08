@@ -2,13 +2,13 @@
   <nav class="agent-thread-list" aria-label="AI 会话列表">
     <header><strong><MessageCircleMore :size="16" :stroke-width="1.8" aria-hidden="true" />AI 助手</strong><button type="button" class="agent-thread-new" aria-label="新对话" title="新对话" @click="$emit('new')"><SquarePen :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
     <label class="agent-thread-search"><Search :size="16" :stroke-width="1.8" aria-hidden="true" /><input v-model="query" aria-label="搜索 AI 会话" placeholder="搜索会话" /></label>
-    <div class="agent-thread-list-heading"><span>当前聊天的对话</span><button type="button" aria-label="刷新会话列表" :disabled="loading" @click="$emit('refresh')"><component :is="loading ? LoaderCircle : RotateCw" :class="loading ? 'agent-icon-spin' : undefined" :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
+    <div class="agent-thread-list-heading"><span>{{ heading }}</span><button type="button" aria-label="刷新会话列表" :disabled="loading" @click="$emit('refresh')"><component :is="loading ? LoaderCircle : RotateCw" :class="loading ? 'agent-icon-spin' : undefined" :size="16" :stroke-width="1.8" aria-hidden="true" /></button></div>
     <p v-if="error" class="agent-thread-error" role="alert">{{ error }}</p>
     <div class="agent-thread-items" :aria-busy="loading">
       <p v-if="loading && !items.length" class="agent-thread-empty" role="status">正在加载会话…</p>
       <p v-else-if="!filtered.length" class="agent-thread-empty">{{ query ? '没有匹配的会话' : '还没有对话，点击上方开始。' }}</p>
       <article v-for="item in filtered" :key="item.id" class="agent-thread-item" :class="{ 'is-current': item.id === current, 'has-menu': menu === item.id, 'is-running': isRunning(item) }">
-        <button type="button" class="agent-thread-select" :aria-current="item.id === current ? 'page' : undefined" :title="item.title || '新的对话'" @click="$emit('select', item)"><span>{{ item.title || '新的对话' }}</span><small><AgentAvatar v-if="item.username" class="agent-thread-avatar" :path="avatarFor(item.username)" :name="nameFor(item.username)" /><span>{{ nameFor(item.username) }}</span></small></button>
+        <button type="button" class="agent-thread-select" :aria-current="item.id === current ? 'page' : undefined" :title="item.title || '新的对话'" @click="$emit('select', item)"><span>{{ item.title || '新的对话' }}</span><small><AgentAvatar v-if="item.username" class="agent-thread-avatar" :path="avatarFor(item.username)" :name="nameFor(item.username)" /><span>{{ descriptionFor ? descriptionFor(item) : nameFor(item.username) }}</span></small></button>
         <div class="agent-thread-actions">
           <span v-if="isRunning(item)" class="agent-thread-running" role="status" :aria-label="`${item.title || '新的对话'}：正在处理`" title="正在处理"><LoaderCircle class="agent-icon-spin" :size="16" :stroke-width="1.8" aria-hidden="true" /></span>
           <button type="button" class="agent-thread-more" :aria-label="`管理会话：${item.title || '新的对话'}`" aria-haspopup="menu" :aria-controls="menu === item.id ? menuId : undefined" :aria-expanded="menu === item.id" @click="openMenu(item, $event)"><Ellipsis :size="16" :stroke-width="1.8" aria-hidden="true" /></button>
@@ -38,7 +38,7 @@
 import { computed, getCurrentInstance, nextTick, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import AgentAvatar from './AgentAvatar.vue'
 import { Ellipsis, LoaderCircle, MessageCircleMore, RotateCw, Search, SlidersHorizontal, SquarePen, Trash2 } from '@lucide/vue'
-const props = defineProps({ items: { type: Array, default: () => [] }, current: String, runningIds: { type: Array, default: () => [] }, loading: Boolean, busy: Boolean, error: String, nameFor: { type: Function, default: value => value }, avatarFor: { type: Function, default: () => '' } })
+const props = defineProps({ heading: { type: String, default: '当前聊天的对话' }, descriptionFor: Function, items: { type: Array, default: () => [] }, current: String, runningIds: { type: Array, default: () => [] }, loading: Boolean, busy: Boolean, error: String, nameFor: { type: Function, default: value => value }, avatarFor: { type: Function, default: () => '' } })
 defineEmits(['new', 'select', 'rename', 'delete', 'refresh', 'settings'])
 const isRunning = item => props.runningIds.includes(item.id)
 const query = ref(''), menu = ref(''), editing = ref(''), deleting = ref(''), title = ref('')
@@ -46,7 +46,7 @@ const popup = ref(null)
 const menuId = `agent-thread-menu-${getCurrentInstance().uid}`
 let trigger = null
 let revision = 0
-const filtered = computed(() => props.items.filter(item => `${item.title} ${props.nameFor(item.username)}`.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
+const filtered = computed(() => props.items.filter(item => `${item.title} ${props.descriptionFor ? props.descriptionFor(item) : props.nameFor(item.username)}`.toLocaleLowerCase().includes(query.value.trim().toLocaleLowerCase())))
 const selected = computed(() => filtered.value.find(item => item.id === menu.value))
 
 function closeMenu(restoreFocus = false) {

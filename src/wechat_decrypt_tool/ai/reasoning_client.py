@@ -31,6 +31,8 @@ class ReasoningClient:
             if isinstance(message, ToolMessage):
                 item['tool_call_id'] = message.tool_call_id
             if isinstance(message, AIMessage):
+                # v3 内容还含内部工具/推理块；上游正文只传公开文字，扩展字段分别回传。
+                item['content'] = str(message.text)
                 if message.tool_calls:
                     item['tool_calls'] = [{'id': c['id'], 'type': 'function', 'function': {'name': c['name'], 'arguments': json.dumps(c['args'], ensure_ascii=False)}} for c in message.tool_calls]
                 reasoning = message.additional_kwargs.get('reasoning_content')
@@ -72,8 +74,9 @@ class ReasoningClient:
                         continue
                     choice, delta = raw.choices[0], raw.choices[0].delta
                     reasoning = getattr(delta, 'reasoning_content', None)
-                    calls = [{'name': c.function.name if c.function else None, 'args': c.function.arguments if c.function else '',
-                        'id': c.id, 'index': c.index} for c in delta.tool_calls or []]
+                    # 后续 SSE 分片的空名称/编号表示本片未提供，不能覆盖首片工具身份。
+                    calls = [{'name': (c.function.name or None) if c.function else None, 'args': c.function.arguments if c.function else '',
+                        'id': c.id or None, 'index': c.index} for c in delta.tool_calls or []]
                     yield AIMessageChunk(content=delta.content or '', id=raw.id, tool_call_chunks=calls,
                         additional_kwargs={'reasoning_content': reasoning} if reasoning is not None else {},
                         usage_metadata=usage, response_metadata={'finish_reason': choice.finish_reason} if choice.finish_reason else {})

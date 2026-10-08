@@ -173,16 +173,3 @@ def normalize_answer_references(text, evidence, references):
             return marker
         return match.group(0)
     return re.sub(r'\[\[([a-f0-9]{24})\]\]', replace, text, flags=re.I)
-
-
-def readable_answer(text, citations, refs=()):
-    sources = {c['source']: c for c in citations}
-    references = {r['id']: r for r in refs}
-    def replace(match):
-        kind, key = match.group(1), match.group(2).lower()
-        if kind:
-            ref = references.get(key)
-            return (ref.get('name') or ref.get('label') or '图片') if ref else '[引用待核实]'
-        source = sources.get(key)
-        return f"〔{source.get('name') or source['username']} · {source.get('sender', '')}〕" if source else '[来源待核实]'
-    return re.sub(r'\[\[(?:(person|image):)?([a-f0-9]{24})\]\]', replace, text, flags=re.I)

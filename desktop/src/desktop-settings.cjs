@@ -3,8 +3,8 @@ const path = require("path");
 
 function parseDesktopSettingsText(rawText) {
   const text = String(rawText ?? "").replace(/^\uFEFF/, "");
-  const parsed = JSON.parse(text || "{}");
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new TypeError("桌面设置必须为 JSON 对象");
   return parsed;
 }
 

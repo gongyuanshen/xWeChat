@@ -983,7 +983,7 @@ def _empty_night_companion() -> dict[str, Any]:
 
 def _is_night_companion_session(username: str) -> bool:
     """深夜伙伴仅统计普通微信单聊；此口径不改变聊天列表。"""
-    return not username.endswith(("@chatroom", "@openim")) and _should_keep_session(
+    return username != "filehelper" and not username.endswith(("@chatroom", "@openim")) and _should_keep_session(
         username, include_official=False
     )
 

@@ -105,7 +105,7 @@ import { storeToRefs } from 'pinia'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
-useHead({ title: '撤回 / 可撤回缓存 - 微信数据分析助手' })
+useHead({ title: '撤回 / 可撤回缓存 - xwechat' })
 
 const api = useApi()
 const chatAccounts = useChatAccountsStore()

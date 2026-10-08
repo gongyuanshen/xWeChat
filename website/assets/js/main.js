@@ -186,7 +186,7 @@ class CipherWall {
 
 /* ─────────────────────────── 启动 ─────────────────────────── */
 
-let stage, lenis, hexwall, loaderWall, river, mwall, isoTick = null;
+let stage, lenis, hexwall, loaderWall, mwall, isoTick = null;
 let scrollProgress = 0;
 let __vt = 0;
 
@@ -207,7 +207,6 @@ function boot() {
     if (loaderWall) loaderWall.draw(time);
     if (hexwall) hexwall.draw(time);
     if (mwall) mwall.draw(time);
-    if (river) river.draw(time);
     if (isoTick) isoTick();
   });
   gsap.ticker.lagSmoothing(0);
@@ -227,7 +226,6 @@ function boot() {
       stage.update(__vt);
       if (hexwall) hexwall.draw(__vt);
       if (mwall) mwall.draw(__vt);
-      if (river) river.draw(__vt);
       if (isoTick) isoTick();
     }
     return Math.round(scrollY);
@@ -1216,189 +1214,6 @@ function buildMachine() {
   window.__mc = (p) => { mcUpdate(p); tl.progress(p); return window.__step(2); };
 }
 
-/* ─────────────────────────── act 07 · stack ─────────────────────────── */
-
-/* ---------- 数据河：整条管线的粒子演算 ---------- */
-
-class DataRiver {
-  constructor(canvas) {
-    this.cv = canvas;
-    this.ctx = canvas.getContext("2d");
-    this.active = false;
-    this.flow = 1;
-    this.last = 0;
-    this.pmx = -1e4; this.pmy = -1e4;
-    this.HEX = "0123456789ABCDEF";
-    this.CN = "周五晚上老地方见带上照片我都存着呢哈哈红包已领取晚安好梦明天见谢谢你一直都在";
-    this.WORDS = ["Python", "FastAPI", "SQLite", "WCDB", "Nuxt 4", "Vue 3", "Electron", "Rust", "PyInstaller", "uv", "GSAP", "Tailwind"];
-    this.G = [0.14, 0.36, 0.58, 0.76]; // 四道闸门（x 比例）
-    this.flashes = [];
-    addEventListener("pointermove", (e) => { this.pmx = e.clientX; this.pmy = e.clientY; }, { passive: true });
-    addEventListener("resize", () => this.resize());
-    this.resize();
-  }
-  resize() {
-    const dpr = Math.min(devicePixelRatio || 1, 1.6);
-    this.W = this.cv.clientWidth; this.H = this.cv.clientHeight;
-    this.cv.width = this.W * dpr; this.cv.height = this.H * dpr;
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.xEnd = this.W - Math.min(170, this.W * 0.16);
-    const n = Math.min(320, Math.max(140, Math.floor((this.W * this.H) / 3600)));
-    this.parts = Array.from({ length: n }, () => this.spawn(Math.random()));
-    this.words = this.WORDS.map((w, i) => ({
-      w, t: i / this.WORDS.length, sp: 0.016 + Math.random() * 0.014,
-      lane: (Math.random() * 2 - 1) * 0.8, size: 17 + Math.random() * 16,
-    }));
-    // 闸门标签对齐到画布坐标
-    $$(".river-gates span").forEach((s, i) => {
-      if (this.G[i] != null) s.style.left = ((this.G[i] * this.xEnd) / this.W) * 100 + "%";
-    });
-  }
-  spawn(t = 0) {
-    return {
-      t, sp: 0.05 + Math.random() * 0.055,
-      y0: Math.random() * 2 - 1, ex: (Math.random() * 3) | 0,
-      g: this.HEX[(Math.random() * 16) | 0], stage: 0,
-      a: 0.35 + Math.random() * 0.55, s: Math.random() < 0.12 ? 15 : 11 + Math.random() * 3,
-    };
-  }
-  pos(p, time) {
-    const { W, H, xEnd } = this;
-    const cy = H * 0.5;
-    const x = p.t * xEnd;
-    const conv = Math.min(1, Math.max(0, p.t / this.G[1]));
-    const spread = 1 - (conv * conv * (3 - 2 * conv)) * 0.9;
-    let y = cy + p.y0 * H * 0.36 * spread + Math.sin(p.t * 34 + p.y0 * 9 + time * 1.8) * 3;
-    if (p.t > this.G[3]) {
-      const k = (p.t - this.G[3]) / (1 - this.G[3]);
-      const kk = k * k * (3 - 2 * k);
-      const ey = cy + (p.ex - 1) * H * 0.31;
-      y = y * (1 - kk) + ey * kk;
-    }
-    return [x, y];
-  }
-  draw(time) {
-    const { ctx, W, H } = this;
-    if (!this.active) { if (!this._c) { ctx.clearRect(0, 0, W, H); this._c = 1; } return; }
-    if (time - this.last < 1 / 30) return;
-    const dt = Math.min(time - this.last, 0.06);
-    this.last = time; this._c = 0;
-    ctx.clearRect(0, 0, W, H);
-    const cy = H * 0.5;
-    const rect = this.cv.getBoundingClientRect();
-    const mx = this.pmx - rect.left, my = this.pmy - rect.top;
-
-    // 河床辉光
-    const grd = ctx.createLinearGradient(0, 0, W, 0);
-    grd.addColorStop(0, "rgba(61,242,141,0)");
-    grd.addColorStop(0.5, "rgba(61,242,141,0.1)");
-    grd.addColorStop(1, "rgba(61,242,141,0)");
-    ctx.fillStyle = grd;
-    ctx.fillRect(0, cy - 34, W, 68);
-
-    // 底层：技术栈残影漂流
-    ctx.textBaseline = "middle";
-    for (const wd of this.words) {
-      wd.t += wd.sp * dt * this.flow;
-      if (wd.t > 1.08) { wd.t = -0.12; wd.lane = (Math.random() * 2 - 1) * 0.8; }
-      ctx.font = `900 ${wd.size}px Unbounded, sans-serif`;
-      ctx.fillStyle = "rgba(150, 190, 165, 0.075)";
-      ctx.fillText(wd.w, wd.t * (W + 260) - 130, cy + wd.lane * H * 0.4);
-    }
-
-    // 闸门光幕 + 密钥环
-    for (let i = 0; i < this.G.length; i++) {
-      const gx = this.G[i] * this.xEnd;
-      const gg = ctx.createLinearGradient(0, cy - H * 0.42, 0, cy + H * 0.42);
-      gg.addColorStop(0, "rgba(61,242,141,0)");
-      gg.addColorStop(0.5, i === 1 ? "rgba(61,242,141,0.5)" : "rgba(61,242,141,0.22)");
-      gg.addColorStop(1, "rgba(61,242,141,0)");
-      ctx.strokeStyle = gg;
-      ctx.lineWidth = i === 1 ? 1.5 : 1;
-      ctx.beginPath(); ctx.moveTo(gx, cy - H * 0.42); ctx.lineTo(gx, cy + H * 0.42); ctx.stroke();
-      if (i === 1) { // 密钥环：旋转缺口双环
-        ctx.strokeStyle = "rgba(61,242,141,0.85)";
-        ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.arc(gx, cy, 26, time * 1.4, time * 1.4 + Math.PI * 1.5); ctx.stroke();
-        ctx.strokeStyle = "rgba(61,242,141,0.35)";
-        ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(gx, cy, 34, -time * 0.9, -time * 0.9 + Math.PI * 1.2); ctx.stroke();
-      }
-    }
-
-    // 粒子（分层绘制：密文 → 明文 → 出港）
-    for (const p of this.parts) {
-      p.t += p.sp * dt * this.flow;
-      if (p.t > 1) Object.assign(p, this.spawn(0), { sp: p.sp });
-      const stage = p.t < this.G[1] ? 0 : p.t < this.G[3] ? 1 : 2;
-      if (stage !== p.stage) {
-        if (stage === 1) { // 过密钥闸：解密瞬间
-          p.g = this.CN[(Math.random() * this.CN.length) | 0];
-          const [fx, fy] = this.pos(p, time);
-          if (this.flashes.length < 14) this.flashes.push({ x: fx, y: fy, age: 0 });
-        }
-        p.stage = stage;
-      }
-      let [x, y] = this.pos(p, time);
-      const dxm = x - mx, dym = y - my;
-      const md = Math.hypot(dxm, dym);
-      if (md < 80) y += (dym / (md + 0.01)) * (80 - md) * 0.5;
-      if (stage === 0) {
-        ctx.font = `${p.s}px 'JetBrains Mono', monospace`;
-        ctx.fillStyle = `rgba(132, 162, 142, ${(p.a * 0.42).toFixed(3)})`;
-      } else if (stage === 1) {
-        ctx.font = `${p.s + 1}px 'JetBrains Mono', monospace`;
-        ctx.fillStyle = `rgba(61, 242, 141, ${(p.a * 0.85).toFixed(3)})`;
-      } else {
-        const cols = ["61, 242, 141", "234, 255, 242", "255, 194, 75"];
-        ctx.font = `${p.s}px 'JetBrains Mono', monospace`;
-        ctx.fillStyle = `rgba(${cols[p.ex]}, ${(p.a * 0.8).toFixed(3)})`;
-      }
-      ctx.fillText(p.g, x, y);
-    }
-
-    // 解密闪光
-    this.flashes = this.flashes.filter((f) => (f.age += dt) < 0.5);
-    for (const f of this.flashes) {
-      const k = f.age / 0.5;
-      ctx.strokeStyle = `rgba(61, 242, 141, ${(0.55 * (1 - k)).toFixed(3)})`;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(f.x, f.y, 4 + k * 42, 0, Math.PI * 2); ctx.stroke();
-    }
-  }
-}
-
-function buildStack() {
-  river = new DataRiver($("#river"));
-  if (REDUCED) { river.active = true; river.flow = 0.12; return; }
-
-  ScrollTrigger.create({
-    trigger: "#stack", start: "top 92%", end: "bottom 8%",
-    onToggle(self) { river.active = self.isActive; },
-  });
-  ScrollTrigger.create({
-    trigger: "#stack", start: "top 60%",
-    onEnter: () => { stage.morphTo("halo", { duration: 1.8 }); stage.setOpacity(0.35, 1); },
-  });
-
-  gsap.from(".stack__head", {
-    opacity: 0, y: 40, duration: 0.9, ease: "flow",
-    scrollTrigger: { trigger: "#stack", start: "top 72%" },
-  });
-  gsap.from(".river-gates span", {
-    opacity: 0, y: 14, stagger: 0.1, duration: 0.6, ease: "flow",
-    scrollTrigger: { trigger: ".river-wrap", start: "top 78%" },
-  });
-  gsap.from(".river-exits span", {
-    opacity: 0, x: 20, stagger: 0.12, duration: 0.6, ease: "flow",
-    scrollTrigger: { trigger: ".river-wrap", start: "top 72%" },
-  });
-  gsap.from(".stack__hud li", {
-    opacity: 0, y: 24, stagger: 0.08, duration: 0.6, ease: "flow",
-    scrollTrigger: { trigger: ".stack__hud", start: "top 94%" },
-  });
-}
-
 /* ─────────────────────────── act 06 · cta（终幕 · 归档落款）─────────────────────────── */
 
 function buildCTA() {
@@ -1436,7 +1251,7 @@ function buildCTA() {
         .to(".gate__row", { opacity: 1, y: 0, duration: 0.75, ease: "flow" }, 0.86)
         .to("#gate-meta", {
           duration: 1.1,
-          scrambleText: { text: "暂停发行 · 开发独立读取与导出底层", chars: "ABCDEF0123456789·", speed: 0.8 },
+          scrambleText: { text: "Windows x64 · 安装包与免安装版", chars: "ABCDEF0123456789·", speed: 0.8 },
         }, 1.0)
         .call(() => stage.pulse(1.9), [], 1.05)
         .set(gate, { clearProps: "clipPath" }, 1.72) // 交还 hover 辉光的外溢空间
@@ -1539,7 +1354,7 @@ function setupMagnetic() {
 /* ─────────────────────────── github stars ─────────────────────────── */
 
 function fetchStars() {
-  fetch("https://api.github.com/repos/LifeArchiveProject/WeChatDataAnalysis")
+  fetch("https://api.github.com/repos/gongyuanshen/xwechat")
     .then((r) => (r.ok ? r.json() : null))
     .then((d) => {
       if (!d || !d.stargazers_count) return;

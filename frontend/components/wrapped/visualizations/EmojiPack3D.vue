@@ -56,6 +56,14 @@ const disposables = []
 let raf = 0
 let destroyed = false
 let ready = false
+let building = false
+let pointerListening = false
+let introTween = null
+let introRotationTween = null
+let autoTween = null
+let openTween = null
+let pendingAutoOpenDelay = null
+let pendingBurst = false
 
 const PACK_W = 1.0
 const PACK_H = 1.46
@@ -200,7 +208,7 @@ const buildArtTexture = () => {
   g.fillStyle = 'rgba(239,223,175,0.9)'
   g.font = `600 19px ${cjk}`
   g.letterSpacing = '7px'
-  g.fillText('WECHAT WRAPPED', 62, 96)
+  g.fillText('xwechat', 62, 96)
   g.letterSpacing = '4px'
   g.fillStyle = hero
   g.font = `700 19px ${cjk}`
@@ -401,7 +409,7 @@ const buildStripTexture = () => {
   g.fillStyle = 'rgba(18,48,32,0.7)'
   g.font = `700 34px ${cjk}`
   g.letterSpacing = '14px'
-  const label = 'WECHAT WRAPPED'
+  const label = 'xwechat'
   g.fillText(label, W - g.measureText(label).width - 40, 76)
 
   // 两端各压一道暗边，让封条有卷边的厚度暗示
@@ -522,6 +530,7 @@ const drawStackSticker = (img) => {
   g.fillRect(0, 0, W, H * 0.55)
 
   tex.needsUpdate = true
+  startLoop()
 }
 
 const radialTexture = (stops) => {
@@ -537,11 +546,19 @@ const radialTexture = (stops) => {
 }
 
 const build = async () => {
-  const mod = await import('three')
-  THREE = mod.default || mod
-  if (destroyed) return
-  const { RoundedBoxGeometry } = await import('three/examples/jsm/geometries/RoundedBoxGeometry.js')
-  if (destroyed || !canvasEl.value) return
+  if (building || !canRender()) return
+  building = true
+  let RoundedBoxGeometry
+  try {
+    const mod = await import('three')
+    THREE = mod.default || mod
+    if (!canRender()) return
+    const geometry = await import('three/examples/jsm/geometries/RoundedBoxGeometry.js')
+    RoundedBoxGeometry = geometry.RoundedBoxGeometry
+    if (!canRender() || !canvasEl.value) return
+  } finally {
+    building = false
+  }
 
   renderer = new THREE.WebGLRenderer({
     canvas: canvasEl.value,
@@ -692,7 +709,7 @@ const build = async () => {
   packGroup.add(glowMesh)
   disposables.push(glowTex, glowGeo, glowMat)
 
-  applyRip(0)
+  applyRip(rip)
   resize()
   ready = true
 
@@ -705,17 +722,27 @@ const build = async () => {
       { z: z1 * 1.19 },
       { z: z1, duration: 1.5, ease: 'power3.out', onComplete: () => { introTween = null } }
     )
-    gsap.fromTo(
+    introRotationTween = gsap.fromTo(
       packGroup.rotation,
       { y: -0.85, x: 0.22 },
-      { y: -0.18, x: 0.04, duration: 1.6, ease: 'power3.out' }
+      { y: -0.18, x: 0.04, duration: 1.6, ease: 'power3.out', onComplete: () => { introRotationTween = null } }
     )
   } else {
     camera.position.z = z1
     packGroup.rotation.set(0, -0.18, 0)
   }
 
-  loop()
+  syncActivity()
+  // 手势可能比异步模块更早到达；场景就绪后继续同一个真实开包请求。
+  if (pendingBurst) {
+    pendingBurst = false
+    pendingAutoOpenDelay = null
+    openBurst()
+  } else if (pendingAutoOpenDelay !== null) {
+    const delay = pendingAutoOpenDelay
+    pendingAutoOpenDelay = null
+    autoOpen(delay)
+  }
 }
 
 // ---------- 撕口：一张纸从左往右被揭开 ----------
@@ -771,6 +798,7 @@ const applyRip = (v) => {
   }
   if (stackMesh) stackMesh.position.y = -STRIP_H * 0.5 + rip * STRIP_H * 0.42
   emit('progress', rip)
+  startLoop()
 }
 
 const setRip = (v) => applyRip(v)
@@ -802,6 +830,10 @@ const getMouth = () => mouthAtOpen
 // ---------- 开包 ----------
 const openBurst = () => {
   if (opened) return
+  if (!ready) {
+    pendingBurst = true
+    return
+  }
   opened = true
   applyRip(1)
   captureMouth()
@@ -811,7 +843,7 @@ const openBurst = () => {
     return
   }
 
-  const tl = gsap.timeline()
+  const tl = openTween = gsap.timeline({ paused: !canRender(), onComplete: () => { openTween = null } })
   // 撕到底就立刻通知外面开喷，别等袋子的收尾动作演完——那段等待看着就是卡了一下
   tl.call(() => emit('opened'), null, 0.12)
 
@@ -838,8 +870,11 @@ const openBurst = () => {
   tl.to(packGroup.position, { y: -0.12, duration: 0.5, ease: 'power2.out' }, 0.36)
 }
 
-let autoTween = null
 const autoOpen = (delay = 0) => {
+  if (!ready) {
+    pendingAutoOpenDelay = delay
+    return
+  }
   if (opened || props.reducedMotion) {
     if (props.reducedMotion) openBurst()
     return
@@ -851,8 +886,9 @@ const autoOpen = (delay = 0) => {
     duration: 0.62,
     delay,
     ease: 'power2.inOut',
+    paused: !canRender(),
     onUpdate: () => applyRip(holder.v),
-    onComplete: openBurst
+    onComplete: () => { autoTween = null; openBurst() }
   })
 }
 
@@ -879,8 +915,6 @@ const fitZ = () => {
   return Math.max(vSpan / (2 * halfTan), hSpan / (2 * halfTan * aspect))
 }
 
-let introTween = null
-
 const resize = () => {
   const el = rootEl.value
   if (!el || !renderer || !camera) return
@@ -891,12 +925,13 @@ const resize = () => {
   camera.aspect = w / h
   camera.updateProjectionMatrix()
   // 换画幅要重新取距；开场推镜期间交给时间线，免得两边打架
-  if (ready && !introTween?.isActive?.()) camera.position.z = fitZ()
+  if (ready && !introTween) camera.position.z = fitZ()
+  startLoop()
 }
 
 const loop = () => {
-  if (destroyed) return
-  raf = requestAnimationFrame(loop)
+  raf = 0
+  if (!canRender()) return
   if (!ready || !renderer) return
   clock += 0.016
 
@@ -910,6 +945,19 @@ const loop = () => {
     if (!opened) packGroup.position.y = Math.sin(clock * 0.62) * 0.03
   }
   renderer.render(scene, camera)
+  if (!props.reducedMotion) startLoop()
+}
+
+const canRender = () => !destroyed && props.active && !document.hidden
+
+const startLoop = () => {
+  if (raf || !ready || !renderer || !canRender()) return
+  raf = requestAnimationFrame(loop)
+}
+
+const stopLoop = () => {
+  if (raf) cancelAnimationFrame(raf)
+  raf = 0
 }
 
 const onPointerMove = (e) => {
@@ -922,26 +970,55 @@ const onPointerMove = (e) => {
 }
 
 let ro = null
+const syncActivity = () => {
+  const on = canRender()
+  for (const tween of [introTween, introRotationTween, autoTween, openTween]) tween?.paused(!on)
+  const followPointer = on && ready && !props.reducedMotion
+  if (followPointer && !pointerListening) window.addEventListener('pointermove', onPointerMove, { passive: true })
+  else if (!followPointer && pointerListening) window.removeEventListener('pointermove', onPointerMove)
+  pointerListening = followPointer
+  if (!on) {
+    stopLoop()
+    return
+  }
+  if (!renderer) {
+    void build()
+    return
+  }
+  resize()
+}
+
 onMounted(() => {
   if (!import.meta.client) return
-  build()
-  window.addEventListener('pointermove', onPointerMove, { passive: true })
+  document.addEventListener('visibilitychange', syncActivity)
   if (typeof ResizeObserver !== 'undefined' && rootEl.value) {
     ro = new ResizeObserver(() => resize())
     ro.observe(rootEl.value)
   }
+  syncActivity()
 })
 
-watch(() => props.active, (on) => { if (on) resize() })
+watch(() => props.active, () => { if (import.meta.client) syncActivity() })
+watch(() => props.reducedMotion, (reduced) => {
+  if (!import.meta.client) return
+  if (reduced) {
+    for (const tween of [introTween, introRotationTween, autoTween, openTween]) {
+      tween?.progress(1)
+      tween?.kill()
+    }
+    introTween = introRotationTween = autoTween = openTween = null
+  }
+  syncActivity()
+})
 // 表情图是异步拿到的，晚到就重画袋口那张
 watch(() => props.nextSrc, () => { paintStackSticker() })
 
 onBeforeUnmount(() => {
   destroyed = true
-  if (raf) cancelAnimationFrame(raf)
-  autoTween?.kill?.()
-  introTween?.kill?.()
-  introTween = null
+  stopLoop()
+  for (const tween of [introTween, introRotationTween, autoTween, openTween]) tween?.kill()
+  introTween = introRotationTween = autoTween = openTween = null
+  document.removeEventListener('visibilitychange', syncActivity)
   window.removeEventListener('pointermove', onPointerMove)
   ro?.disconnect?.()
   ro = null

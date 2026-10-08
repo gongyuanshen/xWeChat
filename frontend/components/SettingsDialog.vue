@@ -659,8 +659,9 @@
 <script setup>
 import { storeToRefs } from 'pinia'
 import { DESKTOP_SETTING_DEFAULT_TO_CHAT_KEY, SNS_SETTING_USE_CACHE_KEY, readLocalBoolSetting, writeLocalBoolSetting } from '~/lib/desktop-settings'
-import { readApiBaseOverride, writeApiBaseOverride } from '~/lib/api-settings'
+import { writeApiBaseOverride } from '~/lib/api-settings'
 import { invalidateApiBaseCache } from '~/composables/useApiBase'
+import { showErrorAlert } from '~/composables/useErrorNotice'
 import { reportServerErrorFromError } from '~/lib/server-error-logging'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { notifyProjectVoiceTranscriptsInvalidated } from '~/lib/voice-transcript-invalidation'
@@ -932,7 +933,7 @@ const applyMcpAccessInfo = (resp) => {
 }
 
 const mcpSkillFallback = [
-  '# WeChat MCP Copilot',
+  '# xwechat MCP Copilot',
   '',
   'Use xwechat MCP like an investigator: start broad, resolve fuzzy targets, then fetch only the context needed to answer.',
   '',
@@ -1506,8 +1507,8 @@ const setVoiceDevice = async (device) => {
     const resp = await api.setVoiceTranscriptionDevice(next)
     applyVoiceTranscriptionStatus(resp?.configuration || resp)
   } catch (e) {
-    voiceDeviceError.value = e?.message || '设置语音转文字推理设备失败'
     await refreshVoiceTranscriptionStatus()
+    voiceDeviceError.value = e?.message || '设置语音转文字推理设备失败'
   } finally {
     voiceDeviceBusy.value = false
   }
@@ -1517,26 +1518,17 @@ const copyMcpText = async (key, text) => {
   if (!process.client || typeof window === 'undefined') return
   const value = String(text || '').trim()
   if (!value) return
+  mcpCopiedKey.value = ''
   try {
-    if (navigator?.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value)
-    } else {
-      const el = document.createElement('textarea')
-      el.value = value
-      el.setAttribute('readonly', '')
-      el.style.position = 'fixed'
-      el.style.left = '-9999px'
-      document.body.appendChild(el)
-      el.select()
-      document.execCommand('copy')
-      document.body.removeChild(el)
-    }
+    await navigator.clipboard.writeText(value)
     mcpCopiedKey.value = key
     if (mcpCopiedTimer) clearTimeout(mcpCopiedTimer)
     mcpCopiedTimer = setTimeout(() => {
       if (mcpCopiedKey.value === key) mcpCopiedKey.value = ''
     }, 1600)
-  } catch {}
+  } catch (error) {
+    showErrorAlert(`复制失败：${error.message}`)
+  }
 }
 
 const refreshSavedKeys = async () => {
@@ -1680,8 +1672,8 @@ const setMcpLanAccess = async (enabled) => {
     await refreshMcpSkillBundle()
   } catch (e) {
     mcpLanAccessEnabled.value = previous
-    mcpLanAccessError.value = e?.message || '设置 MCP 接入状态失败'
     await refreshMcpLanAccess()
+    mcpLanAccessError.value = e?.message || '设置 MCP 接入状态失败'
   } finally {
     mcpLanAccessLoading.value = false
   }
@@ -1714,8 +1706,8 @@ const setDesktopAutoLaunch = async (enabled) => {
   try {
     desktopAutoLaunch.value = !!(await window.wechatDesktop.setAutoLaunch(!!enabled))
   } catch (e) {
-    desktopAutoLaunchError.value = e?.message || '设置开机自启动失败'
     await refreshDesktopAutoLaunch()
+    desktopAutoLaunchError.value = e?.message || '设置开机自启动失败'
   } finally {
     desktopAutoLaunchLoading.value = false
   }
@@ -1746,8 +1738,8 @@ const setDesktopCloseBehavior = async (behavior) => {
     const v = await window.wechatDesktop.setCloseBehavior(desired)
     desktopCloseBehavior.value = String(v || '').toLowerCase() === 'exit' ? 'exit' : 'tray'
   } catch (e) {
-    desktopCloseBehaviorError.value = e?.message || '设置关闭窗口行为失败'
     await refreshDesktopCloseBehavior()
+    desktopCloseBehaviorError.value = e?.message || '设置关闭窗口行为失败'
   } finally {
     desktopCloseBehaviorLoading.value = false
   }
@@ -1758,36 +1750,13 @@ const refreshDesktopBackendPort = async () => {
   desktopBackendPortLoading.value = true
   desktopBackendPortError.value = ''
   try {
-    if (window.wechatDesktop?.getBackendPort) {
-      const v = await window.wechatDesktop.getBackendPort()
-      const n = Number(v)
-      if (Number.isInteger(n) && n >= 1 && n <= 65535) {
-        desktopBackendPortInput.value = String(n)
-        return
-      }
-    }
-
-    try {
-      const resp = await fetchAdminEndpoint('/admin/port')
-      const n = Number(resp?.port)
-      const d = Number(resp?.default_port)
-      if (Number.isInteger(d) && d >= 1 && d <= 65535) desktopBackendPortDefault.value = d
-      if (Number.isInteger(n) && n >= 1 && n <= 65535) {
-        desktopBackendPortInput.value = String(n)
-        return
-      }
-    } catch {}
-
-    let detectedPort = null
-    const override = readApiBaseOverride()
-    if (override && /^https?:\/\//i.test(override)) {
-      try {
-        const u = new URL(override)
-        const n = Number(u.port)
-        if (Number.isInteger(n) && n >= 1 && n <= 65535) detectedPort = n
-      } catch {}
-    }
-    if (!desktopBackendPortInput.value) desktopBackendPortInput.value = String(detectedPort ?? 10392)
+    const info = window.wechatDesktop?.getBackendPort
+      ? { port: await window.wechatDesktop.getBackendPort() }
+      : await fetchAdminEndpoint('/admin/port')
+    const port = Number(info.port)
+    if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('后端返回了无效的端口')
+    desktopBackendPortInput.value = String(port)
+    if (info.default_port != null) desktopBackendPortDefault.value = Number(info.default_port)
   } catch (e) {
     desktopBackendPortError.value = e?.message || '读取后端端口失败'
   } finally {
@@ -1877,18 +1846,14 @@ const applyDesktopOutputDir = async (nextDir) => {
   desktopOutputDirProgress.value = null
   try {
     const res = await window.wechatDesktop.setOutputDir(String(nextDir ?? '').trim())
-    if (res?.success === false) {
-      desktopOutputDirError.value = String(res?.error || '修改 output 目录失败').trim()
-      await refreshDesktopOutputDir()
-      return
-    }
+    if (res?.success !== true) throw new Error(res?.error || '修改 output 目录失败：桌面应用未返回成功状态')
     await refreshDesktopOutputDir()
     desktopOutputDirMessage.value = String(
       res?.message || (res?.changed === false ? 'output 目录未变化' : 'output 目录已更新')
     ).trim()
   } catch (e) {
-    desktopOutputDirError.value = e?.message || '修改 output 目录失败'
     await refreshDesktopOutputDir()
+    desktopOutputDirError.value = e?.message || '修改 output 目录失败'
   } finally {
     desktopOutputDirApplying.value = false
   }
@@ -1947,12 +1912,11 @@ const applyDesktopBackendPort = async () => {
       return
     }
 
-    let currentBackendPort = null
-    try {
-      const info = await fetchAdminEndpoint('/admin/port')
-      const p = Number(info?.port)
-      if (Number.isInteger(p) && p >= 1 && p <= 65535) currentBackendPort = p
-    } catch {}
+    const info = await fetchAdminEndpoint('/admin/port')
+    const currentBackendPort = Number(info.port)
+    if (!Number.isInteger(currentBackendPort) || currentBackendPort < 1 || currentBackendPort > 65535) {
+      throw new Error('后端返回了无效的端口')
+    }
     const uiPort = (() => {
       const rawPort = String(window.location?.port || '').trim()
       if (rawPort) return Number(rawPort)
@@ -1992,12 +1956,10 @@ const applyDesktopBackendPort = async () => {
       return
     }
 
-    try {
-      window.location.reload()
-    } catch {}
+    window.location.reload()
   } catch (e) {
-    desktopBackendPortError.value = e?.message || '设置后端端口失败（若为网页端，请确认后端为本机启动且允许重启）'
     await refreshDesktopBackendPort()
+    desktopBackendPortError.value = e?.message || '设置后端端口失败（若为网页端，请确认后端为本机启动且允许重启）'
   } finally {
     desktopBackendPortApplying.value = false
   }

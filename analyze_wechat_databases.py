@@ -5,10 +5,9 @@
 """
 
 import sqlite3
-import os
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any
 from collections import defaultdict
 import re
 
@@ -941,51 +940,6 @@ class WeChatDatabaseAnalyzer:
             return "布尔标志字段"
         else:
             return "未知用途字段"
-    
-    def get_message_type_meaning(self, msg_type: int, sub_type: int = 0) -> str:
-        """获取消息类型含义
-        
-        Args:
-            msg_type: 消息主类型
-            sub_type: 消息子类型
-            
-        Returns:
-            消息类型说明
-        """
-        type_key = (msg_type, sub_type)
-        if type_key in self.message_types:
-            return self.message_types[type_key]
-        
-        # 如果找不到精确匹配，尝试只匹配主类型
-        for (main_type, _), description in self.message_types.items():
-            if main_type == msg_type:
-                return f"{description}（子类型{sub_type}）"
-        
-        return f"未知消息类型（{msg_type}, {sub_type}）"
-    
-    def get_friend_type_meaning(self, friend_type: int) -> str:
-        """获取联系人类型含义
-        
-        Args:
-            friend_type: 联系人类型值
-            
-        Returns:
-            联系人类型说明
-        """
-        if friend_type in self.friend_types:
-            return self.friend_types[friend_type]
-        
-        # 对于未知类型，尝试推测
-        if friend_type & 65536:  # 包含65536的标志位
-            return f"不看他的朋友圈相关设置（{friend_type}）"
-        elif friend_type & 8388608:  # 包含8388608的标志位
-            return f"仅聊天相关设置（{friend_type}）"
-        elif friend_type & 268435456:  # 包含268435456的标志位
-            return f"微信群相关（{friend_type}）"
-        elif friend_type & 2147483648:  # 包含2147483648的标志位
-            return f"公众号相关（{friend_type}）"
-        else:
-            return f"未知联系人类型（{friend_type}）"
     
     def generate_markdown_docs(self, output_dir: str = "output/docs/database"):
         """生成Markdown文档

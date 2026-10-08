@@ -37,6 +37,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    # Match the source desktop profile pinned by desktop-identity.cjs; this is a storage identity.
     parser.add_argument('--data', type=Path, default=Path(os.environ['APPDATA']) / 'wechat-data-analysis-desktop')
     parser.add_argument('--state', type=Path, required=True)
     parser.add_argument('--ui', type=Path, default=Path('frontend/.output/public'))

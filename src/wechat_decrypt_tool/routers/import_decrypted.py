@@ -4,7 +4,6 @@ import os
 import shutil
 import json
 import hashlib
-import re
 import sqlite3
 import asyncio
 import stat
@@ -28,8 +27,6 @@ from ..legacy_archive_signature import read_zip_legacy_signature
 from ..app_paths import get_data_dir, get_output_databases_dir
 from ..logging_config import get_logger
 from ..path_fix import PathFixRoute
-from ..session_last_message import build_session_last_message_table
-from ..media_helpers import _wxgf_to_image_bytes
 
 logger = get_logger(__name__)
 

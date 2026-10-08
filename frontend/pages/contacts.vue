@@ -1,18 +1,21 @@
 <template>
   <div class="contacts-page theme-scope theme-page h-screen flex overflow-hidden" style="background-color: var(--app-shell-bg)">
     <div class="flex-1 flex flex-col min-h-0" style="background-color: var(--app-shell-bg)">
-      <div class="flex-1 min-h-0 overflow-hidden p-4">
-        <div class="h-full grid grid-cols-1 lg:grid-cols-[460px_minmax(0,1fr)] gap-4">
-          <div class="bg-white border border-gray-200 rounded-lg flex flex-col min-h-0 overflow-hidden">
-            <div class="p-3 border-b border-gray-200" style="background-color: var(--app-surface-muted)">
+      <div class="contacts-workspace">
+          <aside class="contacts-directory" aria-label="通讯录">
+            <header class="contacts-directory-heading">
+              <h1>通讯录</h1>
+              <span>共 {{ counts.total }} 位</span>
+            </header>
+            <div class="contacts-search">
               <div class="flex items-center gap-2">
                 <div class="contact-search-wrapper flex-1" :class="{ 'privacy-blur': privacyMode }">
                   <svg class="contact-search-icon" fill="none" stroke="currentColor" viewBox="0 0 16 16">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7.33333 12.6667C10.2789 12.6667 12.6667 10.2789 12.6667 7.33333C12.6667 4.38781 10.2789 2 7.33333 2C4.38781 2 2 4.38781 2 7.33333C2 10.2789 4.38781 12.6667 7.33333 12.6667Z" />
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14 14L11.1 11.1" />
                   </svg>
-                  <input v-model="searchKeyword" class="contact-search-input" type="text" placeholder="搜索联系人" />
-                  <button v-if="searchKeyword" type="button" class="contact-search-clear" @click="searchKeyword = ''">
+                  <input v-model="searchKeyword" class="contact-search-input" type="search" aria-label="搜索联系人" placeholder="搜索联系人" />
+                  <button v-if="searchKeyword" type="button" class="contact-search-clear" aria-label="清空联系人搜索" @click="searchKeyword = ''">
                     <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
                     </svg>
@@ -21,8 +24,8 @@
               </div>
             </div>
 
-            <div class="px-3 py-3 border-b border-gray-200 bg-white">
-              <div class="grid grid-cols-3 gap-2">
+            <div class="contacts-filters">
+              <div class="grid grid-cols-2 gap-2">
                 <label
                   v-for="card in contactFilterCards"
                   :key="card.key"
@@ -44,22 +47,27 @@
                   <span class="text-xs tabular-nums font-semibold">{{ card.count }}</span>
                 </label>
               </div>
-              <div class="mt-2 text-right text-xs text-gray-500">总计 {{ counts.total }}</div>
+              <p class="contacts-filter-hint">分类可多选</p>
             </div>
 
-            <div class="flex-1 min-h-0 overflow-auto" @scroll.passive="onContactsScroll">
+            <div class="contacts-list" aria-label="联系人列表" @scroll.passive="onContactsScroll">
               <div v-if="loading" class="p-4 text-sm text-gray-500">加载中…</div>
               <ErrorNotice v-else-if="error" :message="error" class="m-4" />
               <div v-else-if="contacts.length === 0" class="p-4 text-sm text-gray-500">暂无联系人</div>
               <div v-else>
                 <div v-for="group in visibleGroupedContacts" :key="group.key">
-                  <div class="px-3 py-1 text-xs font-semibold text-gray-500 bg-gray-50 border-b border-gray-100">
+                  <div class="contact-group-heading">
                     {{ group.key }}
                   </div>
-                  <div
+                  <button
                     v-for="contact in group.items"
                     :key="contact.username"
-                    class="px-3 py-2 border-b border-gray-100 flex items-center gap-3"
+                    type="button"
+                    class="contact-list-item"
+                    :class="{ 'is-selected': selectedContact?.username === contact.username }"
+                    :aria-pressed="selectedContact?.username === contact.username"
+                    :aria-label="`查看${contact.displayName}的资料`"
+                    @click="selectContact(contact)"
                   >
                     <div class="w-10 h-10 rounded-md overflow-hidden bg-gray-300 shrink-0" :class="{ 'privacy-blur': privacyMode }">
                       <img
@@ -86,10 +94,10 @@
                         >来源：{{ contact.source }}</span>
                       </div>
                     </div>
-                    <div class="text-xs px-2 py-0.5 rounded" :class="typeBadgeClass(contact)">
+                    <div class="contact-type-badge" :class="typeBadgeClass(contact)">
                       {{ typeLabel(contact) }}
                     </div>
-                  </div>
+                  </button>
                 </div>
                 <button
                   v-if="visibleContacts.length < sortedContacts.length"
@@ -101,10 +109,63 @@
                 </button>
               </div>
             </div>
-          </div>
+            <p class="contacts-directory-hint">点击头像或联系人，查看详细资料</p>
+          </aside>
 
-          <div class="contacts-export-panel h-full min-h-0 w-full space-y-3 overflow-y-auto pr-1">
-            <section class="rounded-lg border border-[#e5e7eb] bg-white">
+          <main class="contacts-detail-workspace">
+            <nav class="contacts-view-switcher" aria-label="联系人视图">
+              <button type="button" :aria-pressed="activeView === 'profile'" @click="activeView = 'profile'">好友资料</button>
+              <button type="button" :aria-pressed="activeView === 'verification'" @click="activeView = 'verification'">好友验证</button>
+              <span class="contacts-verification-count" aria-label="好友验证记录数">{{ friendVerificationTotal }}</span>
+              <button type="button" :aria-pressed="activeView === 'export'" @click="activeView = 'export'">导出联系人</button>
+            </nav>
+            <div class="contacts-export-panel contacts-detail-scroll">
+            <section v-show="activeView === 'profile'" class="contact-profile" data-testid="contact-profile" aria-label="联系人资料" :aria-busy="profileLoading">
+              <div v-if="!selectedContact" class="contact-profile-empty">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path v-for="path in contactTypeIconPaths.user" :key="path" :d="path" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                <h2>选择一位联系人</h2>
+                <p>点击左侧头像或联系人，查看详细资料。</p>
+              </div>
+              <template v-else>
+                <header class="contact-profile-header">
+                  <div class="contact-profile-avatar" :class="{ 'privacy-blur': privacyMode }">
+                    <img v-if="profileIdentity.avatar && !avatarBroken[avatarBrokenKey(profileIdentity)]" :src="profileIdentity.avatar" :alt="profileIdentity.displayName" referrerpolicy="no-referrer" @error="markAvatarBroken(profileIdentity)" />
+                    <span v-else>{{ profileIdentity.displayName?.charAt(0) || '?' }}</span>
+                  </div>
+                  <div class="contact-profile-identity" :class="{ 'privacy-blur': privacyMode }">
+                    <div class="contact-profile-name">
+                      <h2>{{ profileIdentity.displayName }}</h2>
+                      <span class="contact-type-badge" :class="typeBadgeClass(profileIdentity)">{{ typeLabel(profileIdentity) }}</span>
+                    </div>
+                    <p v-if="profileIdentity.alias">微信号 {{ profileIdentity.alias }}</p>
+                    <p v-if="profileIdentity.region">{{ profileIdentity.region }}</p>
+                  </div>
+                  <button type="button" class="contact-profile-chat" @click="openChatByUsername(selectedContact.username)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5Z" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    查看聊天记录
+                  </button>
+                </header>
+                <div v-if="profileLoading" class="contact-profile-status" role="status">正在加载联系人资料…</div>
+                <div v-else-if="profileError" class="contact-profile-status">
+                  <ErrorNotice :message="profileError" />
+                  <button type="button" class="contact-profile-retry" @click="selectContact(selectedContact)">重新加载</button>
+                </div>
+                <div v-else-if="profileFound === false" class="contact-profile-status" role="status">
+                  <p>本地未找到这位联系人的详细资料。</p>
+                  <button type="button" class="contact-profile-retry" @click="selectContact(selectedContact)">重新加载</button>
+                </div>
+                <div v-else-if="contactProfile" class="contact-profile-details">
+                  <h3>基础资料</h3>
+                  <dl :class="{ 'privacy-blur': privacyMode }">
+                    <div v-for="field in profileFields" :key="field.label" class="contact-profile-field">
+                      <dt>{{ field.label }}</dt>
+                      <dd :class="{ 'is-empty': !field.value }">{{ field.value || '未记录' }}</dd>
+                    </div>
+                  </dl>
+                </div>
+              </template>
+            </section>
+            <section v-show="activeView === 'verification'" class="contacts-verification-panel rounded-lg border border-[#e5e7eb] bg-white">
               <div class="flex items-center justify-between gap-3 border-b border-[#e5e7eb] px-4 py-2.5">
                 <div>
                   <div class="text-[14px] font-medium text-[#111827]">好友验证</div>
@@ -133,6 +194,7 @@
                   <input
                     v-model="friendVerificationKeyword"
                     type="text"
+                    aria-label="搜索好友验证"
                     class="w-full rounded-md border border-[#e5e7eb] bg-white py-1.5 pl-9 pr-9 text-[13px] text-[#111827] outline-none transition placeholder:text-[#9ca3af] focus:border-[#07C160] focus:ring-2 focus:ring-[#07C160]/15"
                     placeholder="搜索验证内容、用户名、备注"
                   />
@@ -156,7 +218,7 @@
                 <div v-else-if="!friendVerifications.length" class="rounded-md border border-[#e5e7eb] bg-[#f9fafb] px-3 py-4 text-[13px] text-[#6b7280]">
                   暂无好友验证记录
                 </div>
-                <div v-else class="max-h-[340px] space-y-1.5 overflow-y-auto pr-1">
+                <div v-else class="space-y-1.5">
                   <article
                     v-for="item in friendVerifications"
                     :key="`${item.timestamp}-${item.userName}-${item.type}-${item.scene}`"
@@ -211,7 +273,7 @@
               </div>
             </section>
 
-            <section class="app-export-embedded" aria-labelledby="contacts-export-title">
+            <section v-show="activeView === 'export'" class="app-export-embedded" aria-labelledby="contacts-export-title">
               <div class="app-export-panel contacts-export-title-panel">
                 <header class="app-export-panel__header">
                   <div>
@@ -298,8 +360,8 @@
                 </div>
               </footer>
             </section>
-          </div>
-        </div>
+            </div>
+          </main>
       </div>
     </div>
     <RecordExportDialog
@@ -320,7 +382,7 @@ import { createXlsxBlob } from '~/lib/xlsx-export'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
 
-useHead({ title: '联系人 - 微信数据分析助手' })
+useHead({ title: '联系人 - xwechat' })
 
 const api = useApi()
 const apiBase = useApiBase()
@@ -383,6 +445,84 @@ const friendVerificationHasMore = ref(false)
 const friendVerificationLoading = ref(false)
 const friendVerificationError = ref('')
 const FRIEND_VERIFICATION_PAGE_SIZE = 20
+
+const activeView = ref('profile')
+const selectedContact = ref(null)
+const contactProfile = ref(null)
+const profileLoading = ref(false)
+const profileError = ref('')
+const profileFound = ref(null)
+let profileController = null
+
+// The list supplies the selected identity while the detail request is pending.
+const profileIdentity = computed(() => contactProfile.value ?? selectedContact.value)
+const profileFields = computed(() => {
+  const contact = contactProfile.value
+  if (!contact) return []
+  const fields = [
+    { label: '用户名', value: contact.username },
+    { label: '昵称', value: contact.nickname },
+    { label: '备注', value: contact.remark },
+    { label: '微信号', value: contact.alias },
+    { label: '地区', value: contact.region },
+    { label: '类型', value: typeLabel(contact) },
+    { label: '添加来源', value: contact.source },
+  ]
+  if (contact.addTimeText) fields.push({ label: '添加时间', value: contact.addTimeText })
+  fields.push({ label: '个性签名', value: contact.signature })
+  return fields
+})
+
+const resetContactProfile = () => {
+  profileController?.abort()
+  profileController = null
+  selectedContact.value = null
+  contactProfile.value = null
+  profileLoading.value = false
+  profileError.value = ''
+  profileFound.value = null
+}
+
+const selectContact = async (contact) => {
+  profileController?.abort()
+  const controller = new AbortController()
+  profileController = controller
+  const account = selectedAccount.value
+  selectedContact.value = contact
+  activeView.value = 'profile'
+  contactProfile.value = null
+  profileFound.value = null
+  profileError.value = ''
+  profileLoading.value = true
+
+  try {
+    const response = await api.getChatContactProfile({
+      account,
+      username: contact.username,
+      source: 'auto',
+      signal: controller.signal,
+    })
+    if (profileController !== controller) return
+    if (response.account !== account || typeof response.found !== 'boolean'
+      || (response.found && response.contact?.username !== contact.username)) {
+      throw new Error('联系人资料响应与当前账号或联系人不匹配')
+    }
+    profileFound.value = response.found
+    if (response.found) {
+      // The list distinguishes former friends and official subscription/service accounts.
+      contactProfile.value = {
+        ...response.contact,
+        type: contact.type,
+        officialAccountKind: contact.officialAccountKind,
+      }
+    }
+  } catch (e) {
+    if (profileController !== controller) return
+    profileError.value = e?.message || '加载联系人资料失败'
+  } finally {
+    if (profileController === controller) profileLoading.value = false
+  }
+}
 
 const avatarBrokenKey = (contact) => `${selectedAccount.value || ''}::${contact?.username || ''}`
 
@@ -995,6 +1135,9 @@ const loadContacts = async (options = {}) => {
     })
     if (requestId !== contactsLoadRequestId) return
     contacts.value = Array.isArray(resp?.contacts) ? resp.contacts : []
+    if (selectedContact.value && !contacts.value.some(contact => contact.username === selectedContact.value.username)) {
+      resetContactProfile()
+    }
     resetVisibleContacts()
     applyCounts(resp?.counts || {})
     lastContactsLoadKey = loadKey
@@ -1106,8 +1249,22 @@ watch(() => friendVerificationKeyword.value, () => {
 })
 
 watch(() => selectedAccount.value, () => {
+  resetContactProfile()
+  contactsLoadRequestId += 1
+  contactsLoadInFlightKey = ''
+  contactsLoadInFlightPromise = null
+  lastContactsLoadKey = ''
+  contacts.value = []
+  error.value = ''
+  loading.value = false
+  resetCounts()
+  friendVerificationRequestId += 1
+  resetFriendVerifications()
+  friendVerificationExportOpen.value = false
+  exportMsg.value = ''
+  exportOk.value = false
   void loadFriendVerifications()
-})
+}, { flush: 'sync' })
 
 const chooseExportFolder = async () => {
   exportMsg.value = ''
@@ -1192,9 +1349,258 @@ onMounted(async () => {
   await loadContacts()
   await loadFriendVerifications()
 })
+
+onUnmounted(() => {
+  resetContactProfile()
+  contactsLoadRequestId += 1
+  friendVerificationRequestId += 1
+  clearTimeout(keywordTimer)
+  clearTimeout(friendVerificationKeywordTimer)
+})
 </script>
 
 <style scoped>
+.contacts-workspace {
+  display: grid;
+  grid-template-columns: clamp(300px, 29vw, 370px) minmax(0, 1fr);
+  gap: 24px;
+  flex: 1;
+  min-height: 0;
+  padding: 18px 24px;
+  color: var(--app-text-primary);
+}
+
+.contacts-directory,
+.contacts-detail-workspace {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.contacts-directory {
+  border-right: 1px solid var(--app-border);
+  padding-right: 20px;
+}
+
+.contacts-directory-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 46px;
+  margin-bottom: 12px;
+}
+
+.contacts-directory-heading h1 {
+  font-size: 22px;
+  font-weight: 650;
+  color: var(--session-list-name);
+}
+
+.contacts-directory-heading > span,
+.contacts-filter-hint,
+.contacts-directory-hint {
+  color: var(--session-list-meta);
+  font-size: 12px;
+}
+
+.contacts-directory-heading > span {
+  font-variant-numeric: tabular-nums;
+}
+
+.contacts-filters {
+  padding: 14px 0 12px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.contacts-filter-hint { margin-top: 8px; }
+.contacts-directory-hint { padding: 12px 0 0; text-align: center; }
+.contacts-list { flex: 1; min-height: 0; overflow-y: auto; }
+.contacts-list,
+.contacts-detail-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+.contact-group-heading {
+  padding: 8px 10px 4px;
+  color: var(--session-list-meta);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.contact-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 84px;
+  padding: 12px 10px;
+  border: 0;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.contact-list-item:hover { background: var(--session-list-item-hover); }
+.contact-list-item.is-selected {
+  background: var(--session-list-item-selected);
+  box-shadow: inset 3px 0 var(--chat-accent);
+}
+
+.contact-type-badge {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.contact-type-badge.bg-blue-100 {
+  background: var(--session-list-item-selected);
+  color: var(--chat-accent);
+}
+
+.contacts-view-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  min-height: 58px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.contacts-view-switcher > button {
+  align-self: stretch;
+  padding: 12px 16px;
+  border-bottom: 3px solid transparent;
+  font-size: 15px;
+  font-weight: 550;
+  color: var(--app-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.contacts-view-switcher > button:hover { background: var(--chat-subtle-bg); }
+.contacts-view-switcher > button[aria-pressed='true'] {
+  border-bottom-color: var(--chat-accent);
+  color: var(--chat-accent);
+  font-weight: 650;
+}
+
+.contacts-verification-count {
+  margin-left: -16px;
+  margin-right: 8px;
+  pointer-events: none;
+  color: var(--session-list-meta);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.contacts-view-switcher > button:nth-of-type(2) { padding-right: 24px; }
+.contacts-detail-scroll { flex: 1; min-height: 0; overflow-y: auto; padding-right: 4px; }
+.contacts-export-panel.contacts-detail-scroll { background: transparent; box-shadow: none; }
+
+.contact-profile {
+  overflow: hidden;
+  border: 1px solid var(--app-border);
+  border-radius: 14px;
+  background: var(--app-surface-bg);
+}
+
+.contact-profile-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  min-height: 360px;
+  padding: 32px;
+  text-align: center;
+  color: var(--app-text-secondary);
+}
+
+.contact-profile-empty > svg { width: 44px; height: 44px; color: var(--chat-accent); }
+.contact-profile-empty h2 { font-size: 18px; font-weight: 600; color: var(--app-text-primary); }
+.contact-profile-empty p { font-size: 14px; }
+
+.contact-profile-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 20px;
+  margin: 0 26px;
+  padding: 30px 0;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.contact-profile-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 88px;
+  flex-shrink: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--chat-subtle-bg);
+  color: var(--chat-accent);
+  font-size: 30px;
+}
+
+.contact-profile-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.contact-profile-identity { flex: 1; min-width: min(160px, 100%); overflow-wrap: anywhere; }
+.contact-profile-name { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.contact-profile-name h2 { font-size: 24px; font-weight: 650; line-height: 1.4; color: var(--session-list-name); }
+.contact-profile-identity p { margin-top: 8px; font-size: 14px; color: var(--app-text-secondary); }
+
+.contact-profile-chat,
+.contact-profile-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 550;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.contact-profile-chat { background: var(--chat-accent); color: var(--chat-input-bg); }
+.contact-profile-chat:hover { background: var(--chat-accent-hover); }
+.contact-profile-chat svg { width: 19px; height: 19px; }
+.contact-profile-retry { margin-top: 14px; border: 1px solid var(--app-border); color: var(--chat-accent); }
+.contact-profile-retry:hover { background: var(--chat-subtle-bg); }
+.contact-profile-status { padding: 24px 26px; font-size: 14px; color: var(--app-text-secondary); }
+.contact-profile-details { padding: 22px 26px 18px; }
+.contact-profile-details h3 { margin-bottom: 12px; font-size: 16px; font-weight: 650; }
+
+.contact-profile-field {
+  display: grid;
+  grid-template-columns: 108px minmax(0, 1fr);
+  gap: 16px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--app-border-subtle);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.contact-profile-field:last-child { border-bottom: 0; }
+.contact-profile-field dt,
+.contact-profile-field .is-empty { color: var(--app-text-secondary); }
+.contact-profile-field dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
+
+.contacts-workspace button:focus-visible,
+.contact-type-filter-card:has(input:focus-visible) {
+  outline: 2px solid var(--chat-focus-ring);
+  outline-offset: -2px;
+}
+
 .contacts-export-title-panel .app-export-panel__header {
   margin-bottom: 0;
 }
@@ -1208,7 +1614,7 @@ onMounted(async () => {
   min-width: 0;
   height: 38px;
   border-radius: 6px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--app-border);
   background: var(--app-surface-bg);
   color: var(--app-text-secondary);
   padding: 0 10px;
@@ -1218,47 +1624,55 @@ onMounted(async () => {
   font-size: 12px;
   cursor: pointer;
   user-select: none;
-  transition:
-    border-color 0.16s ease,
-    background-color 0.16s ease,
-    color 0.16s ease,
-    box-shadow 0.16s ease,
-    transform 0.16s ease;
 }
 
 .contact-type-filter-card:hover {
-  border-color: #e5e7eb;
-  background: #f9fafb;
+  border-color: var(--chat-accent);
+  background: var(--session-list-item-hover);
   color: var(--app-text-primary);
 }
 
 .contact-type-filter-card.is-active {
-  border-color: #22c55e;
-  background: #f0fdf4;
-  color: #047857;
-  box-shadow: none;
+  border-color: var(--chat-accent);
+  background: var(--session-list-item-selected);
+  color: var(--chat-accent);
 }
 
 .contact-type-filter-card.is-active:hover {
-  border-color: #22c55e;
-  background: #f0fdf4;
-  color: #047857;
+  background: var(--session-list-item-selected-hover);
 }
 
-/* 深色：选中态保持绿调，但底色要压到面板层，不能留浅绿块 */
-html[data-theme='dark'] .contact-type-filter-card {
-  border-color: var(--app-border);
+@media (max-width: 1050px) {
+  .contacts-workspace { gap: 16px; padding: 12px 16px; grid-template-columns: 300px minmax(0, 1fr); }
+  .contacts-directory { padding-right: 14px; }
+  .contact-profile-header { gap: 16px; margin: 0 20px; padding: 24px 0; }
+  .contact-profile-details { padding: 18px 20px; }
+  .contact-profile-chat { margin-left: auto; }
+  .contacts-view-switcher { gap: 0; }
+  .contacts-view-switcher > button { padding-left: 12px; padding-right: 12px; }
 }
 
-html[data-theme='dark'] .contact-type-filter-card:hover {
-  border-color: var(--app-border-soft);
-  background: var(--app-list-hover);
+@media (max-width: 800px) {
+  .contacts-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(260px, 42%) minmax(0, 1fr); gap: 12px; }
+  .contacts-directory { border-right: 0; border-bottom: 1px solid var(--app-border); padding: 0; }
+  .contacts-directory-heading { min-height: 30px; margin-bottom: 8px; }
+  .contacts-filters { padding: 8px 0; }
+  .contacts-filters > div { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .contact-type-filter-card { padding: 0 6px; gap: 4px; }
+  .contact-type-filter-card > svg { display: none; }
+  .contacts-filter-hint, .contacts-directory-hint { display: none; }
+  .contacts-view-switcher { min-height: 44px; margin-bottom: 12px; }
+  .contact-profile-empty { min-height: 240px; }
 }
 
-html[data-theme='dark'] .contact-type-filter-card.is-active,
-html[data-theme='dark'] .contact-type-filter-card.is-active:hover {
-  border-color: var(--app-accent);
-  background: var(--setup-inset);
-  color: var(--setup-accent-text);
+@media (max-width: 480px) {
+  .contacts-workspace { padding: 8px; }
+  .contacts-filters > div { gap: 4px; }
+  .contact-type-filter-card { gap: 2px; }
+  .contact-type-filter-card > span { font-size: 11px; }
+  .contact-profile-field { grid-template-columns: 72px minmax(0, 1fr); gap: 12px; }
+  .contact-profile-avatar { width: 64px; height: 64px; }
+  .contact-profile-name h2 { font-size: 20px; }
+  .contacts-view-switcher > button { padding-left: 8px; padding-right: 8px; font-size: 14px; }
 }
 </style>

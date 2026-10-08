@@ -2,46 +2,19 @@
 Publish release artifacts to GitHub Releases.
 """
 
+import argparse
 import hashlib
-import json
 import os
+import re
 import shutil
 import subprocess
-import sys
 import time
-import webbrowser
 from pathlib import Path
+from urllib.parse import quote
+
 import requests
 
 REPO = "gongyuanshen/xwechat"
-TAG = "v2.7.1"
-RELEASE_NAME = "v2.7.1: xwechat 独立纯本地版"
-
-BODY = """# xwechat v2.7.1 - 独立纯本地版发布
-
-一个纯粹出于个人业余兴趣、娱乐探索与技术学习而开发的本地微信数据分析工具。
-
-### ✨ 本次更新重点
-- **独立纯本地数据链路**：全面切换为独立快照与数据链路，移除旧 client/broker 模式与专属 Hook。
-- **Windows 桌面端打包**：
-  - `xwechat-2.7.1-Setup.exe`：标准 Windows x64 安装程序，内置 Nuxt 3 渲染前端、Python 3.11 FastAPI 离线后端与 FFmpeg 转码支持。
-  - `xwechat-2.7.1-Setup.zip`：免安装绿色便携压缩包，解压即用。
-- **Python 分发包**：
-  - `wechat_decrypt_tool-2.7.1-py3-none-any.whl`
-  - `wechat_decrypt_tool-2.7.1.tar.gz`
-- **完整性校验**：发布包均提供 SHA-256 校验和清单 `SHA256SUMS.txt`。
-
-### 📦 资产列表与说明
-| 文件名 | 类型 | 说明 |
-| :--- | :--- | :--- |
-| `xwechat-2.7.1-Setup.exe` | 安装包 | Windows 推荐安装程序 |
-| `xwechat-2.7.1-Setup.zip` | 压缩包 | Windows 免安装便携版 |
-| `wechat_decrypt_tool-2.7.1-py3-none-any.whl` | Wheel | Python 命令行与开发分发包 |
-| `wechat_decrypt_tool-2.7.1.tar.gz` | Source | 源码发布包 |
-| `SHA256SUMS.txt` | 校验和 | 文件的 SHA-256 校验和 |
-
-> ⚠️ **重要声明**：本项目为个人业余娱乐与学习实验项目，纯属自娱自乐与技术研究，不涉及任何经济收益、商业运作或收费服务。严禁将本项目用于任何商业牟利行为。
-"""
 
 
 def get_git_exe() -> str:
@@ -78,8 +51,9 @@ def get_token() -> str:
 def get_session(token: str) -> requests.Session:
     session = requests.Session()
     session.headers.update({
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
         "User-Agent": "xwechat-releaser",
     })
     proxy_url = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
@@ -138,102 +112,82 @@ def upload_file_asset(session: requests.Session, upload_url: str, file_path: Pat
         reader.close()
 
 
-def main() -> None:
-    try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--commit", required=True, help="Full source commit SHA")
+    parser.add_argument("--body-file", type=Path, required=True)
+    parser.add_argument("--asset", type=Path, action="append", required=True)
+    args = parser.parse_args(argv)
 
-    token = get_token()
-    session = get_session(token)
-
-    # 1. Get or create release
-    print(f"Checking existing releases for {REPO}...")
-    resp = session.get(f"https://api.github.com/repos/{REPO}/releases/tags/{TAG}")
-    if resp.status_code == 200:
-        release = resp.json()
-        print(f"Found existing release id={release['id']}")
-    elif resp.status_code == 404:
-        print(f"Creating release {TAG}...")
-        create_resp = session.post(
-            f"https://api.github.com/repos/{REPO}/releases",
-            json={
-                "tag_name": TAG,
-                "name": RELEASE_NAME,
-                "body": BODY,
-                "draft": False,
-                "prerelease": False,
-            },
-        )
-        create_resp.raise_for_status()
-        release = create_resp.json()
-        print(f"Created release id={release['id']}")
-    else:
-        resp.raise_for_status()
-        release = resp.json()
-
-    release_html_url = release.get("html_url", f"https://github.com/{REPO}/releases/tag/{TAG}")
-    upload_url_template = release["upload_url"].split("{")[0]
-
-    # Existing assets map: name -> asset info dict
-    existing_assets = {a["name"]: a for a in release.get("assets", [])}
-
-    repo_root = Path(__file__).resolve().parent.parent
-    files_to_upload = [
-        repo_root / "desktop" / "dist" / "xwechat-2.7.1-Setup.exe",
-        repo_root / "desktop" / "dist" / "xwechat-2.7.1-Setup.zip",
-        repo_root / "desktop" / "dist" / "xwechat-2.7.1-Setup.exe.blockmap",
-        repo_root / "desktop" / "dist" / "SHA256SUMS.txt",
-        repo_root / "dist" / "wechat_decrypt_tool-2.7.1-py3-none-any.whl",
-        repo_root / "dist" / "wechat_decrypt_tool-2.7.1.tar.gz",
-    ]
-
-    for file_path in files_to_upload:
+    if not args.tag.strip() or re.fullmatch(r"[0-9a-fA-F]{40}", args.commit) is None:
+        raise ValueError("A tag and full 40-character commit SHA are required")
+    body = args.body_file.read_text(encoding="utf-8")
+    assets = {}
+    for file_path in args.asset:
         if not file_path.is_file():
-            print(f"ERROR: File not found: {file_path}")
-            sys.exit(1)
+            raise FileNotFoundError(f"Release asset is not a file: {file_path}")
+        if file_path.name in assets:
+            raise ValueError(f"Duplicate asset name: {file_path.name}")
+        with file_path.open("rb") as file:
+            digest = "sha256:" + hashlib.file_digest(file, "sha256").hexdigest()
+        assets[file_path.name] = (file_path, file_path.stat().st_size, digest)
 
-        filename = file_path.name
-        file_size = file_path.stat().st_size
-        print(f"\nProcessing {filename} ({file_size / (1024 * 1024):.2f} MB)...")
+    session = get_session(get_token())
+    api_url = f"https://api.github.com/repos/{REPO}"
+    tag = quote(args.tag, safe="")
+    page = 1
+    while True:
+        existing = session.get(f"{api_url}/releases", params={"per_page": 100, "page": page}, timeout=30)
+        existing.raise_for_status()
+        releases = existing.json()
+        if any(item["tag_name"] == args.tag for item in releases):
+            raise RuntimeError(f"Release {args.tag} already exists; refusing to modify it")
+        if len(releases) < 100:
+            break
+        page += 1
 
-        if filename in existing_assets:
-            existing = existing_assets[filename]
-            if existing.get("size") == file_size and existing.get("state") == "uploaded":
-                print(f"Asset {filename} is already up to date ({file_size} bytes), skipping.")
-                continue
-            print(f"Asset {filename} exists on release but size/state differs ({existing.get('size')} != {file_size}), replacing...")
-            del_resp = session.delete(
-                f"https://api.github.com/repos/{REPO}/releases/assets/{existing['id']}"
-            )
-            if del_resp.status_code in (204, 200, 404):
-                print(f"Removed stale asset {filename}")
-            time.sleep(1)
+    existing_tag = session.get(f"{api_url}/commits/{tag}", timeout=30)
+    if existing_tag.status_code == 200:
+        if existing_tag.json()["sha"].lower() != args.commit.lower():
+            raise RuntimeError(f"Tag {args.tag} does not point to commit {args.commit}")
+    elif existing_tag.status_code != 404:
+        existing_tag.raise_for_status()
 
-        print(f"Uploading {filename} (size: {file_size} bytes)...")
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                uploaded_asset = upload_file_asset(session, upload_url_template, file_path)
-                print(f"Successfully uploaded {filename} (id={uploaded_asset.get('id')})")
-                break
-            except Exception as e:
-                print(f"\nUpload attempt {attempt}/{max_attempts} failed: {e}")
-                if attempt == max_attempts:
-                    raise
-                time.sleep(3)
+    created = session.post(
+        f"{api_url}/releases",
+        json={"tag_name": args.tag, "target_commitish": args.commit, "name": args.tag,
+              "body": body, "draft": True, "prerelease": False},
+        timeout=30,
+    )
+    created.raise_for_status()
+    release = created.json()
+    if not release["draft"] or release["tag_name"] != args.tag:
+        raise RuntimeError("GitHub did not create the requested draft release")
+    release_url = f"{api_url}/releases/{release['id']}"
+    print(f"Created draft release {args.tag} (id={release['id']})", flush=True)
+    upload_url = release["upload_url"].split("{")[0]
+    for file_path, file_size, _ in assets.values():
+        print(f"Uploading {file_path.name} ({file_size} bytes)...", flush=True)
+        upload_file_asset(session, upload_url, file_path)
 
-    print("\n" + "=" * 60)
-    print("Release publishing complete!")
-    print(f"Release URL: {release_html_url}")
-    print("=" * 60)
+    remote = session.get(f"{release_url}/assets", params={"per_page": 100}, timeout=30)
+    remote.raise_for_status()
+    remote_assets = remote.json()
+    if len(remote_assets) != len(assets) or {item["name"] for item in remote_assets} != set(assets):
+        raise RuntimeError("Release asset verification failed: remote asset list differs")
+    for item in remote_assets:
+        _, size, digest = assets[item["name"]]
+        if item["state"] != "uploaded" or item["size"] != size or item["digest"] != digest:
+            raise RuntimeError(f"Release asset verification failed: {item['name']}")
+        print(f"Verified {item['name']}: {digest}", flush=True)
 
-    # Open release in browser window
-    try:
-        webbrowser.open(release_html_url)
-        print(f"Opened release in browser window: {release_html_url}")
-    except Exception as e:
-        print(f"Could not open browser: {e}")
+    published = session.patch(release_url, json={"draft": False, "make_latest": "true"}, timeout=30)
+    published.raise_for_status()
+    result = published.json()
+    if result["draft"]:
+        raise RuntimeError("GitHub did not publish the verified draft release")
+    print(f"Release publishing complete: {result['html_url']}", flush=True)
 
 
 if __name__ == "__main__":

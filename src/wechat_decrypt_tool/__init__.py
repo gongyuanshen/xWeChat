@@ -1,5 +1,5 @@
-"""微信数据库解密工具
+"""xwechat 本地微信数据浏览、导出与交互工具
 """
 
-__version__ = "2.7.1"
-__author__ = "WeChat Decrypt Tool"
+__version__ = "2.7.2"
+__author__ = "xwechat contributors"

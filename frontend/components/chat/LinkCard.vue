@@ -11,6 +11,7 @@ const lazyRemoteImageAttrs = {
 
 export default defineComponent({
   name: 'LinkCard',
+  emits: ['preview-error'],
   props: {
     href: { type: String, default: '' },
     heading: { type: String, default: '' },
@@ -23,7 +24,7 @@ export default defineComponent({
     badge: { type: String, default: '' },
     variant: { type: String, default: 'default' }
   },
-  setup(props) {
+  setup(props, { emit }) {
     const fromAvatarImgOk = ref(false)
     const fromAvatarImgError = ref(false)
     const previewImgError = ref(false)
@@ -70,10 +71,13 @@ export default defineComponent({
       if (abstractText && headingText && abstractText === headingText) abstractText = ''
       const isMiniProgram = String(props.linkType || '').trim() === 'mini_program'
       const isFinder = String(props.linkType || '').trim() === 'finder'
-      const isCoverVariant = !isMiniProgram && String(props.variant || '').trim() === 'cover'
+      const isCoverVariant = !isMiniProgram && !isFinder && String(props.variant || '').trim() === 'cover'
       const showPreview = Boolean(String(props.preview || '').trim()) && !previewImgError.value
       const Tag = canNavigate ? 'a' : 'div'
-      const onPreviewError = () => { previewImgError.value = true }
+      const onPreviewError = () => {
+        previewImgError.value = true
+        emit('preview-error')
+      }
 
       const showFromAvatarImg = Boolean(fromAvatarUrl) && !fromAvatarImgError.value
       const showFromAvatarText = (!fromAvatarUrl) || (!fromAvatarImgOk.value)
@@ -165,12 +169,12 @@ export default defineComponent({
 
       if (isFinder) {
         return h(
-          Tag,
+          'div',
           {
-            ...(canNavigate ? { href, target: '_blank', rel: 'noreferrer' } : { role: 'group', 'aria-disabled': 'true' }),
+            role: 'group',
+            'aria-label': props.heading || '视频号',
             class: [
               'wechat-link-card-finder',
-              !canNavigate ? 'wechat-link-card--disabled' : '',
               'wechat-special-card',
               'msg-radius',
               props.isSent ? 'wechat-special-sent-side' : ''
@@ -201,16 +205,9 @@ export default defineComponent({
                     onError: onPreviewError
                   })
                 : h('div', { class: 'wechat-link-finder-cover-placeholder', 'aria-hidden': 'true' }, [
-                    h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
-                      h('path', { d: 'M8 5v14l11-7z' })
-                    ])
+                    h('img', { src: finderLogoUrl, alt: '' })
                   ]),
               h('div', { class: 'wechat-link-finder-cover-shade', 'aria-hidden': 'true' }),
-              h('div', { class: 'wechat-link-finder-play', 'aria-hidden': 'true' }, [
-                h('svg', { viewBox: '0 0 24 24', fill: 'currentColor' }, [
-                  h('path', { d: 'M8 5v14l11-7z' })
-                ])
-              ]),
               h('div', { class: 'wechat-link-finder-meta' }, [
                 h('div', { class: 'wechat-link-finder-author' }, [
                   h('div', { class: 'wechat-link-finder-author-avatar', 'aria-hidden': 'true' }, [
@@ -223,7 +220,8 @@ export default defineComponent({
                   h('div', { class: 'wechat-link-finder-author-name' }, fromText || '视频号')
                 ])
               ])
-            ])
+            ]),
+            h('p', { class: 'wechat-link-finder-hint' }, ['请在微信中打开', h('br'), '原消息播放'])
           ]
         )
       }

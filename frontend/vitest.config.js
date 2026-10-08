@@ -11,7 +11,7 @@ export default defineConfig({
       name: 'wrapped-client-test',
       enforce: 'pre',
       transform(code, id) {
-        if (!/\/(KeywordDictionarySpread|MonthlyCompanionPosters)\.vue$/.test(id.replaceAll('\\', '/'))) return
+        if (!/\/(KeywordDictionarySpread|MonthlyCompanionPosters|EmojiPack3D)\.vue$/.test(id.replaceAll('\\', '/'))) return
         return code.replaceAll('import.meta.client', 'true')
       },
     },

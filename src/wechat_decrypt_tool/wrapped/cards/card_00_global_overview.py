@@ -415,21 +415,6 @@ def _normalize_phrase(v: Any) -> str:
     return s
 
 
-def _normalize_emoji(v: Any) -> str:
-    s = _decode_sqlite_text(v).strip()
-    if not s:
-        return ""
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s or len(s) > 48:
-        return ""
-    if s.startswith("<"):
-        return ""
-    # If it is an md5 or some opaque token, don't show it.
-    if re.fullmatch(r"(?i)[0-9a-f]{32}", s):
-        return ""
-    return s
-
-
 def _kind_from_local_type(t: int) -> str:
     # See `_infer_local_type` in chat_helpers for known values.
     if t == 1:

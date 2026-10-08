@@ -57,6 +57,10 @@ const {
   shouldRetryBackendOnDifferentPort,
 } = require("./backend-startup.cjs");
 const { loadWithRedirect, resolveDesktopUiUrl } = require("./renderer-startup.cjs");
+const { configureDesktopIdentity } = require("./desktop-identity.cjs");
+
+// Pin persistent storage before Electron acquires its profile-specific instance lock.
+configureDesktopIdentity(app);
 
 const DEFAULT_BACKEND_HOST = "127.0.0.1";
 const LAN_BACKEND_HOST = "0.0.0.0";
@@ -75,7 +79,6 @@ let isQuitting = false;
 let desktopSettings = null;
 let backendPortChangeInProgress = false;
 let outputDirChangeInProgress = false;
-let accountDataChangeInProgress = false;
 let outputDirChangeProgressState = null;
 
 function normalizeTitleBarTheme(value) {
@@ -248,9 +251,7 @@ function getBackendPort() {
 function setBackendPortSetting(nextPort) {
   const p = parsePort(nextPort);
   if (p == null) throw new Error("端口无效，请输入 1-65535 的整数");
-  loadDesktopSettings();
-  desktopSettings.backendPort = p;
-  persistDesktopSettings();
+  persistDesktopSettings({ ...loadDesktopSettings(), backendPort: p });
   process.env.WECHAT_TOOL_PORT = String(p);
   return p;
 }
@@ -260,9 +261,7 @@ function getMcpLanAccessEnabled() {
 }
 
 function setMcpLanAccessSetting(enabled) {
-  loadDesktopSettings();
-  desktopSettings.mcpLanAccessEnabled = !!enabled;
-  persistDesktopSettings();
+  persistDesktopSettings({ ...loadDesktopSettings(), mcpLanAccessEnabled: !!enabled });
   process.env.WECHAT_TOOL_HOST = desktopSettings.mcpLanAccessEnabled ? LAN_BACKEND_HOST : DEFAULT_BACKEND_HOST;
   return desktopSettings.mcpLanAccessEnabled;
 }
@@ -374,352 +373,52 @@ async function ensureBackendPortAvailableOnStartup() {
 
 function resolveDataDir() {
   if (resolvedDataDir) return resolvedDataDir;
-
-  const fromEnv = String(process.env.WECHAT_TOOL_DATA_DIR || "").trim();
-  const fallback = (() => {
-    try {
-      return app.getPath("userData");
-    } catch {
-      return null;
-    }
-  })();
-
-  const chosen = fromEnv || fallback;
-  if (!chosen) return null;
-
-  try {
-    fs.mkdirSync(chosen, { recursive: true });
-  } catch {}
-
+  const chosen = String(process.env.WECHAT_TOOL_DATA_DIR || "").trim() || app.getPath("userData");
+  fs.mkdirSync(chosen, { recursive: true });
   resolvedDataDir = chosen;
   process.env.WECHAT_TOOL_DATA_DIR = chosen;
   return chosen;
 }
 
 function getUserDataDir() {
-  try {
-    const dir = app.getPath("userData");
-    if (!dir) return null;
-    fs.mkdirSync(dir, { recursive: true });
-    return dir;
-  } catch {
-    return null;
-  }
-}
-
-function safeNormalizeDirectory(value) {
-  try {
-    return normalizeDirectoryPath(value || "");
-  } catch {
-    return "";
-  }
+  const dir = app.getPath("userData");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
 }
 
 function getDefaultOutputDir() {
-  const dataDir = resolveDataDir();
-  if (!dataDir) return null;
-  try {
-    return getDefaultOutputDirPath(dataDir);
-  } catch {
-    return null;
-  }
+  return getDefaultOutputDirPath(resolveDataDir());
 }
 
 function syncOutputDirEnv(nextDir) {
-  const normalized = safeNormalizeDirectory(nextDir);
+  const normalized = normalizeDirectoryPath(nextDir);
   if (normalized) process.env.WECHAT_TOOL_OUTPUT_DIR = normalized;
   else delete process.env.WECHAT_TOOL_OUTPUT_DIR;
 }
 
 function normalizePendingOutputDirValue(value) {
-  if (value == null) return null;
-  const text = String(value).trim();
-  if (!text) return "";
-  try {
-    return normalizeDirectoryPath(text);
-  } catch {
-    return null;
-  }
+  return value == null ? null : normalizeDirectoryPath(value);
 }
 
 function resolveOutputDir({ ensureExists = true } = {}) {
   const dataDir = resolveDataDir();
   if (!dataDir) return null;
 
-  const envOutputDir = safeNormalizeDirectory(process.env.WECHAT_TOOL_OUTPUT_DIR || "");
+  const envOutputDir = normalizeDirectoryPath(process.env.WECHAT_TOOL_OUTPUT_DIR || "");
   // Allow dev-mode desktop runs to persist the chosen output directory too.
   // An explicit environment variable still wins so local launch overrides keep working.
   const settings = loadDesktopSettings();
-  const settingsOutputDir = safeNormalizeDirectory(settings?.outputDir || "");
+  const settingsOutputDir = normalizeDirectoryPath(settings?.outputDir || "");
 
-  let chosen = null;
-  try {
-    chosen = getEffectiveOutputDirPath({
-      dataDir,
-      envOutputDir,
-      settingsOutputDir,
-    });
-  } catch {
-    chosen = getDefaultOutputDir();
-  }
-  if (!chosen) return null;
+  const chosen = getEffectiveOutputDirPath({ dataDir, envOutputDir, settingsOutputDir });
 
   const transactionPending = settings?.pendingOutputDir !== null;
   if (ensureExists && !outputDirChangeInProgress && !transactionPending) {
-    try {
-      fs.mkdirSync(chosen, { recursive: true });
-    } catch {}
+    fs.mkdirSync(chosen, { recursive: true });
   }
 
   syncOutputDirEnv(chosen);
   return chosen;
-}
-
-function sanitizeAccountName(account) {
-  const name = String(account || "").trim();
-  if (!name) throw new Error("缺少账号参数");
-  if (name === "." || name === "..") throw new Error("账号参数非法");
-  if (name.includes("/") || name.includes("\\")) throw new Error("账号参数非法");
-  return name;
-}
-
-function canonicalAccountKeyName(account) {
-  let name = String(account || "").trim();
-  const backupMatch = /^(.+)\.backup-\d{8}-\d{6}(?:-\d+)?$/i.exec(name);
-  if (backupMatch) name = backupMatch[1];
-  const sourceMatch = /^(wxid_[^_\s]+)_[0-9a-f]{4}$/i.exec(name);
-  return sourceMatch ? sourceMatch[1] : name;
-}
-
-function isInternalAccountDataDirectory(name) {
-  const value = String(name || "").trim();
-  if (!value || value.startsWith(".")) return true;
-  return /\.backup-\d{8}-\d{6}(?:-\d+)?$/i.test(value);
-}
-
-function listDecryptedAccountsOnDisk(databasesDir) {
-  try {
-    if (!fs.existsSync(databasesDir)) return [];
-  } catch {
-    return [];
-  }
-
-  let entries = [];
-  try {
-    entries = fs.readdirSync(databasesDir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const accounts = [];
-  for (const entry of entries) {
-    try {
-      if (!entry || !entry.isDirectory()) continue;
-      if (isInternalAccountDataDirectory(entry.name)) continue;
-      const accountDir = path.join(databasesDir, entry.name);
-      const hasSession = fs.existsSync(path.join(accountDir, "session.db"));
-      const hasContact = fs.existsSync(path.join(accountDir, "contact.db"));
-      if (hasSession && hasContact) accounts.push(String(entry.name || ""));
-    } catch {}
-  }
-  accounts.sort((a, b) => a.localeCompare(b));
-  return accounts;
-}
-
-function resolveAccountDirInOutput(account) {
-  const dataDir = resolveDataDir();
-  if (!dataDir) throw new Error("无法定位数据目录");
-
-  const outputDir = resolveOutputDir();
-  if (!outputDir) throw new Error("无法定位 output 目录");
-  const databasesDir = path.join(outputDir, "databases");
-  const requestedAccountName = sanitizeAccountName(account);
-  const canonicalAccountName = sanitizeAccountName(canonicalAccountKeyName(requestedAccountName));
-
-  const base = path.resolve(databasesDir);
-  const canonicalDir = path.resolve(path.join(databasesDir, canonicalAccountName));
-  const accountName = (
-    canonicalAccountName !== requestedAccountName
-    && fs.existsSync(canonicalDir)
-  ) ? canonicalAccountName : requestedAccountName;
-  const accountDir = path.resolve(path.join(databasesDir, accountName));
-  if (accountDir !== base && !accountDir.startsWith(base + path.sep)) {
-    throw new Error("账号路径非法");
-  }
-
-  return {
-    dataDir,
-    outputDir,
-    databasesDir,
-    accountName,
-    accountDir,
-  };
-}
-
-function accountKeySourceRoot(item) {
-  if (!item || typeof item !== "object" || Array.isArray(item)) return "";
-  const direct = String(item.db_key_source_db_storage_path || "").trim();
-  const wxidDir = String(item.db_key_source_wxid_dir || "").trim();
-  const value = direct || (wxidDir ? path.join(wxidDir, "db_storage") : "");
-  return value ? path.resolve(value) : "";
-}
-
-function getAccountInfoFromDisk(account) {
-  const { accountName, accountDir } = resolveAccountDirInOutput(account);
-  if (!fs.existsSync(accountDir) || !fs.statSync(accountDir).isDirectory()) {
-    throw new Error("账号数据不存在");
-  }
-
-  let entries = [];
-  try {
-    entries = fs.readdirSync(accountDir, { withFileTypes: true });
-  } catch {}
-  const dbFiles = entries
-    .filter((e) => !!e && e.isFile() && String(e.name || "").toLowerCase().endsWith(".db"))
-    .map((e) => String(e.name || ""))
-    .sort((a, b) => a.localeCompare(b));
-
-  let sessionUpdatedAt = 0;
-  try {
-    const st = fs.statSync(path.join(accountDir, "session.db"));
-    sessionUpdatedAt = Math.floor(Number(st?.mtimeMs || 0) / 1000);
-  } catch {}
-
-  return {
-    status: "success",
-    account: accountName,
-    path: accountDir,
-    database_count: dbFiles.length,
-    databases: dbFiles,
-    session_updated_at: sessionUpdatedAt,
-  };
-}
-
-function removeAccountFamilyFromKeyStore(outputDir, accountName) {
-  const keyStorePath = path.join(outputDir, "account_keys.json");
-  try {
-    if (!fs.existsSync(keyStorePath)) return false;
-    const raw = fs.readFileSync(keyStorePath, { encoding: "utf8" });
-    const parsed = JSON.parse(raw || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-    const canonical = canonicalAccountKeyName(accountName);
-    const namesToRemove = [];
-    const sourceRoots = new Set();
-    for (const [name, item] of Object.entries(parsed)) {
-      const identities = new Set([canonicalAccountKeyName(name)]);
-      if (item && typeof item === "object" && !Array.isArray(item)) {
-        identities.add(canonicalAccountKeyName(item.image_key_derived_wxid));
-        for (const key of ["db_key_source_wxid_dir", "image_key_source_wxid_dir"]) {
-          const sourcePath = String(item[key] || "").trim();
-          if (sourcePath) identities.add(canonicalAccountKeyName(path.basename(sourcePath)));
-        }
-      }
-      if (!identities.has(canonical)) continue;
-      namesToRemove.push(name);
-      const sourceRoot = accountKeySourceRoot(item);
-      if (sourceRoot) sourceRoots.add(sourceRoot);
-    }
-    if (sourceRoots.size) {
-      for (const [name, item] of Object.entries(parsed)) {
-        if (namesToRemove.includes(name)) continue;
-        const sourceRoot = accountKeySourceRoot(item);
-        if (sourceRoot && sourceRoots.has(sourceRoot)) namesToRemove.push(name);
-      }
-    }
-    if (!namesToRemove.length) return false;
-    for (const name of namesToRemove) delete parsed[name];
-    fs.writeFileSync(keyStorePath, JSON.stringify(parsed, null, 2), { encoding: "utf8" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function deleteAccountDataFromDisk(account) {
-  const { outputDir, databasesDir, accountName, accountDir } = resolveAccountDirInOutput(account);
-  if (!fs.existsSync(accountDir) || !fs.statSync(accountDir).isDirectory()) {
-    throw new Error("账号数据不存在");
-  }
-
-  const canonicalCleanupName = canonicalAccountKeyName(accountName);
-  const cleanupAccountNames = new Set([accountName]);
-  const requestedAccountName = sanitizeAccountName(account);
-  if (canonicalAccountKeyName(requestedAccountName) === canonicalCleanupName) {
-    cleanupAccountNames.add(requestedAccountName);
-  }
-  const accountDirsToRemove = new Set([accountDir]);
-  try {
-    for (const entry of fs.readdirSync(databasesDir, { withFileTypes: true })) {
-      if (
-        (!entry?.isDirectory() && !entry?.isSymbolicLink())
-        || isInternalAccountDataDirectory(entry.name)
-        || canonicalAccountKeyName(entry.name) !== canonicalCleanupName
-      ) continue;
-      cleanupAccountNames.add(entry.name);
-      accountDirsToRemove.add(path.join(databasesDir, entry.name));
-    }
-  } catch {}
-
-  const wasBackendRunning = !!backendProc;
-  let restartError = null;
-  let result = null;
-
-  if (wasBackendRunning) {
-    const stopped = await stopBackendAndWait({ timeoutMs: 10_000 });
-    if (!stopped) {
-      throw new Error("后端进程未能在 10 秒内停止，为避免删除仍在使用的数据，已取消操作");
-    }
-  }
-
-  try {
-    for (const cleanupName of cleanupAccountNames) {
-      try {
-        fs.rmSync(path.join(outputDir, "exports", cleanupName), { recursive: true, force: true });
-      } catch {}
-      try {
-        fs.rmSync(path.join(outputDir, "account_backups", cleanupName), { recursive: true, force: true });
-      } catch {}
-    }
-    try {
-      for (const entry of fs.readdirSync(databasesDir, { withFileTypes: true })) {
-        if (
-          (!entry?.isDirectory() && !entry?.isSymbolicLink())
-          || !isInternalAccountDataDirectory(entry.name)
-          || canonicalAccountKeyName(entry.name) !== canonicalCleanupName
-        ) continue;
-        fs.rmSync(path.join(databasesDir, entry.name), { recursive: true, force: true });
-      }
-    } catch {}
-
-    for (const familyAccountDir of accountDirsToRemove) {
-      fs.rmSync(familyAccountDir, { recursive: true, force: true });
-    }
-    const removedKeyCache = removeAccountFamilyFromKeyStore(outputDir, accountName);
-    const accounts = listDecryptedAccountsOnDisk(databasesDir);
-    result = {
-      status: "success",
-      deleted_account: accountName,
-      accounts,
-      default_account: accounts.length ? accounts[0] : null,
-      removed_key_cache: removedKeyCache,
-    };
-  } finally {
-    if (wasBackendRunning) {
-      try {
-        startBackend();
-        await waitForBackend({ timeoutMs: getBackendStartupTimeoutMs() });
-      } catch (err) {
-        restartError = err;
-        logMain(`[main] failed to restart backend after deleteAccountData: ${err?.message || err}`);
-      }
-    }
-  }
-
-  if (restartError) {
-    throw new Error(`删除完成，但后端重启失败：${restartError?.message || restartError}`);
-  }
-  if (!result) throw new Error("删除账号数据失败");
-  return result;
 }
 
 function getExeDir() {
@@ -813,12 +512,12 @@ function getMainLogPath() {
 }
 
 function logMain(line) {
-  const p = getMainLogPath();
-  if (!p) return;
   try {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const p = getMainLogPath();
     fs.appendFileSync(p, `[${nowIso()}] ${line}\n`, { encoding: "utf8" });
-  } catch {}
+  } catch (err) {
+    console.error("[main] desktop log write failed:", err);
+  }
 }
 
 function getDesktopSettingsPath() {
@@ -881,106 +580,43 @@ function loadDesktopSettings() {
   };
 
   const p = getDesktopSettingsPath();
-  if (!p) {
-    desktopSettings = { ...defaults };
-    return desktopSettings;
-  }
-
-  try {
-    if (!fs.existsSync(p)) {
-      desktopSettings = { ...defaults };
-      return desktopSettings;
-    }
-    const raw = fs.readFileSync(p, { encoding: "utf8" });
-    const parsed = parseDesktopSettingsText(raw);
-    desktopSettings = { ...defaults, ...(parsed && typeof parsed === "object" ? parsed : {}) };
-    desktopSettings.backendPort = parsePort(desktopSettings.backendPort) ?? defaults.backendPort;
-    desktopSettings.mcpLanAccessEnabled = !!desktopSettings.mcpLanAccessEnabled;
-    desktopSettings.outputDir = safeNormalizeDirectory(desktopSettings.outputDir || "");
-    desktopSettings.pendingOutputDir =
-      parsed && typeof parsed === "object" && Object.prototype.hasOwnProperty.call(parsed, "pendingOutputDir")
-        ? normalizePendingOutputDirValue(parsed.pendingOutputDir)
-        : defaults.pendingOutputDir;
-    desktopSettings.lastOutputDirError = String(desktopSettings.lastOutputDirError || "").trim();
-  } catch (err) {
-    desktopSettings = { ...defaults };
-    logMain(`[main] failed to load settings: ${err?.message || err}`);
-  }
-
+  const parsed = fs.existsSync(p) ? parseDesktopSettingsText(fs.readFileSync(p, "utf8")) : {};
+  const settings = { ...defaults, ...parsed };
+  settings.backendPort = parsePort(settings.backendPort);
+  if (settings.backendPort == null) throw new Error("桌面设置中的后端端口无效");
+  settings.mcpLanAccessEnabled = !!settings.mcpLanAccessEnabled;
+  settings.outputDir = normalizeDirectoryPath(settings.outputDir);
+  settings.pendingOutputDir = normalizePendingOutputDirValue(settings.pendingOutputDir);
+  settings.lastOutputDirError = String(settings.lastOutputDirError || "").trim();
+  desktopSettings = settings;
   return desktopSettings;
 }
 
-function persistDesktopSettings({ throwOnError = false } = {}) {
-  const p = getDesktopSettingsPath();
-  if (!p || !desktopSettings) {
-    if (throwOnError) throw new Error("无法定位桌面设置文件");
-    return false;
-  }
-
-  try {
-    writeDesktopSettingsFileAtomic(p, desktopSettings);
-    return true;
-  } catch (err) {
-    logMain(`[main] failed to persist settings: ${err?.message || err}`);
-    if (throwOnError) {
-      const wrapped = new Error(`无法保存桌面设置：${err?.message || err}`);
-      wrapped.code = err?.code;
-      wrapped.cause = err;
-      throw wrapped;
-    }
-    return false;
-  }
+function persistDesktopSettings(settings) {
+  writeDesktopSettingsFileAtomic(getDesktopSettingsPath(), settings);
+  desktopSettings = settings;
 }
 
-function snapshotOutputDirSettings() {
-  loadDesktopSettings();
-  return {
-    outputDir: desktopSettings.outputDir,
-    pendingOutputDir: desktopSettings.pendingOutputDir,
-    lastOutputDirError: desktopSettings.lastOutputDirError,
-  };
-}
-
-function setPendingOutputDirSetting(nextDir, { throwOnError = false } = {}) {
-  loadDesktopSettings();
-  const previousValue = desktopSettings.pendingOutputDir;
-  desktopSettings.pendingOutputDir = normalizePendingOutputDirValue(nextDir);
-  try {
-    persistDesktopSettings({ throwOnError });
-  } catch (err) {
-    desktopSettings.pendingOutputDir = previousValue;
-    throw err;
-  }
+function setPendingOutputDirSetting(nextDir) {
+  persistDesktopSettings({ ...loadDesktopSettings(), pendingOutputDir: normalizePendingOutputDirValue(nextDir) });
   return desktopSettings.pendingOutputDir;
 }
 
 function setOutputDirLastError(message) {
-  loadDesktopSettings();
-  desktopSettings.lastOutputDirError = String(message || "").trim();
-  persistDesktopSettings();
+  persistDesktopSettings({ ...loadDesktopSettings(), lastOutputDirError: String(message || "").trim() });
   return desktopSettings.lastOutputDirError;
 }
 
 function commitOutputDirSettings(nextDir) {
-  loadDesktopSettings();
-  const previousSettings = snapshotOutputDirSettings();
   const defaultDir = getDefaultOutputDir();
-  const normalized = safeNormalizeDirectory(nextDir || "");
-  desktopSettings.outputDir =
-    !normalized || (defaultDir && pathsReferToSameLocation(normalized, defaultDir)) ? "" : normalized;
-  desktopSettings.pendingOutputDir = null;
-  desktopSettings.lastOutputDirError = "";
-  syncOutputDirEnv(desktopSettings.outputDir || defaultDir || "");
-
-  try {
-    persistDesktopSettings({ throwOnError: true });
-  } catch (err) {
-    desktopSettings.outputDir = previousSettings.outputDir;
-    desktopSettings.pendingOutputDir = previousSettings.pendingOutputDir;
-    desktopSettings.lastOutputDirError = previousSettings.lastOutputDirError;
-    syncOutputDirEnv(desktopSettings.outputDir || defaultDir || "");
-    throw err;
-  }
+  const normalized = normalizeDirectoryPath(nextDir);
+  persistDesktopSettings({
+    ...loadDesktopSettings(),
+    outputDir: !normalized || pathsReferToSameLocation(normalized, defaultDir) ? "" : normalized,
+    pendingOutputDir: null,
+    lastOutputDirError: "",
+  });
+  syncOutputDirEnv(desktopSettings.outputDir || defaultDir);
 }
 
 function getOutputDirInfo() {
@@ -994,7 +630,7 @@ function getOutputDirInfo() {
       ? ""
       : desktopSettings.pendingOutputDir === ""
         ? defaultPath
-        : safeNormalizeDirectory(desktopSettings.pendingOutputDir);
+        : normalizeDirectoryPath(desktopSettings.pendingOutputDir);
   return {
     path: currentPath || "",
     defaultPath,
@@ -1015,9 +651,7 @@ function getCloseBehavior() {
 
 function setCloseBehavior(next) {
   const v = String(next || "").trim().toLowerCase();
-  loadDesktopSettings();
-  desktopSettings.closeBehavior = v === "exit" ? "exit" : "tray";
-  persistDesktopSettings();
+  persistDesktopSettings({ ...loadDesktopSettings(), closeBehavior: v === "exit" ? "exit" : "tray" });
   return desktopSettings.closeBehavior;
 }
 
@@ -1071,7 +705,7 @@ async function applyOutputDirChange(nextValue) {
     logMain(`[main] output dir change requested current=${currentPath} target=${nextPath}`);
     // Persist the target before touching either directory. A restart can then
     // replay or recover every interruption point in the filesystem commit.
-    setPendingOutputDirSetting(nextPath, { throwOnError: true });
+    setPendingOutputDirSetting(nextPath);
     wasBackendRunning = !!backendProc;
     setOutputDirChangeProgressState({
       active: true,
@@ -1284,9 +918,7 @@ async function refreshRendererCacheForPackagedUi() {
     return;
   }
 
-  loadDesktopSettings();
-  desktopSettings.lastSeenUiBuildId = nextBuildId;
-  persistDesktopSettings();
+  persistDesktopSettings({ ...loadDesktopSettings(), lastSeenUiBuildId: nextBuildId });
 }
 
 function sendToRenderer(channel, payload) {
@@ -2003,9 +1635,28 @@ function setupRendererLifecycleLogging(win) {
   });
 }
 
+function setupChildWindowBranding(win, windowIcon) {
+  win.webContents.setWindowOpenHandler(({ url }) => ({
+    action: "allow",
+    overrideBrowserWindowOptions: {
+      icon: windowIcon,
+      title: new URL(url).hostname === "mp.weixin.qq.com" ? "" : "xwechat",
+    },
+  }));
+  win.webContents.on("did-create-window", (child, { url }) => {
+    if (new URL(url).hostname === "mp.weixin.qq.com") {
+      child.setTitle("");
+      child.on("page-title-updated", (event) => event.preventDefault());
+    }
+    setupChildWindowBranding(child, windowIcon);
+  });
+}
+
 function createMainWindow() {
+  const windowIcon = path.join(__dirname, "icon.ico");
   const win = new BrowserWindow({
-    icon: path.join(__dirname, "icon.ico"),
+    icon: windowIcon,
+    title: "xwechat",
     width: 1200,
     height: 800,
     minWidth: 980,
@@ -2022,6 +1673,9 @@ function createMainWindow() {
       devTools: true,
     },
   });
+
+  // 原生子窗口及其后代统一项目图标；公众号文章保持空标题。
+  setupChildWindowBranding(win, windowIcon);
 
   win.on("close", (event) => {
     // In packaged builds, we default to "close -> minimize to tray" unless the user opts out.
@@ -2107,28 +1761,15 @@ async function captureRegionToPngBuffer(wc, options = {}) {
 
   let attached = false;
   try {
-    let data = "";
-    try {
-      if (!wc.debugger.isAttached()) {
-        wc.debugger.attach("1.3");
-        attached = true;
-      }
-      const shot = await wc.debugger.sendCommand("Page.captureScreenshot", {
-        format: "png",
-        captureBeyondViewport: false,
-        clip: { x, y, width, height, scale },
-      });
-      data = shot?.data || "";
-    } catch (cdpErr) {
-      // CDP 不可用（调试器被占用等）时降级到 capturePage：尺寸随显示器缩放比，但至少能出图
-      logMain(`[main] captureRegion CDP failed, fallback to capturePage: ${cdpErr?.message || cdpErr}`);
-      const image = await wc.capturePage(
-        { x, y, width, height },
-        { stayHidden: true, stayAwake: true }
-      );
-      if (image.isEmpty()) throw new Error("截取到空图像");
-      data = image.toPNG().toString("base64");
+    if (!wc.debugger.isAttached()) {
+      wc.debugger.attach("1.3");
+      attached = true;
     }
+    const { data } = await wc.debugger.sendCommand("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false,
+      clip: { x, y, width, height, scale },
+    });
     if (!data) throw new Error("截图为空");
 
     let buffer = Buffer.from(data, "base64");
@@ -2153,11 +1794,7 @@ async function captureRegionToPngBuffer(wc, options = {}) {
     }
     return { buffer, width: outWidth, height: outHeight, rawWidth, rawHeight };
   } finally {
-    if (attached) {
-      try {
-        wc.debugger.detach();
-      } catch {}
-    }
+    if (attached) wc.debugger.detach();
   }
 }
 
@@ -2325,40 +1962,17 @@ function registerWindowIpc() {
   });
 
   ipcMain.handle("app:getAutoLaunch", () => {
-    try {
-      const settings = app.getLoginItemSettings();
-      return !!(settings?.openAtLogin || settings?.executableWillLaunchAtLogin);
-    } catch (err) {
-      logMain(`[main] getAutoLaunch failed: ${err?.message || err}`);
-      return false;
-    }
+    const settings = app.getLoginItemSettings();
+    return !!(settings.openAtLogin || settings.executableWillLaunchAtLogin);
   });
 
   ipcMain.handle("app:setAutoLaunch", (_event, enabled) => {
-    const on = !!enabled;
-    try {
-      app.setLoginItemSettings({ openAtLogin: on });
-    } catch (err) {
-      logMain(`[main] setAutoLaunch(${on}) failed: ${err?.message || err}`);
-      return false;
-    }
-
-    try {
-      const settings = app.getLoginItemSettings();
-      return !!(settings?.openAtLogin || settings?.executableWillLaunchAtLogin);
-    } catch {
-      return on;
-    }
+    app.setLoginItemSettings({ openAtLogin: !!enabled });
+    const settings = app.getLoginItemSettings();
+    return !!(settings.openAtLogin || settings.executableWillLaunchAtLogin);
   });
 
-  ipcMain.handle("app:getCloseBehavior", () => {
-    try {
-      return getCloseBehavior();
-    } catch (err) {
-      logMain(`[main] getCloseBehavior failed: ${err?.message || err}`);
-      return "tray";
-    }
-  });
+  ipcMain.handle("app:getCloseBehavior", () => getCloseBehavior());
 
   ipcMain.handle("app:isDebugEnabled", () => {
     try {
@@ -2379,28 +1993,16 @@ function registerWindowIpc() {
   });
 
   ipcMain.handle("app:setCloseBehavior", (_event, behavior) => {
-    try {
-      const next = setCloseBehavior(behavior);
-      ensureTrayForCloseBehavior();
-      return next;
-    } catch (err) {
-      logMain(`[main] setCloseBehavior failed: ${err?.message || err}`);
-      return getCloseBehavior();
-    }
+    const next = setCloseBehavior(behavior);
+    ensureTrayForCloseBehavior();
+    return next;
   });
 
-  ipcMain.handle("backend:getPort", () => {
-    try {
-      return getBackendPort();
-    } catch (err) {
-      logMain(`[main] backend:getPort failed: ${err?.message || err}`);
-      return DEFAULT_BACKEND_PORT;
-    }
-  });
+  ipcMain.handle("backend:getPort", () => getBackendPort());
 
   ipcMain.handle("backend:setPort", async (_event, port) => {
     if (backendPortChangeInProgress) throw new Error("端口切换中，请稍后重试");
-    if (outputDirChangeInProgress || accountDataChangeInProgress) {
+    if (outputDirChangeInProgress) {
       throw new Error("后端维护中，请稍后重试");
     }
     if (!app.isPackaged) {
@@ -2450,32 +2052,14 @@ function registerWindowIpc() {
   });
 
   ipcMain.handle("backend:getMcpLanAccess", () => {
-    try {
-      const host = getBackendBindHost();
-      const port = getBackendPort();
-      return {
-        enabled: getMcpLanAccessEnabled(),
-        host,
-        port,
-        uiUrl: getDesktopUiUrl(),
-        ...getMcpAccessInfo(host, port),
-      };
-    } catch (err) {
-      logMain(`[main] backend:getMcpLanAccess failed: ${err?.message || err}`);
-      const port = DEFAULT_BACKEND_PORT;
-      return {
-        enabled: false,
-        host: DEFAULT_BACKEND_HOST,
-        port,
-        uiUrl: getDesktopUiUrl(),
-        ...getMcpAccessInfo(DEFAULT_BACKEND_HOST, port),
-      };
-    }
+    const host = getBackendBindHost();
+    const port = getBackendPort();
+    return { enabled: getMcpLanAccessEnabled(), host, port, uiUrl: getDesktopUiUrl(), ...getMcpAccessInfo(host, port) };
   });
 
   ipcMain.handle("backend:setMcpLanAccess", async (_event, enabled) => {
     if (backendPortChangeInProgress) throw new Error("后端切换中，请稍后重试");
-    if (outputDirChangeInProgress || accountDataChangeInProgress) {
+    if (outputDirChangeInProgress) {
       throw new Error("后端维护中，请稍后重试");
     }
 
@@ -2525,32 +2109,8 @@ function registerWindowIpc() {
     }
   });
 
-  ipcMain.handle("app:getVersion", () => {
-    try {
-      return app.getVersion();
-    } catch (err) {
-      logMain(`[main] getVersion failed: ${err?.message || err}`);
-      return "";
-    }
-  });
-
-  ipcMain.handle("app:getOutputDirInfo", () => {
-    try {
-      return getOutputDirInfo();
-    } catch (err) {
-      logMain(`[main] app:getOutputDirInfo failed: ${err?.message || err}`);
-      return {
-        path: "",
-        defaultPath: "",
-        isDefault: true,
-        pendingPath: "",
-        hasPending: false,
-        lastError: err?.message || String(err),
-        canChange: false,
-        changeUnavailableReason: "无法读取 output 目录信息",
-      };
-    }
-  });
+  ipcMain.handle("app:getVersion", () => app.getVersion());
+  ipcMain.handle("app:getOutputDirInfo", () => getOutputDirInfo());
 
   ipcMain.handle("app:getOutputDir", () => {
     return resolveOutputDir() || "";
@@ -2630,7 +2190,7 @@ function registerWindowIpc() {
         return { ok: false, error: "已有导出任务在进行中，请稍后再试" };
       }
       const label = String(options?.label || "年度总结").slice(0, 120);
-      const dir = fs.mkdtempSync(path.join(app.getPath("temp"), "wechat-wrapped-"));
+      const dir = fs.mkdtempSync(path.join(app.getPath("temp"), "xwechat-wrapped-"));
       const batchId = `wb_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
       wrappedExportBatches.set(batchId, { dir, label, createdAt: Date.now(), count: 0 });
       logMain(`[main] wrappedBatchBegin ${batchId} label=${label} dir=${dir}`);
@@ -2741,7 +2301,7 @@ function registerWindowIpc() {
   });
 
   ipcMain.handle("app:setOutputDir", async (_event, nextDir) => {
-    if (outputDirChangeInProgress || backendPortChangeInProgress || accountDataChangeInProgress) {
+    if (outputDirChangeInProgress || backendPortChangeInProgress) {
       return {
         success: false,
         error: "后端或 output 目录维护中，请稍后重试",
@@ -2760,28 +2320,6 @@ function registerWindowIpc() {
     } finally {
       outputDirChangeInProgress = false;
       clearOutputDirChangeProgressState();
-    }
-  });
-
-  ipcMain.handle("app:getAccountInfo", async (_event, account) => {
-    try {
-      return getAccountInfoFromDisk(account);
-    } catch (e) {
-      throw new Error(e?.message || String(e));
-    }
-  });
-
-  ipcMain.handle("app:deleteAccountData", async (_event, account) => {
-    if (outputDirChangeInProgress || backendPortChangeInProgress || accountDataChangeInProgress) {
-      throw new Error("后端或 output 目录维护中，请稍后重试");
-    }
-    accountDataChangeInProgress = true;
-    try {
-      return await deleteAccountDataFromDisk(account);
-    } catch (e) {
-      throw new Error(e?.message || String(e));
-    } finally {
-      accountDataChangeInProgress = false;
     }
   });
 
@@ -3017,33 +2555,18 @@ app.on("before-quit", () => {
   stopBackend();
 });
 
+function handleStartupFailure(err) {
+  console.error(err);
+  try {
+    logMain(`[main] fatal: ${err?.stack || String(err)}`);
+    dialog.showErrorBox("xwechat 启动失败", `启动失败：${err?.stack || String(err)}`);
+  } finally {
+    // The existing before-quit handler stops the backend and other services.
+    app.quit();
+  }
+}
+
 if (gotSingleInstanceLock) {
   initialStartupPromise = main();
-  initialStartupPromise.catch((err) => {
-    // eslint-disable-next-line no-console
-    console.error(err);
-    logMain(`[main] fatal: ${err?.stack || String(err)}`);
-    stopBackend();
-    try {
-      const dir = getUserDataDir();
-      const outputDir = resolveOutputDir({ ensureExists: false });
-      if (dir) {
-        const detailLines = [
-          `启动失败：${err?.message || err}`,
-          "",
-          `桌面日志目录：${dir}`,
-          "文件：desktop-main.log / backend-stdio.log",
-        ];
-        if (outputDir) {
-          detailLines.push("", `当前 output 目录：${outputDir}`, `其中 output${path.sep}logs${path.sep}... 也在这里`);
-        }
-        dialog.showErrorBox(
-          "xwechat 启动失败",
-          detailLines.join("\n")
-        );
-        shell.openPath(dir);
-      }
-    } catch {}
-    app.quit();
-  });
+  initialStartupPromise.catch(handleStartupFailure);
 }
