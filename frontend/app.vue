@@ -97,7 +97,7 @@ const goToAccountSetup = async () => {
   await navigateTo('/detection-result')
 }
 
-watch(() => route.path, () => { void checkNoAccountGuide() }, { immediate: true })
+watch(() => route.path, () => { void checkNoAccountGuide() })
 watch(selectedAccount, (account) => {
   if (String(account || '').trim()) noAccountGuideOpen.value = false
 })
@@ -125,6 +125,9 @@ onMounted(() => {
   window.addEventListener('resize', updateDprVar)
 
   void chatAccounts.ensureLoaded()
+  // Start the initial route check after hydration so account loading cannot
+  // change the pre-rendered page before Vue has attached to it.
+  void checkNoAccountGuide()
   privacyStore.init()
   themeStore.init()
 })
@@ -174,7 +177,6 @@ const showSidebar = computed(() => {
   const path = String(route.path || '')
   if (path === '/' || path === '/import') return false
   if (path === '/decrypt' || path === '/detection-result' || path === '/decrypt-result') return false
-  if (path === '/landing' || path === '/site') return false
   return !(path === '/wrapped' || path.startsWith('/wrapped/'))
 })
 </script>

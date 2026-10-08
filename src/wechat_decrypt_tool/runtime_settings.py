@@ -31,8 +31,8 @@ VOICE_TRANSCRIPTION_DEVICE_CUDA = "cuda"
 def remote_calls_enabled(default: bool = False) -> bool:
     """Return whether caller-location checks are explicitly relaxed.
 
-    This is deliberately opt-in.  It does not disable MCP token checks, native
-    leases/build expiry, feature bits, path validation, or resource limits.
+    This is deliberately opt-in. It does not disable MCP token checks,
+    path validation, or resource limits.
     """
 
     raw = str(os.environ.get(ENV_ALLOW_REMOTE_CALLS_KEY, "") or "").strip().lower()

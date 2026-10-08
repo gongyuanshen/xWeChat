@@ -8,7 +8,6 @@ const repoRoot = path.resolve(__dirname, "..", "..");
 const srcPng = path.join(repoRoot, "frontend", "public", "logo.png");
 const dstPngs = [
   path.join(repoRoot, "desktop", "src", "icon.png"),
-  path.join(repoRoot, "website", "assets", "img", "logo.png"),
 ];
 // Keep browser and desktop source icons on the same source image.
 const dstIcos = [

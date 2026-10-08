@@ -2023,25 +2023,6 @@ def _normalize_session_preview_text(
     return text
 
 
-def _replace_preview_sender_prefix(preview_text: str, sender_display_name: str) -> str:
-    text = re.sub(r"\s+", " ", str(preview_text or "").strip()).strip()
-    if not text:
-        return ""
-
-    display_name = str(sender_display_name or "").strip()
-    if (not display_name) or text.startswith("[草稿]"):
-        return text
-
-    match = re.match(r"^([^:\n]{1,128}):\s*(.+)$", text)
-    if not match:
-        return text
-
-    body = re.sub(r"\s+", " ", str(match.group(2) or "").strip()).strip()
-    if not body:
-        return text
-    return f"{display_name}: {body}"
-
-
 def _build_group_sender_display_name_map(
     contact_db_path: Path,
     previews: dict[str, str],

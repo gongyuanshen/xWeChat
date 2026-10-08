@@ -22,7 +22,7 @@ if (!url) { console.error("需要 --url=..."); process.exit(1); }
 app.setPath("userData", path.join(os.tmpdir(), "wda-snap-" + process.pid));
 
 app.whenReady().then(async () => {
-  // 默认隐藏窗口（不在用户桌面上闪）；backgroundThrottling:false 保证 rAF/GSAP 照常推进。--show=1 可强制显示。
+  // 默认隐藏窗口（不在用户桌面上闪）；backgroundThrottling:false 保证 rAF 动画照常推进。--show=1 可强制显示。
   const win = new BrowserWindow({ width: W, height: H, show: !!args.show, backgroundColor: "#000000", webPreferences: { contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   win.setContentSize(W, H);
   if (args.console) win.webContents.on("console-message", (_e, _lvl, msg) => console.log("[console]", msg));

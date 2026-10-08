@@ -1254,7 +1254,7 @@ def build_card_00_global_overview(
                 "multiple": peak_multiple,
                 **details,
             }
-            # Shape must match AnnualCalendarHeatmap.vue highlight parsing: {key, doy, label, valueLabel}.
+            # Annual highlight data schema: {key, doy, label, valueLabel}.
             peak_highlights = [
                 {
                     "key": "sent_messages_max",

@@ -40,7 +40,7 @@
  * 一条铁律：**舞台内 = 画面（会被截图、随画幅缩放）；舞台外 = 播放器（不缩放、不入图）。**
  *
  * ⚠️ 样式禁忌：`.wr-stage` 上不得出现 filter / opacity<1 / mask / contain:paint /
- * will-change:filter|opacity —— 任何一个都会新建 backdrop root，直接废掉 Card07 全篇的
+ * will-change:filter|opacity —— 任何一个都会新建 backdrop root，影响舞台内容的
  * backdrop-filter 磨砂玻璃。will-change:transform 也只在切画幅动画期间临时挂。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
@@ -144,8 +144,8 @@ const stageStyle = computed(() => {
     '--stage-h': `${h}px`,
     '--stage-scale': String(scale),
     // 舞台版的 vw/vh：卡片里所有 Nvh / Nvw 换成 calc(var(--svh) * N) / calc(var(--svw) * N)。
-    // 不能用 cqh/cqw 做机械替换——容器单位绑定「最近的」尺寸容器，而 Card07 /
-    // EmojiHoloCards / MonthlyCompanionPosters 已各自声明 container-type，会静默改绑。
+    // 不能用 cqh/cqw 做机械替换——容器单位绑定「最近的」尺寸容器，
+    // 舞台内声明 container-type 的内容会改变其参照系。
     '--svw': `${w / 100}px`,
     '--svh': `${h / 100}px`,
     // 双轴基准标量：16:9 下恒等于 --svh（横屏逐像素零回归），竖幅下改由短边决定，

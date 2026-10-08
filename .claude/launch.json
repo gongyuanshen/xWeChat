@@ -7,12 +7,6 @@
       "runtimeArgs": ["run", "dev"],
       "cwd": "frontend",
       "port": 3000
-    },
-    {
-      "name": "website",
-      "runtimeExecutable": "python3",
-      "runtimeArgs": ["website/serve.py", "4321"],
-      "port": 4321
     }
   ]
 }

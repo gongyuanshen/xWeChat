@@ -45,19 +45,6 @@ WECHAT_EXECUTABLE_NAMES = ("Weixin.exe", "WeChat.exe")
 KEY_SIZE = 32
 
 
-def _key_payload_log_metadata(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    payload = payload or {}
-    xor_key = str(payload.get("xor_key", payload.get("xorKey", "")) or "").strip()
-    aes_key = str(payload.get("aes_key", payload.get("aesKey", "")) or "").strip()
-    return {
-        "wxid": str(payload.get("wxid") or "").strip(),
-        "has_xor": bool(xor_key),
-        "has_aes": bool(aes_key),
-        "xor_length": len(xor_key),
-        "aes_length": len(aes_key),
-    }
-
-
 def _image_key_account_match_variants(value: Any) -> set[str]:
     """Return account names that should be considered equivalent for image key matching.
 

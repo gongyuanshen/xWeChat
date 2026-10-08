@@ -59,6 +59,8 @@
 
 从 [GitHub Releases](https://github.com/gongyuanshen/xwechat/releases) 查看已发布版本及其说明。Windows x64 提供以下打包形式：
 
+当前版本 [v2.7.3](https://github.com/gongyuanshen/xwechat/releases/tag/v2.7.3) 包含助手页 hydration 修复，并清理了已被替代的旧年报组件、废弃逻辑和展示站点。
+
 - **安装版**：运行 `xwechat-<版本>-Setup.exe`，按安装向导选择目录。
 - **免安装版**：完整解压 `xwechat-<版本>-Setup.zip`，在解压目录中运行 `xwechat.exe`。请保留同目录的全部资源。
 
@@ -178,7 +180,6 @@ xwechat/
 ├── docs/                     # 专题说明及分阶段验收记录
 ├── skills/                   # MCP 客户端配套 Skill
 ├── tools/                    # 开发与验证工具
-├── website/                  # 项目介绍网站
 ├── main.py                   # 源码后端启动入口
 ├── pyproject.toml            # Python 依赖与版本
 └── uv.lock                   # Python 依赖锁文件

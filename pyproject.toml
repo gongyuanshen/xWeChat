@@ -1,6 +1,6 @@
 [project]
 name = "xwechat"
-version = "2.7.2"
+version = "2.7.3"
 description = "xwechat - local WeChat data browsing, export and interaction"
 readme = "README.md"
 requires-python = ">=3.11"
