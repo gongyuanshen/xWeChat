@@ -19,12 +19,14 @@ function pyInstallerAddData(sourcePath, targetPath) {
 }
 
 function parseVersionTuple(rawVersion) {
-  const nums = String(rawVersion || "")
-    .split(/[^\d]+/)
-    .map((x) => Number.parseInt(x, 10))
-    .filter((n) => Number.isInteger(n) && n >= 0);
-  while (nums.length < 4) nums.push(0);
-  return nums.slice(0, 4);
+  if (typeof rawVersion !== "string" || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(rawVersion)) {
+    throw new Error("desktop/package.json version must use numeric major.minor.patch format");
+  }
+  const nums = rawVersion.split(".").map(Number);
+  if (nums.some((value) => value > 65535)) {
+    throw new Error("desktop/package.json version components must be between 0 and 65535 for Windows resources");
+  }
+  return [...nums, 0];
 }
 
 function buildVersionInfoText(versionTuple, versionDot) {
@@ -61,19 +63,15 @@ VSVersionInfo(
 }
 
 function main() {
+  const desktopPackageJsonPath = path.join(repoRoot, "desktop", "package.json");
+  const pkg = JSON.parse(fs.readFileSync(desktopPackageJsonPath, { encoding: "utf8" }));
+  const versionTuple = parseVersionTuple(pkg.version);
+  const versionDot = versionTuple.join(".");
+
   fs.mkdirSync(distDir, { recursive: true });
   fs.mkdirSync(workDir, { recursive: true });
   fs.mkdirSync(specDir, { recursive: true });
 
-  const desktopPackageJsonPath = path.join(repoRoot, "desktop", "package.json");
-  let desktopVersion = "2.7.1";
-  try {
-    const pkg = JSON.parse(fs.readFileSync(desktopPackageJsonPath, { encoding: "utf8" }));
-    const v = String(pkg?.version || "").trim();
-    if (v) desktopVersion = v;
-  } catch {}
-  const versionTuple = parseVersionTuple(desktopVersion);
-  const versionDot = versionTuple.join(".");
   const versionFilePath = path.join(workDir, "xwechat-backend-version.txt");
   if (process.platform === "win32") {
     fs.writeFileSync(versionFilePath, buildVersionInfoText(versionTuple, versionDot), { encoding: "utf8" });

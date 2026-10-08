@@ -6,7 +6,7 @@ const path = require("node:path");
 const desktopRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(desktopRoot, "..");
 
-test("SNS media CI covers Windows x64 without release secrets", () => {
+test("SNS media CI covers Windows x64 without private fixtures or release secrets", () => {
   const workflow = fs.readFileSync(
     path.join(repoRoot, ".github", "workflows", "sns-media-cross-platform.yml"),
     "utf8",
@@ -17,7 +17,7 @@ test("SNS media CI covers Windows x64 without release secrets", () => {
   assert.match(workflow, /arch:\s*x64/);
   assert.match(workflow, /tests\/sns-wasm-runtime\.test\.cjs/);
   assert.match(workflow, /tests\/sns-media-source\.test\.mjs/);
-  assert.match(workflow, /tests\/test_sns_media\.py/);
+  assert.doesNotMatch(workflow, /tests\/test_sns_media\.py/);
   assert.doesNotMatch(workflow, /secrets\.|environment:\s*windows-private-pki-production/);
 });
 

@@ -3116,7 +3116,7 @@ wheels = [
 
 [[package]]
 name = "xwechat"
-version = "2.7.3"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },

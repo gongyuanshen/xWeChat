@@ -62,7 +62,7 @@
 
 从 [GitHub Releases](https://github.com/gongyuanshen/xwechat/releases) 查看已发布版本及其说明。Windows x64 提供以下打包形式：
 
-当前版本 [v2.7.3](https://github.com/gongyuanshen/xwechat/releases/tag/v2.7.3) 包含助手页 hydration 修复，并清理了已被替代的旧年报组件、废弃逻辑和展示站点。
+当前项目版本为 `1.0.0`，从独立项目的首个版本开始编号。已发布安装包及其实际版本以 Releases 页面为准。
 
 - **安装版**：运行 `xwechat-<版本>-Setup.exe`，按安装向导选择目录。
 - **免安装版**：完整解压 `xwechat-<版本>-Setup.zip`，在解压目录中运行 `xwechat.exe`。请保留同目录的全部资源。
