@@ -300,5 +300,6 @@ CPU 与 GPU 构建使用同一输出目录和文件名，应分别保存产物�
 - **[mizchi/laya-mlx](https://github.com/mizchi/laya-mlx)**：本地 Laya ONNX 输入构造与校准逻辑的来源之一；相关来源和许可保留在 [本地许可目录](src/wechat_decrypt_tool/resources/licenses)。
 - **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**：本地聊天导出、媒体处理和年度报告等实现的参考。
 - **[vuepont/ai-elements-vue](https://github.com/vuepont/ai-elements-vue)**：AI 对话界面的按需源码组件，来源、固定提交与许可见 [组件说明](frontend/components/ai-elements/README.md)。
+- **[hicccc77/Relink](https://github.com/hicccc77/Relink)**：一个面向深度关系分析的 Agent 实现]
 
 技术栈采用 Nuxt 4、Vue 3、Tailwind CSS 4、Three.js、Electron、FastAPI、SQLite 和 DeepAgents 等。第三方代码、资源、模型及运行组件各自的许可和来源声明应予保留，不因本项目的使用声明而改变。
