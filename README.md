@@ -1,3 +1,5 @@
+**English** | [简体中文](README.zh-CN.md)
+
 <p align="center">
   <img src="frontend/public/logo.png" alt="xwechat Logo" width="160" />
 </p>
@@ -6,168 +8,170 @@
 
 # xwechat
 
-**一个纯粹出于个人业余兴趣、娱乐探索与技术学习而开发的本地微信数据分析工具**
+**A local WeChat data analysis tool developed purely as a personal hobby, for recreational exploration and technical learning**
 
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(x64)-0078D6?logo=windows&logoColor=white)](https://github.com/gongyuanshen/xWeChat)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(x64)-0078D6?logo=windows&logoColor=white)](https://github.com/gongyuanshen/xwechat)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Node.js](https://img.shields.io/badge/Node.js-22.12+-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Vue.js](https://img.shields.io/badge/Frontend-Nuxt%204%20%2F%20Vue%203-4FC08D?logo=vuedotjs&logoColor=white)](https://vuejs.org/)
-[![License](https://img.shields.io/badge/License-Personal%20Hobby%20Only-lightgrey)](#免责声明与严禁商用)
+[![License](https://img.shields.io/badge/License-Personal%20Hobby%20Only-lightgrey)](#disclaimer-and-strict-prohibition-on-commercial-use)
 
 <br />
 
-> ⚠️ **重要声明**：本项目为**个人业余娱乐与学习实验项目**，纯属自娱自乐与技术研究，**不涉及任何经济收益、商业运作或收费服务**。严禁将本项目用于任何商业牟利行为。
+> ⚠️ **Important notice**: This is a **personal hobby project for entertainment and learning experiments**, created solely for personal enjoyment and technical research. It **involves no financial gain, commercial operations, or paid services**. Any use of this project for commercial profit is strictly prohibited.
 
 </div>
 
 ---
 
-## 项目简介
+## About the project
 
-**xwechat** 是一个面向 Windows 平台的个人微信记录整理、备份与分析工具。你可以解密或导入自己的本地数据，回看聊天与朋友圈，搜索和导出记录，生成年度总结，也可以通过 **Agent 智能体** 查找信息、梳理事件与关系线索，按需使用本地模型或配置的 AI 服务。
+**xwechat** is a Windows tool for organizing, backing up, and analyzing your personal WeChat records. You can decrypt or import your own local data, revisit chats and Moments, search and export records, generate annual recaps, and use an **Agent** to find information and trace events and relationship clues, with local models or configured AI services as needed.
 
-数据库解密、快照读取和存储在本机进行；旧 client／broker 数据运行模式及其授权链已移除。图片解码、媒体转换、语音识别仍各有本地组件和模型依赖。**“本地数据处理”不代表应用所有功能都不联网**：远端 AI 服务会接收本次分析所需的材料，模型下载、媒体下载及外部链接也需要网络。
+Database decryption, snapshot reading, and storage take place on your computer. The former client/broker data runtime modes and their authorization chain have been removed. Image decoding, media conversion, and speech recognition still have their own local component and model dependencies. **“Local data processing” does not mean that every application feature works without network access**: remote AI services receive the materials needed for the requested analysis; model downloads, media downloads, and external links also require a network connection.
 
-此项目不适合拿来当成一个真正的客户端使用，只适合看不适合玩，因为在某些功能使用方面是非常难受的，具体见下面的项目限制一览。
+This project is unsuitable for use as a full-fledged client. It is intended for viewing records rather than everyday client interaction, and some features are cumbersome to use. See the limitations below for details.
 
-本项目用于个人业余学习和娱乐探索，是非官方实验工具。部分功能依赖微信版本、窗口状态、本地资源和模型能力，不能代替微信客户端。
+This is an unofficial experimental tool for personal learning and recreational exploration. Some features depend on the WeChat version, window state, local resources, and model capabilities. It cannot replace the WeChat client.
 
-[功能清单](#当前功能) · [本地资料夹与保存搜索](docs/personal-library.md) · [快速开始](#快速开始) · [Agent 智能体](#agent-智能体) · [AI 与语音](#ai-与语音) · [源码运行](#源码运行) · [Windows 打包](#windows-打包) · [已知限制](#已知限制) · [问题反馈](#问题反馈)
+The current application interface is in Chinese; control names in this README are English translations of the labels shown in the application.
 
-## 当前功能
+[Features](#current-features) · [Personal library and saved searches (Chinese)](docs/personal-library.md) · [Quick start](#quick-start) · [Agent](#agent) · [AI and speech](#ai-and-speech) · [Run from source](#run-from-source) · [Windows packaging](#windows-packaging) · [Known limitations](#known-limitations) · [Report an issue](#report-an-issue)
 
-下表说明当前源码中的功能。已下载的历史安装包未必包含这些更新，安装版能力以对应 Release 说明和实际验收为准。
+## Current features
 
-| 功能 | 当前提供的能力 |
+The table below describes features in the current source code. Previously downloaded installers may not contain these updates; packaged capabilities are determined by the corresponding Release notes and actual acceptance checks.
+
+| Feature | Current capabilities |
 | --- | --- |
-| 数据解密与导入 | 检测本机微信账号，扫描并验证数据库密钥；解密微信 4.x 本地数据库；预览并导入账号归档 ZIP 或已解密账号目录 |
-| 多账号与同步 | 切换本地账号；具备源目录和密钥绑定的账号定时同步验证快照、手动刷新；导入的历史归档可独立浏览 |
-| 聊天浏览与搜索 | 浏览私聊、群聊、图片、视频、语音、表情、引用和合并记录等；按关键词、会话、发送者、日期、消息类型搜索，查看上下文、月历热力图及历史浮窗 |
-| 本地资料夹与保存搜索 | 按账号保存搜索条件、聊天原文、附件副本及已完成 Agent 报告；消息类型筛选及滚动日期；资料夹、备注、标签和人工核验；编辑报告副本并导出 Markdown／HTML；[使用说明](docs/personal-library.md) |
-| 跨聊天附件中心 | 按名称、类型、会话、发送者及日期查找文件／图片／视频；主动提取本地文档文字并搜索；预览、下载、原消息定位及加入资料夹 |
-| 磁盘占用管理 | 设置内按账号查看数据库、媒体、索引、快照和资料夹副本占用；主动清理可重建全文索引，保护原文、附件、快照及运行中的任务；[使用说明](docs/performance-storage.md) |
-| 联系人与服务号 | 查看联系人分类、个人资料、群成员、好友验证记录及服务号消息；导出联系人资料 |
-| 朋友圈 | 浏览本地时间线、历史封面、图片、视频、实况、点赞和评论；支持全量及增量导出 |
-| 收藏与其他记录 | 搜索并导出本地收藏、小程序资料、视频号直播缓存及收付款记录；查看撤回相关记录 |
-| 记录导出与账号备份 | 导出 HTML、JSON、TXT、Excel；聊天与朋友圈提供 ZIP 全量归档及目录增量导出；完整账号可导出数据库与资源归档 |
-| Agent 智能体 | 独立入口与聊天内对话；按问题规划步骤、调用检索与阅读工具，跨聊天梳理事件、待办和关系线索；复杂分析按需协调子任务，提供原文引用、执行进度、补充要求、停止与继续 |
-| 聊天 AI 工具 | 消息总结、自动总结任务、关注提醒及历史；定时任务在应用运行期间执行，沿用配置的模型服务 |
-| 聊天画像与意图识别 | 本地 Laya 或明确选择的 API 分析；人物／群聊画像、情绪与意图标签、聊天特征及 MBTI 推测；自动识别需主动开启 |
-| 本地语义检索 | 下载检索模型并启用后，逐步整理当前账号全部聊天；关键词与语义检索结合，支持暂停和继续整理，查询时可限制聊天及日期 |
-| 本地语音转文字 | 下载并选择 CPU 或 NVIDIA GPU 模型，转写单条或批量语音，保留已有微信转写并区分结果来源 |
-| 回声异境年度总结 | 按账号与年份进入十章三维年度体验，查看消息规模、活跃时段、文字、互动联系人、回复节奏和表情统计，展开明细并回到原消息 |
-| 实验性微信发送 | 借助已登录的 Windows 微信窗口发送文本、PNG/JPEG 图片和文件；支持附件多选、粘贴及逐项队列发送 |
-| MCP 接入 | 为支持 HTTP MCP 的客户端提供本地账号、聊天、朋友圈、媒体及年度统计等只读查询工具 |
+| Data decryption and import | Detect local WeChat accounts; scan for and validate database keys; decrypt WeChat 4.x local databases; preview and import account archive ZIP files or decrypted account directories |
+| Multiple accounts and synchronization | Switch between local accounts; periodically synchronize verified snapshots and refresh manually for accounts bound to a source directory and key; browse imported historical archives independently |
+| Chat browsing and search | Browse private chats, group chats, images, videos, voice messages, stickers, replies, merged chat records, and more; search by keyword, conversation, sender, date, and message type; view context, calendar heatmaps, and floating history windows |
+| Personal library and saved searches | Save search filters, original chat messages, attachment copies, and completed Agent reports per account; filter by message type and rolling date range; manage folders, notes, tags, and manual verification; edit report copies and export Markdown/HTML; [guide (Chinese)](docs/personal-library.md) |
+| Cross-chat attachment center | Find files, images, and videos by name, type, conversation, sender, and date; explicitly extract and search text from local documents; preview, download, locate original messages, and add items to the personal library |
+| Disk usage management | View per-account usage for databases, media, indexes, snapshots, and library copies in Settings; explicitly remove rebuildable full-text indexes while protecting original messages, attachments, snapshots, and running tasks; [guide (Chinese)](docs/performance-storage.md) |
+| Contacts and service accounts | View contact categories, profiles, group members, friend verification records, and service account messages; export contact profiles |
+| Moments | Browse the local timeline, historical cover images, images, videos, Live Photos, likes, and comments; perform full and incremental exports |
+| Favorites and other records | Search and export local favorites, mini program information, Channels live-stream caches, and payment records; view records related to message revocation |
+| Record export and account backup | Export HTML, JSON, TXT, and Excel; create full ZIP archives and incremental directory exports for chats and Moments; export complete account archives containing databases and resources |
+| Agent | Use a standalone entry point or an in-chat conversation; plan steps and call search and reading tools to trace events, to-dos, and relationship clues across chats; coordinate subtasks for complex analysis as needed, with original-message citations, execution progress, additional instructions, stop, and resume |
+| Chat AI tools | Summarize messages, run automatic summary tasks, and manage follow-up alerts and history; scheduled tasks run while the application is running and use the configured model service |
+| Chat profiling and intent recognition | Analyze with local Laya or an explicitly selected API; generate person/group profiles, emotion and intent labels, chat characteristics, and tentative MBTI inferences; automatic recognition requires explicit opt-in |
+| Local semantic search | After downloading and enabling a retrieval model, gradually index all chats in the current account; combine keyword and semantic search, pause and resume indexing, and restrict individual queries by chat and date |
+| Local speech-to-text | Download and select CPU or NVIDIA GPU models; transcribe individual or batches of voice messages; preserve existing WeChat transcriptions and distinguish result sources |
+| “Echoes of Another Realm” annual recap | Enter a ten-chapter, three-dimensional annual experience by account and year; view message volume, active hours, text, interacting contacts, reply patterns, and sticker statistics; expand details and return to original messages |
+| Experimental WeChat sending | Use a logged-in Windows WeChat window to send text, PNG/JPEG images, and files; select or paste multiple attachments and send them one by one through a queue |
+| MCP integration | Provide read-only local account, chat, Moments, media, annual statistics, and other query tools to clients that support HTTP MCP |
 
-## 快速开始
+## Quick start
 
-### 获取桌面版
+### Get the desktop application
 
-从 [GitHub Releases](https://github.com/gongyuanshen/xwechat/releases) 查看已发布版本及其说明。Windows x64 提供以下打包形式：
+Check [GitHub Releases](https://github.com/gongyuanshen/xwechat/releases) for published versions and their notes. Windows x64 packages are available in the following forms:
 
-当前项目版本为 `1.1.0`，独立项目从 `1.0.0` 开始编号。已发布安装包及其实际版本以 Releases 页面为准。
+The current project version is `1.1.0`. Version numbering for this independent project starts at `1.0.0`. Refer to the Releases page for the packages actually published and their versions.
 
-- **安装版**：运行 `xwechat-<版本>-Setup.exe`，按安装向导选择目录。
-- **免安装版**：完整解压 `xwechat-<版本>-Setup.zip`，在解压目录中运行 `xwechat.exe`。请保留同目录的全部资源。
+- **Installer**: Run `xwechat-<version>-Setup.exe` and select a directory in the installation wizard.
+- **Portable package**: Fully extract `xwechat-<version>-Setup.zip` and run `xwechat.exe` from the extracted directory. Keep all resources in that directory.
 
-桌面包包含 Electron、Python 后端和基础运行组件，无需另装 Python 或 Node.js。Laya、语音和语义检索的**模型权重需单独准备**；Qwen GPU 语音模型还需要包含相应运行组件的版本。构建方式见 [Windows 打包](#windows-打包)。
+Desktop packages include Electron, the Python backend, and basic runtime components; you do not need to install Python or Node.js separately. Laya, speech, and semantic retrieval **model weights must be prepared separately**. The Qwen GPU speech model also requires a package containing its runtime components. See [Windows packaging](#windows-packaging) for build instructions.
 
-### 第一次接入本机数据
+### Connect to local data for the first time
 
-1. 保持电脑版微信运行，登录需要读取的账号，在首页点击 **“检测本机微信”**。
-2. 核对账号与数据目录，进入解密页面。获取数据库密钥前，填写该账号完整 `db_storage` 目录的绝对路径；也可以手动输入已知密钥。
-3. 获取密钥后，退出微信，复制完整账号的 `db_storage`，保留 `.db` 及对应的 `-wal` 文件，再对稳定副本执行普通解密。普通解密不保证在线跨库事务一致性。
-4. 图片使用单独的图片密钥。批量图片解密、表情下载和语音转文字均为可选步骤，可以先跳过并进入聊天页面。
-5. 在账号列表选择已解密账号，浏览、搜索或导出记录；需要 AI 或语音功能时，再准备相应服务和模型。
+1. Keep desktop WeChat running, log in to the account you want to read, and click **“Detect local WeChat”** on the home page.
+2. Verify the account and data directory, then open the decryption page. Before obtaining the database key, enter the absolute path to that account’s complete `db_storage` directory. You can also enter a known key manually.
+3. After obtaining the key, exit WeChat and copy the account’s entire `db_storage`, keeping the `.db` files and their corresponding `-wal` files. Then perform standard decryption on this stable copy. Standard decryption does not guarantee cross-database transaction consistency while WeChat is running.
+4. Images use a separate image key. Batch image decryption, sticker downloads, and speech-to-text are optional; you can skip them initially and enter the chat page.
+5. Select a decrypted account from the account list to browse, search, or export records. Prepare the relevant services and models when you need AI or speech features.
 
-持续同步使用账号绑定的源目录和密钥，在聊天页自动启动验证快照同步，每轮检查结束后等待约 30 秒。**绑定的是备份副本时，同步检查的也是该副本**；从归档导入且没有源目录绑定的账号不会获得本机微信的新消息。顶部刷新按钮用于主动刷新，自动同步保持安静，失败时显示原因和重试入口。
+Continuous synchronization uses the source directory and key bound to the account. Verified snapshot synchronization starts automatically on the chat page and waits approximately 30 seconds after each round of checks. **If the bound source is a backup copy, synchronization checks that copy**; accounts imported from archives without a bound source directory do not receive new messages from local WeChat. The top refresh button is for manual refresh. Automatic synchronization stays quiet; failures show their cause and a retry entry point.
 
-### 导入已有备份
+### Import an existing backup
 
-首页选择 **“导入备份”**，选择本应用导出的原始账号 ZIP（无需解压），或已解密的账号目录。也可选择仅包含一个账号的 `output` 根目录。
+Choose **“Import backup”** on the home page and select an original account ZIP exported by this application, without extracting it, or a decrypted account directory. You can also select an `output` root directory containing exactly one account.
 
-先查看识别出的账号、数据库和资源，再确认导入。数据会复制到应用本地数据区；已有同名账号会先备份，原备份目录不会被直接修改。普通聊天阅读导出与完整账号归档用途不同，导入账号请使用账号归档或符合要求的已解密目录。
+Review the detected account, databases, and resources before confirming the import. Data is copied into the application’s local data area; an existing account with the same name is backed up first, and the original backup directory is not modified directly. Ordinary chat reading exports and complete account archives serve different purposes. To import an account, use an account archive or a decrypted directory that meets the requirements.
 
-聊天搜索侧栏可保存常用筛选，支持消息类型与滚动日期；原消息右键菜单可“加入资料夹”，Agent 完成回答后可“保存报告”。侧栏“附件中心”提供跨聊天附件查找和本地正文提取，“本地资料夹”用于管理和导出副本，操作与备份边界见 [使用说明](docs/personal-library.md)。
+The chat search sidebar can save frequently used filters, including message type and rolling date ranges. The original-message context menu offers **“Add to library”**, and completed Agent answers offer **“Save report”**. **“Attachment center”** in the sidebar provides cross-chat attachment search and local document text extraction; **“Personal library”** manages and exports copies. See the [guide (Chinese)](docs/personal-library.md) for operations and backup boundaries.
 
-## 导出与年度分享
+## Export and annual sharing
 
-聊天导出可选择会话、日期和消息类型，再选择 HTML、JSON、TXT 或 Excel，按需包含本地媒体。朋友圈支持全量及增量导出；联系人、收藏等页面也提供相应导出入口。完整备份使用首页的 **“导出归档”**。
+For chat exports, select conversations, dates, and message types, then choose HTML, JSON, TXT, or Excel and include local media as needed. Moments supports full and incremental exports; contacts, favorites, and other pages provide their own export entry points. For a complete backup, use **“Export archive”** on the home page.
 
-- 导出可以按选项获取图片密钥、下载可用媒体或生成本地语音转写；这些步骤需要对应客户端、资源、网络或已就绪的转写模型。
-- 本地不存在的附件会记录缺失；不能据此保证历史附件全部完整。HTML 中未打包为本地文件的远程图片及外部链接，打开时仍可能联网。
-- 归档中的 SHA-256 清单用于检查内容一致性，不是作者签名或来源认证。完整账号归档导入会检查文件集合、摘要和数据库完整性。
-- 现有导出 API 支持 WEC1 整包加密，需显式提供独立的 32 字节内容密钥。增量目录不支持整包加密；图形导入接收 ZIP／目录，加密文件须先解密。
+- Depending on the selected options, export can obtain an image key, download available media, or generate local voice transcriptions. These steps require the corresponding client, resources, network connection, or a ready transcription model.
+- Attachments absent from local storage are recorded as missing; this does not guarantee that all historical attachments are complete. Remote images not packaged as local files in HTML, and external links, may still access the network when opened.
+- The SHA-256 manifest in an archive checks content consistency. It is not an author signature or proof of origin. Complete account archive imports check the file set, hashes, and database integrity.
+- The existing export API supports WEC1 encryption of an entire package, with an explicitly supplied, separate 32-byte content key. Incremental directories do not support whole-package encryption. The graphical importer accepts ZIP files/directories; encrypted files must be decrypted first.
 
-“回声异境”分享面板提供独立排版的 **PNG 海报**和 **离线 HTML 阅读档案**。桌面版还可导出当前三维场景截图或全部十章截图 ZIP；浏览器端的海报／HTML 分享与桌面场景截图是不同输出。
+The “Echoes of Another Realm” sharing panel provides separately laid-out **PNG posters** and **offline HTML reading archives**. The desktop version can also export a screenshot of the current three-dimensional scene or a ZIP of screenshots from all ten chapters. Browser poster/HTML sharing and desktop scene screenshots are different outputs.
 
-海报／HTML 分享面板默认使用匿名摘要；聊天正文、人物信息和私人图片需按界面选项明确选择。桌面场景截图沿用年度页面的匿名开关，不会自动套用分享面板设置。分享前请检查实际输出内容。
+The poster/HTML sharing panel uses an anonymous summary by default. Chat text, personal information, and private images require explicit selection through the interface options. Desktop scene screenshots use the annual page’s anonymity toggle and do not automatically apply the sharing panel’s settings. Check the actual output before sharing.
 
-## AI 与语音
+## AI and speech
 
-### AI 服务
+### AI services
 
-在 **“设置 → AI 服务 → 模型服务”** 添加服务，填写接口地址和密钥，获取并选择模型，保存后测试连接。支持 OpenAI 兼容、Claude Messages 等接口，也可连接自行启动的 Ollama 或 LM Studio 本地服务。
+Add a service under **“Settings → AI services → Model services”**, enter its endpoint and key, fetch and select a model, then save and test the connection. OpenAI-compatible and Claude Messages interfaces are supported, as are locally hosted Ollama or LM Studio services that you start yourself.
 
-连接测试和分析请求可能产生用量。调用明细见 **“设置 → AI 服务 → 用量记录”**；费用以服务商账单为准，未返回用量的请求会单独标明。使用远端服务时，相关聊天、附件文字或图片会发送给你配置的接口。
+Connection tests and analysis requests may incur usage. See **“Settings → AI services → Usage records”** for call details. Costs are determined by the provider’s bill; requests that do not return usage information are marked separately. When using a remote service, relevant chat content, attachment text, or images are sent to the endpoint you configured.
 
-### Agent 智能体
+### Agent
 
-Agent 基于 **DeepAgents**，使用你选择的模型服务，按问题需要规划步骤、调用工具查找和阅读聊天资料，再整合证据回答。聊天资料的读取受当前账号与授权范围限制，工具用于只读分析。
+The Agent is built on **DeepAgents** and uses your selected model service. It plans steps according to the question, calls tools to find and read chat materials, and combines the evidence into an answer. Access to chat materials is restricted to the current account and authorized scope; tools are for read-only analysis.
 
-- **使用入口与范围**：先选择已接入的微信账号，再打开侧栏 **“AI 助手”**，通过 **“@聊天”** 选择全部可读聊天或指定私聊、群聊。每个独立 AI 对话的聊天范围固定，改变范围会进入新对话；运行中需先停止处理。聊天页右侧 AI 面板的 **“对话”** 模式使用同一 Agent，从当前聊天开始提问，可按需查找其他聊天。
-- **检索与分析**：按人物、会话、日期和关键词查找消息，分页读取长聊天并回查前后文；支持跨聊天查找、事件时间线、事项进展、待办整理及关系线索分析。启用本地语义检索后可结合关键词与语义查找。
-- **任务规划与子任务**：复杂问题可按需要安排独立的范围分析、专题检索或事实核查子任务；主智能体继续分析并汇总成果。界面显示实际工具调用、子任务状态和进展，资料尚未读完或不可用时说明覆盖缺口。
-- **图片与附件理解**：可处理聊天中的本地图片，以及 TXT、Markdown、CSV、PDF、DOCX、XLSX、PPTX 等附件。图片、扫描 PDF 和文档插图需要所选模型支持图片理解；缺失、超限或不支持的内容会说明处理缺口。
-- **原文依据与统计**：回答可附聊天原文引用，点击预览原文及前后文，再定位到对应聊天。消息数量、日期分布和发言人排行由程序统计，已确认数值可调用计算工具；模型归纳与关系推测仍需结合原文核对。
-- **连续追问与任务控制**：保留对话历史，支持搜索、切换、重命名和删除。运行中可补充要求或停止处理；最新未完成任务可由用户继续，沿用已有任务状态和资料。
+- **Entry points and scope**: First select a connected WeChat account, then open **“AI assistant”** in the sidebar and use **“@Chats”** to select all readable chats or specific private/group chats. Each standalone AI conversation has a fixed chat scope; changing the scope starts a new conversation, and you must stop any ongoing processing first. **“Conversation”** mode in the chat page’s right-side AI panel uses the same Agent. You can start with the current chat and find other chats as needed.
+- **Retrieval and analysis**: Find messages by person, conversation, date, and keyword; read long chats in pages and check surrounding context. Supported tasks include cross-chat search, event timelines, progress tracking, to-do lists, and relationship-clue analysis. When local semantic search is enabled, keyword and semantic retrieval can be combined.
+- **Task planning and subtasks**: Complex questions can use independent scope analysis, topic retrieval, or fact-checking subtasks as needed, while the main Agent continues its analysis and combines the results. The interface displays actual tool calls, subtask states, and progress, and explains coverage gaps when materials have not yet been fully read or are unavailable.
+- **Image and attachment understanding**: The Agent can process local images in chats and attachments such as TXT, Markdown, CSV, PDF, DOCX, XLSX, and PPTX. Images, scanned PDFs, and document illustrations require image understanding support from the selected model. Missing, oversized, or unsupported content is reported as a processing gap.
+- **Original evidence and statistics**: Answers can include citations to original chat messages. Click to preview the original text and surrounding context, then navigate to the corresponding chat. Message counts, date distributions, and speaker rankings are calculated by the program; confirmed values can be passed to a calculation tool. Model summaries and relationship inferences still need to be checked against the original messages.
+- **Follow-up questions and task control**: Conversation history is retained, with search, switching, renaming, and deletion. You can add instructions or stop processing while a task is running. The user can resume the latest unfinished task, reusing its existing state and materials.
 
-例如可以提问：“把上周项目群里确定的计划和待办整理出来，并附上原文依据”；“在选定的几个聊天里查找这次出行的时间、地点和改期原因”；“梳理最近一个月与某位联系人的互动变化，区分事实和推测”。
+For example: “Organize the plans and to-dos agreed on in last week’s project group chat, with citations to the original messages”; “Find the time, location, and reason for rescheduling this trip in the selected chats”; or “Trace changes in interactions with a contact over the past month, distinguishing facts from inferences.”
 
-### 聊天内 AI 工具
+### In-chat AI tools
 
-聊天页右侧 AI 面板的 **“工具与任务”** 菜单提供消息总结、自动总结任务、关注提醒和历史。定时任务在应用运行期间执行，托盘运行仍可工作。
+The **“Tools and tasks”** menu in the chat page’s right-side AI panel provides message summaries, automatic summary tasks, follow-up alerts, and history. Scheduled tasks run while the application is running, including when it is running in the system tray.
 
-### 本地 Laya 画像与自动识别
+### Local Laya profiling and automatic recognition
 
-在聊天工具栏打开 **“聊天画像”**，进入分析设置，选择时间范围、对象和分析方式，再开始分析。默认使用本地 Laya；约 681 MB 的模型可下载或离线导入，准备完成后在 CPU 上本地运行。需要更详细的文字分析时，明确选择 API 方式。
+Open **“Chat profile”** in the chat toolbar, enter the analysis settings, select the time range, subject, and analysis method, then start the analysis. Local Laya is the default. Its approximately 681 MB model can be downloaded or imported offline and runs locally on the CPU once ready. Explicitly select the API method when you need more detailed written analysis.
 
-私聊画像只分析对方消息；群聊可选择群整体或具体成员，成员画像只读取该成员的消息。Laya 属于分类和统计模型，情绪、意图、亲近倾向及 MBTI 都是实验性聊天推测，应结合原文核对。
+Private-chat profiles analyze only the other person’s messages. For group chats, you can select the whole group or a specific member; a member profile reads only that member’s messages. Laya is a classification and statistics model. Emotion, intent, closeness tendencies, and MBTI are experimental inferences from chats and should be checked against the original messages.
 
-聊天页 **“意图识别”** 是独立开关，默认关闭。主动开启后才分析已加载、翻页及新出现的文本，本人消息不进入自动识别及其上下文。已有标签可复用；选择 API 方式会发送相关材料并可能产生费用。
+**“Intent recognition”** on the chat page is a separate toggle, disabled by default. Only after explicit opt-in does it analyze loaded, paginated, and newly appearing text. Your own messages are excluded from automatic recognition and its context. Existing labels can be reused; selecting the API method sends relevant materials and may incur costs.
 
-### 本地语义检索
+### Local semantic search
 
-在 **“设置 → AI 服务 → 本地检索”** 下载并选择检索模型，再点击 **“开启并开始整理”**。功能默认关闭；启用后在后台逐步整理当前账号全部聊天，暂停或重启保留进度。提问中的聊天与日期条件限制本次查询，不改变已启用的全账号索引范围。
+Under **“Settings → AI services → Local retrieval”**, download and select a retrieval model, then click **“Enable and start indexing”**. The feature is disabled by default. Once enabled, it gradually indexes all chats in the current account in the background; pausing or restarting retains progress. Chat and date conditions in a question restrict that query, without changing the enabled account-wide index scope.
 
-索引和向量推理在本机运行，CPU 即可使用，NVIDIA 加速可选。关闭功能保留模型与索引，清理索引不会删除聊天记录。检索范围受已整理资料和账号权限约束；**本地检索不改变 AI 助手生成回答所使用的模型服务**。
+Indexing and vector inference run locally. A CPU is sufficient, with optional NVIDIA acceleration. Disabling the feature retains the model and index; clearing the index does not delete chat records. Retrieval is limited by indexed materials and account permissions. **Local retrieval does not change the model service that the AI assistant uses to generate answers**.
 
-### 本地语音转文字
+### Local speech-to-text
 
-在 **“设置 → 语音转文字”** 下载并选择模型，再对单条语音转文字，或从聊天工具栏进入批量转写。
+Download and select a model under **“Settings → Speech-to-text”**, then transcribe an individual voice message or open batch transcription from the chat toolbar.
 
-| 模型 | 下载体积约 | 设备与特点 |
+| Model | Approximate download size | Hardware and characteristics |
 | --- | ---: | --- |
-| Zipformer CTC | 29 MB | 默认 CPU 模型，适合低配和中英文短语音，输出不含标点 |
-| Qwen3-ASR 0.6B · CPU | 2.03 GB | CPU，中文转写质量优先；界面建议 16 GB 内存 |
-| Qwen3-ASR 0.6B · GPU | 1.58 GB | NVIDIA GPU，需额外 Qwen GPU 运行组件 |
-| Turbo | 1.6 GB | 支持 CPU／NVIDIA GPU，速度优先 |
+| Zipformer CTC | 29 MB | Default CPU model; suitable for lower-spec devices and short Chinese/English voice messages; output has no punctuation |
+| Qwen3-ASR 0.6B · CPU | 2.03 GB | CPU; prioritizes Chinese transcription quality; the interface recommends 16 GB of memory |
+| Qwen3-ASR 0.6B · GPU | 1.58 GB | NVIDIA GPU; requires additional Qwen GPU runtime components |
+| Turbo | 1.6 GB | Supports CPU/NVIDIA GPU; prioritizes speed |
 
-语音在本机处理。批量转写保留已有文字，区分微信原生转写和本项目生成的结果。删除本项目转写结果会保留原语音、微信原生转写及模型。Qwen GPU 不会自动换成另一个 CPU 模型；模型与设备可用性以设置页检测结果为准。
+Voice messages are processed locally. Batch transcription preserves existing text and distinguishes native WeChat transcriptions from results generated by this project. Deleting this project’s transcription results retains the original voice messages, native WeChat transcriptions, and models. Qwen GPU does not automatically switch to another CPU model; refer to the Settings page’s detection results for model and device availability.
 
-## MCP 接入
+## MCP integration
 
-打开 **“设置 → MCP 接入”**，复制当前地址、Token、接入提示词或 Skill，配置支持 HTTP MCP 的客户端。常见本机地址为 `http://127.0.0.1:10392/mcp`，请求使用 `Authorization: Bearer <Token>`，实际地址以设置页为准。
+Open **“Settings → MCP integration”**, copy the current address, Token, integration prompt, or Skill, and configure a client that supports HTTP MCP. A common local address is `http://127.0.0.1:10392/mcp`; requests use `Authorization: Bearer <Token>`. Use the actual address shown in Settings.
 
-只有其他设备需要连接时才开启 **“允许局域网接入 MCP”**，并使用界面提供的局域网地址。Token 可以重置，请勿把真实 Token 放入公开配置或反馈材料。
+Enable **“Allow LAN access to MCP”** only when another device needs to connect, and use the LAN address provided in the interface. The Token can be reset. Do not include a real Token in public configurations or issue reports.
 
-MCP 工具提供只读查询，不提供微信发送。媒体链接代表资源入口，不代表外部模型已读取内容；外部客户端如何处理返回的聊天材料，应以该客户端及模型服务的配置为准。仓库附带 [MCP Copilot Skill](skills/wechat-mcp-copilot/SKILL.md)。
+MCP tools provide read-only queries and do not offer WeChat sending. Media links are resource entry points; they do not mean that an external model has read the content. How external clients handle returned chat materials depends on those clients’ and model services’ configurations. The repository includes a [MCP Copilot Skill](skills/wechat-mcp-copilot/SKILL.md).
 
-## 源码运行
+## Run from source
 
-### 环境与启动
+### Environment and startup
 
-使用 **Windows 10／11 x64、Python 3.11+、uv、Node.js 22.12+**；仓库的 Python 开发版本固定为 3.11。先克隆仓库，随后在项目根目录安装依赖并启动：
+Use **Windows 10/11 x64, Python 3.11+, uv, and Node.js 22.12+**. The repository pins the Python development version to 3.11. Clone the repository, then install dependencies and start the application from the project root:
 
 ```powershell
 git clone https://github.com/gongyuanshen/xwechat.git
@@ -179,71 +183,71 @@ npm --prefix desktop ci
 npm --prefix desktop run dev
 ```
 
-`dev` 同时启动 Nuxt 开发服务、Electron 和 Python 后端。默认从前端 3000、后端 10392 开始寻找可用端口，实际地址见终端输出。
+`dev` starts the Nuxt development server, Electron, and the Python backend together. By default, it searches for available ports starting at 3000 for the frontend and 10392 for the backend. See the terminal output for the actual addresses.
 
-需要 Qwen GPU 语音运行组件时使用：
+To include Qwen GPU speech runtime components, use:
 
 ```powershell
 uv sync --locked --extra voice-transcription --extra voice-transcription-gpu
 npm --prefix desktop run dev:gpu
 ```
 
-`dev:gpu` 指语音运行依赖，不是三维界面的图形加速开关。独立启动后端可执行 `uv run --extra voice-transcription main.py`，默认接口文档位于 `http://127.0.0.1:10392/docs`。单独启动 Python 默认使用当前工作目录下的 `output`，可通过环境变量指定数据路径；媒体处理还需可用的 FFmpeg 和 Node.js，完整桌面启动会配置这些运行路径。
+`dev:gpu` refers to speech runtime dependencies; it is not a graphics acceleration toggle for the three-dimensional interface. To start the backend separately, run `uv run --extra voice-transcription main.py`; the default API documentation is at `http://127.0.0.1:10392/docs`. Standalone Python uses `output` under the current working directory by default; environment variables can specify the data paths. Media processing also requires available FFmpeg and Node.js installations. Full desktop startup configures these runtime paths.
 
-### 项目结构
+### Project structure
 
 ```text
 xwechat/
-├── frontend/                 # Nuxt 4 / Vue 3 界面
-├── desktop/                  # Electron 主进程、桌面桥与打包脚本
-├── src/wechat_decrypt_tool/   # FastAPI、数据处理、AI、媒体与年度统计
-├── docs/                     # 专题说明及分阶段验收记录
-├── skills/                   # MCP 客户端配套 Skill
-├── tools/                    # 开发与验证工具
-├── main.py                   # 源码后端启动入口
-├── pyproject.toml            # Python 依赖与版本
-└── uv.lock                   # Python 依赖锁文件
+├── frontend/                 # Nuxt 4 / Vue 3 interface
+├── desktop/                  # Electron main process, desktop bridge, and packaging scripts
+├── src/wechat_decrypt_tool/   # FastAPI, data processing, AI, media, and annual statistics
+├── docs/                     # Topic guides and staged acceptance records
+├── skills/                   # Companion Skills for MCP clients
+├── tools/                    # Development and verification tools
+├── main.py                   # Source backend entry point
+├── pyproject.toml            # Python dependencies and version
+└── uv.lock                   # Python dependency lockfile
 ```
 
-### 常用验证命令
+### Common verification commands
 
-根目录 `tests/` 是本地私有 Python 回归测试，不随公开源码提供；公开用户构建和运行应用无需该目录。`frontend/tests/` 和 `desktop/tests/` 继续随公开源码提供。
+The root `tests/` directory contains local private Python regression tests and is not included in the public source. Public users do not need it to build or run the application. `frontend/tests/` and `desktop/tests/` remain included in the public source.
 
-公开源码可执行以下检查：
+The following checks can run from the public source:
 
 ```powershell
-# AI 运行时合成检查，不调用真实模型
+# Synthetic AI runtime checks; no real model calls
 uv run --locked python tools/verify_ai_runtime.py
 
-# 前端和桌面自动化测试
+# Frontend and desktop automated tests
 npm --prefix frontend test
 node --test (Get-ChildItem -LiteralPath .\desktop\tests -Filter *.test.cjs).FullName
 
-# 桌面使用的前端静态生成
+# Static frontend generation used by the desktop application
 npm --prefix frontend run generate
 ```
 
-仅在持有本地根目录 `tests/` 时运行 Python 回归：
+Run Python regression tests only if you have the local root `tests/` directory:
 
 ```powershell
 uv run --locked --group dev --extra voice-transcription python -m pytest tests
 ```
 
-`tools/run_ai_acceptance.py` 和 `tools/verify_planned_work_cost.py` 依赖本地根目录 `tests/`，不能在仅含公开源码的检出目录中完成验收。专题文档中的根目录 Python 测试引用及历史通过记录描述本地回归，不表示公开仓库包含这些测试。
+`tools/run_ai_acceptance.py` and `tools/verify_planned_work_cost.py` depend on the local root `tests/` directory and cannot complete acceptance checks in a checkout containing only the public source. References to root Python tests and historical passing results in topic guides describe local regression checks; they do not mean that those tests are included in the public repository.
 
-按改动范围运行相关检查。自动化测试、真实模型推理、真实微信操作和安装包验收分别验证不同层面，不能互相代替。
+Run the relevant checks for the scope of your changes. Automated tests, real model inference, real WeChat operations, and packaged application acceptance verify different layers and cannot substitute for one another.
 
-## Windows 打包
+## Windows packaging
 
-完成上述依赖准备后，当前 Windows x64 基础包使用：
+After preparing the dependencies above, build the current Windows x64 base package with:
 
 ```powershell
 npm --prefix desktop run dist
 ```
 
-该命令依次生成图标、生成并复制前端静态资源、构建 Python 后端，再打包 NSIS 安装器与 ZIP。基础包包含 CPU 语音运行组件，不包含 Qwen GPU 所需的 PyTorch／Transformers；模型权重不随包分发。
+This command generates icons, generates and copies static frontend resources, builds the Python backend, and then packages an NSIS installer and ZIP. The base package includes CPU speech runtime components, but not the PyTorch/Transformers components required by Qwen GPU. Model weights are not distributed with the package.
 
-需要包含 Qwen GPU 运行组件时，按顺序执行：
+To include Qwen GPU runtime components, run these commands in order:
 
 ```powershell
 npm --prefix desktop run build:icon
@@ -252,88 +256,90 @@ npm --prefix desktop run build:backend:gpu
 npm --prefix desktop run dist:fast
 ```
 
-`dist:fast` 只包装已有资源，不重新构建前端或后端；首次打包或源码变化后应完成相应构建。产物位于：
+`dist:fast` only packages existing resources; it does not rebuild the frontend or backend. Complete the corresponding builds before first-time packaging or after source changes. Outputs are located at:
 
 ```text
 desktop/dist/
-├── xwechat-<版本>-Setup.exe
-├── xwechat-<版本>-Setup.zip
+├── xwechat-<version>-Setup.exe
+├── xwechat-<version>-Setup.zip
 └── win-unpacked/
 ```
 
-CPU 与 GPU 构建使用同一输出目录和文件名，应分别保存产物后再构建另一种版本。版本取自 `desktop/package.json`，发布前需与 `pyproject.toml` 同步。当前脚本关闭代码签名并使用 `--publish never`，**打包命令不会自动发布到 GitHub**。
+CPU and GPU builds use the same output directory and filenames. Save each set of outputs separately before building the other variant. The version comes from `desktop/package.json` and must be synchronized with `pyproject.toml` before release. The current scripts disable code signing and use `--publish never`. **Packaging commands do not automatically publish to GitHub**.
 
-构建中的后端冒烟检查只验证 API 导入和进程启动信息。WXGF 已接入冻结后端的独立解码 worker，并通过真实冻结程序的静态 JPEG、透明 PNG 和多帧 GIF 验证。实际安装、真实账号数据、模型推理及微信交互仍需分别验收，不能由打包成功推断全部通过。
+Backend smoke checks during a build verify only API imports and process startup information. WXGF uses a separate decoding worker in the frozen backend and has been verified with static JPEG, transparent PNG, and multi-frame GIF outputs from the actual frozen executable. Installation, real account data, model inference, and WeChat interaction still require separate acceptance checks; successful packaging does not establish that all of them pass.
 
-## 数据目录与升级
+## Data directories and upgrades
 
-| 运行方式 | 默认数据位置 |
+| Run mode | Default data location |
 | --- | --- |
-| 全新 Windows 安装版 | `%APPDATA%\xwechat`，默认输出在其 `output` 子目录 |
-| 源码 Electron 开发版 | `%APPDATA%\wechat-data-analysis-desktop`，默认输出在其 `output` 子目录 |
-| 单独运行 Python 后端 | 当前工作目录下的 `output` |
+| Fresh Windows installation | `%APPDATA%\xwechat`, with default output in its `output` subdirectory |
+| Source Electron development build | `%APPDATA%\wechat-data-analysis-desktop`, with default output in its `output` subdirectory |
+| Standalone Python backend | `output` under the current working directory |
 
-安装版已有 `xwechat` 持久状态时优先沿用它；只有旧目录有持久状态时沿用 `%APPDATA%\wechat-data-analysis-desktop`。两边均有数据时不会自动合并。也可以通过桌面设置指定输出目录；已有 `WECHAT_TOOL_DATA_DIR`／`WECHAT_TOOL_OUTPUT_DIR` 配置仍会生效。详见 [桌面品牌与持久数据目录](docs/desktop-brand-profile.md)。
+If the installed application already has persistent state in `xwechat`, it reuses that location first. If only the old directory has persistent state, it reuses `%APPDATA%\wechat-data-analysis-desktop`. Data in both locations is not merged automatically. You can also specify an output directory in desktop settings; existing `WECHAT_TOOL_DATA_DIR`/`WECHAT_TOOL_OUTPUT_DIR` configurations remain effective. See [Desktop branding and persistent data directories (Chinese)](docs/desktop-brand-profile.md).
 
-升级前从托盘完整退出旧程序，再安装或完整解压新版。**保留现有用户数据目录和设置中指定的输出目录，不要因应用更名而重命名、移动或删除数据库、密钥和快照目录，也不需要重新解密已有账号。**
+Before upgrading, fully exit the old application from the system tray, then install or fully extract the new version. **Keep existing user data directories and the output directory specified in Settings. Do not rename, move, or delete database, key, or snapshot directories because the application has been renamed. Existing accounts do not need to be decrypted again.**
 
-账号归档适合备份数据库与资源，不包含数据库密钥、来源路径、快照指针和全部应用设置。密钥、AI 服务配置及模型需要另行妥善保管。快照历史会占用磁盘，当前不设固定累计容量上限，构建前检查实际可用空间。
+Account archives are intended to back up databases and resources. They do not contain database keys, source paths, snapshot pointers, or all application settings. Keep keys, AI service configurations, and models separately and securely. Snapshot history consumes disk space; there is currently no fixed cumulative size limit, and actual available space is checked before building a snapshot.
 
-## 已知限制
+## Known limitations
 
-- **微信版本**：功能面向 Windows 微信 4.x，已有真实数据验收记录包含 4.1.15.13；这不等于所有 4.x 版本都兼容。密钥扫描、数据库格式、媒体和窗口自动化均可能受版本变化影响。
-- **同步与实时性**：聊天默认读取已解密验证快照，旧实时 WCDB 路径已移除。周期同步有延迟，也不构成跨库全局事务或即时消息通知。
-- **WXGF 与平台**：Windows x64 源码及桌面冻结后端均使用随项目提供的 `VoipEngine.dll`，在独立子进程中解码 WXGF；透明图片和完整动画已用受控样本验证。未知格式、损坏内容、原生崩溃与超时明确报错，不代表任意微信媒体或其他平台都已兼容。
-- **媒体与三维界面**：图片密钥、原始附件、FFmpeg 和图形环境影响可用性。视频无法显示时可按提示手动生成本地预览；年度三维体验依赖可用的 WebGL 环境，统计明细与离线分享是独立能力。
-- **微信发送**：需要运行、登录、解锁且可访问的微信窗口，会短暂激活微信。发送回执不代表对方已收到或已读；结果待确认时先核对微信，不连续点击重发。
-- **记录页面范围**：小程序页展示资料，不运行小程序；视频号页主要展示本地直播缓存；收付款页展示记录，不执行交易；撤回候选缓存不等于真实撤回通知。
-- **AI 结果与覆盖**：模型会误判，引用和统计应回查原文。附件缺失、索引范围不足、任务未完成及未知用量需分别看待，不能当作完整分析。
-- **平台与发布状态**：当前说明与打包入口面向 Windows x64。仓库中的其他平台实验或历史验收记录不代表本版提供相同的安装包及微信功能；旧 Release 和本地旧产物也不会随源码改动自动更新。
+- **WeChat versions**: Features target Windows WeChat 4.x. Existing acceptance records with real data include version 4.1.15.13; this does not establish compatibility with every 4.x version. Key scanning, database formats, media, and window automation may all be affected by version changes.
+- **Synchronization and timeliness**: Chats read decrypted, verified snapshots by default. The former real-time WCDB path has been removed. Periodic synchronization has a delay and does not provide a global cross-database transaction or instant message notifications.
+- **WXGF and platforms**: Both Windows x64 source runs and the frozen desktop backend use the bundled `VoipEngine.dll` to decode WXGF in a separate subprocess. Transparent images and complete animations have been verified with controlled samples. Unknown formats, corrupt content, native crashes, and timeouts produce explicit errors. This does not establish compatibility with arbitrary WeChat media or other platforms.
+- **Media and the three-dimensional interface**: Availability depends on image keys, original attachments, FFmpeg, and the graphics environment. When a video cannot be displayed, you can manually generate a local preview as prompted. The three-dimensional annual experience requires an available WebGL environment; detailed statistics and offline sharing are separate capabilities.
+- **WeChat sending**: WeChat must be running, logged in, unlocked, and have an accessible window. Sending briefly activates WeChat. A send receipt does not mean that the recipient has received or read the message. If the result awaits confirmation, check WeChat first and do not repeatedly click to resend.
+- **Record page scope**: The mini program page displays information and does not run mini programs. The Channels page primarily shows local live-stream caches. The payments page displays records and does not execute transactions. Cached revocation candidates are not actual revocation notifications.
+- **AI results and coverage**: Models can misclassify; citations and statistics should be checked against original messages. Missing attachments, insufficient index coverage, unfinished tasks, and unknown usage are separate issues and must not be treated as complete analysis.
+- **Platforms and release status**: These instructions and packaging entry points target Windows x64. Experiments for other platforms and historical acceptance records in the repository do not mean this version offers the same packages and WeChat features. Older Releases and local build outputs do not update automatically when the source changes.
 
-## 文档导航
+## Documentation
 
-| 文档 | 内容 |
+The following topic guides are in Chinese.
+
+| Guide | Contents |
 | --- | --- |
-| [源码开发说明](docs/development-windows.md) | Windows 环境、数据链路、快照同步、导入导出及阶段验收 |
-| [聊天 Agent](docs/chat-agent.md) | 独立智能体、聊天范围、工具调用、子任务、原文引用与任务恢复 |
-| [聊天 AI](docs/chat-ai.md) | 总结、自动任务、关注提醒与桌面通知 |
-| [聊天画像与消息标签](docs/chat-insights.md) | Laya／API、对象边界、标签复用和质量限制 |
-| [本地语义检索](docs/local-semantic-search.md) | 模型、索引、设备、下载与离线导入 |
-| [AI 诊断](docs/ai-diagnostics.md) | 模型调用与故障定位 |
-| [微信文本发送](docs/wechat-qt-send.md)／[附件发送](docs/wechat-file-send.md) | 窗口适配、发送确认及附件队列 |
-| [年度画幅与导出](docs/wrapped-frames.md) | 桌面场景截图与画幅处理 |
+| [Source development](docs/development-windows.md) | Windows environment, data flow, snapshot synchronization, import/export, and staged acceptance |
+| [Chat Agent](docs/chat-agent.md) | Standalone Agent, chat scope, tool calls, subtasks, original-message citations, and task recovery |
+| [Chat AI](docs/chat-ai.md) | Summaries, automatic tasks, follow-up alerts, and desktop notifications |
+| [Chat profiles and message labels](docs/chat-insights.md) | Laya/API, subject boundaries, label reuse, and quality limitations |
+| [Local semantic search](docs/local-semantic-search.md) | Models, indexes, devices, downloads, and offline import |
+| [AI diagnostics](docs/ai-diagnostics.md) | Model calls and troubleshooting |
+| [WeChat text sending](docs/wechat-qt-send.md) / [Attachment sending](docs/wechat-file-send.md) | Window adaptation, send confirmation, and attachment queues |
+| [Annual frames and export](docs/wrapped-frames.md) | Desktop scene screenshots and frame processing |
 
-专题文档包含不同阶段的实现和验收记录；阅读时请区分记录日期、源码验证与对应安装包的实际能力。
+Topic guides contain implementation and acceptance records from different stages. Distinguish the record date, source verification, and the actual capabilities of the corresponding packaged application when reading them.
 
-## 问题反馈
+## Report an issue
 
-通过 [GitHub Issues](https://github.com/gongyuanshen/xwechat/issues) 提交可复现的问题，附应用版本（源码运行时附提交 Hash）、Windows 与微信版本、操作步骤、准确发生时间和完整错误。
+Submit reproducible problems through [GitHub Issues](https://github.com/gongyuanshen/xwechat/issues), including the application version or commit hash for source runs, Windows and WeChat versions, reproduction steps, the exact time of occurrence, and the complete error.
 
-桌面版可在 **“设置 → 桌面行为 → 日志文件 → 打开日志”** 定位实际日志。请提供问题发生前后至少一分钟的相关完整日志，上传前删除密钥、Token、聊天正文和其他敏感信息；不要上传微信数据库。截图和导出样例也应先脱敏。
+In the desktop application, locate the actual log through **“Settings → Desktop behavior → Log file → Open log”**. Provide complete relevant logs covering at least one minute before and after the problem. Remove keys, Tokens, chat text, and other sensitive information before uploading; do not upload WeChat databases. Redact screenshots and sample exports as well.
 
-提交代码时仅包含本次相关源码、公开的前端／桌面测试、依赖锁文件和必要公开资源。根目录 `tests/`、数据库、账号密钥、个人配置、模型权重、日志、缓存、验收材料和生成的安装产物应留在本地；`.gitignore` 不会自动移除已被跟踪的文件，提交前仍需检查暂存区。
+Code submissions should include only source relevant to the change, public frontend/desktop tests, dependency lockfiles, and necessary public resources. Keep the root `tests/` directory, databases, account keys, personal configurations, model weights, logs, caches, acceptance materials, and generated installation outputs local. `.gitignore` does not automatically remove files already tracked by Git; inspect the staging area before committing.
 
-## 免责声明与严禁商用
+## Disclaimer and strict prohibition on commercial use
 
-在使用本项目前，请仔细阅读并充分理解本声明：
+Before using this project, carefully read and fully understand this statement:
 
-1. **项目性质**：本项目为个人业余兴趣、娱乐探索与学术技术研究之产物，**非官方产品**，与WeChat主公司及其关联主体不存在任何隶属、合作、授权或认可关系。
-2. **严禁商业化与经济盈利**：
-   - 本项目完全开源免费，**从未授权任何机构、团队或个人进行付费售卖、付费代理、收取进群门槛费或提供商业化定制服务**。
-   - 严禁任何人将本项目全部或部分代码用于商业牟利或经济变现。
-3. **风险自负**：本项目按“现状”（As-Is）提供，不对软件的持续可用性、稳定性或微信版本兼容性作任何明示或暗示的担保。因环境变更、协议变动或个人不当使用导致的数据丢失、账号异常或其他损失，由使用者自行承担。
+1. **Nature of the project**: This project is the product of personal hobbies, recreational exploration, and academic/technical research. It is **not an official product** and has no affiliation, partnership, authorization, or endorsement from WeChat’s parent company or its related entities.
+2. **Commercialization and financial profit are strictly prohibited**:
+   - This project is completely open source and free. **No organization, team, or individual has ever been authorized to sell it, offer paid agency services, charge group-entry fees, or provide commercial customization services**.
+   - Use of all or any part of this project’s code for commercial profit or monetization is strictly prohibited.
+3. **Use at your own risk**: This project is provided “As-Is,” without any express or implied warranties of continued availability, stability, or compatibility with WeChat versions. Users bear responsibility for data loss, account issues, or other losses caused by environment changes, protocol changes, or improper use.
 
 ---
 
-## 致谢与技术来源
+## Acknowledgments and technical sources
 
-本项目离不开开源社区的先驱工作，在此特别感谢以下基石项目与技术分享者：
+This project relies on the pioneering work of the open-source community. Special thanks to the following foundational projects and technical contributors:
 
-- **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**：本项目二次开发的基础，提供微信 4.x 数据处理与年度分析的原有实现和展示资源。
-- **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**：聊天画像、情绪、意图及 MBTI 聊天推测等功能的参考来源；当前项目自行实现分析服务、提示词和界面，并集成本地 Laya 流程。
-- **[mizchi/laya-mlx](https://github.com/mizchi/laya-mlx)**：本地 Laya ONNX 输入构造与校准逻辑的来源之一；相关来源和许可保留在 [本地许可目录](src/wechat_decrypt_tool/resources/licenses)。
-- **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**：本地聊天导出、媒体处理和年度报告等实现的参考。
-- **[vuepont/ai-elements-vue](https://github.com/vuepont/ai-elements-vue)**：AI 对话界面的按需源码组件，来源、固定提交与许可见 [组件说明](frontend/components/ai-elements/README.md)。
-- **[hicccc77/Relink](https://github.com/hicccc77/Relink)**：一个面向深度关系分析的 Agent 实现
+- **[LifeArchiveProject/WeChatDataAnalysis](https://github.com/LifeArchiveProject/WeChatDataAnalysis)**: The upstream basis for this project’s further development, providing the original WeChat 4.x data processing and annual analysis implementations and presentation assets.
+- **[tswawa/WechatVibe](https://github.com/tswawa/WechatVibe)**: A reference for chat profiling, emotion, intent, and tentative MBTI inference from chats. This project implements its own analysis services, prompts, and interface, and integrates the local Laya workflow.
+- **[mizchi/laya-mlx](https://github.com/mizchi/laya-mlx)**: One source for local Laya ONNX input construction and calibration logic. Relevant sources and licenses are retained in the [local license directory](src/wechat_decrypt_tool/resources/licenses).
+- **[hicccc77/WeFlow](https://github.com/hicccc77/WeFlow)**: A reference for local chat export, media processing, annual reports, and related implementations.
+- **[vuepont/ai-elements-vue](https://github.com/vuepont/ai-elements-vue)**: Source components included as needed for the AI conversation interface. See the [component notes](frontend/components/ai-elements/README.md) for the source, pinned commit, and license.
+- **[hicccc77/Relink](https://github.com/hicccc77/Relink)**: An Agent implementation for in-depth relationship analysis.
 
-技术栈采用 Nuxt 4、Vue 3、Tailwind CSS 4、Three.js、Electron、FastAPI、SQLite 和 DeepAgents 等。第三方代码、资源、模型及运行组件各自的许可和来源声明应予保留，不因本项目的使用声明而改变。
+The technology stack includes Nuxt 4, Vue 3, Tailwind CSS 4, Three.js, Electron, FastAPI, SQLite, and DeepAgents. Licenses and source notices for third-party code, resources, models, and runtime components must be preserved and are not changed by this project’s usage statement.
