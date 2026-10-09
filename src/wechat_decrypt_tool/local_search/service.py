@@ -16,7 +16,7 @@ from ..account_workers import account_to_thread
 from ..snapshot_registry import account_work, create_account_task, SnapshotRegistryError
 from .catalog import model_dir, model_spec
 from .downloads import ModelDownloads
-from .index import SemanticIndex, make_chunks, fuse
+from .index import SemanticIndex, LiteralIndexNotReady, make_chunks, fuse
 from .inference import LocalInference, InferenceFailure
 from .progressive import ProgressiveIndex, reading_segments, committed_coverage, coverage_complete
 from .totals import MessageTotals
@@ -30,6 +30,12 @@ DEFAULTS = {'enabled': False, 'model': None, 'usernames': [], 'days': 90,
 EVENT_OMITTED_FIELDS = frozenset({'config', 'coverage', 'segments', 'read_starts'})
 
 
+class RetrievalFailure(RuntimeError):
+    def __init__(self, message, code, status_code=503, coverage=None):
+        super().__init__(message)
+        self.code, self.status_code, self.coverage = code, status_code, coverage
+
+
 class LocalSearch(ProgressiveIndex, MessageTotals):
     def __init__(self, root=None, model_root=None, reader=None, engine=None):
         self.root = Path(root or get_output_dir() / 'local_search')
@@ -40,6 +46,7 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         self.gpu = GPUComponent(self.downloads.root.parent / 'local_search_gpu', self.store, self.engine)
         self.reader = reader
         self.jobs, self.cancelled, self.revoked, self.queries = {}, set(), set(), {}
+        self.fts_jobs, self.fts_cancelled = {}, set()
         self.restarting=set()
         self.foreground_queries = 0
         self.queue_lock = asyncio.Lock()
@@ -65,7 +72,57 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
             result['index_bytes'] = index.path.stat().st_size
             active = cfg.get('active') or {}
             result['index_stats'] = index.stats(active['generation']) if active.get('generation') else {'messages': 0, 'chunks': 0}
+            result['literal_index'] = {**index.fts_status(active.get('generation')),
+                                       'migration': self.store.get('fts_migration', account)}
         return result
+
+    def start_fts_migration(self, account, resume=False):
+        """排队即持有账号租约；旧向量完全复用，错误只由显式恢复重新尝试。"""
+        cfg = self.config(account)
+        if not cfg['enabled'] or account in self.revoked:
+            return None
+        task = self.fts_jobs.get(account)
+        if task and not task.done():
+            return task
+        state = self.store.get('fts_migration', account) or {}
+        if not resume and state.get('status') in {'paused', 'error'}:
+            return None
+        self.fts_cancelled.discard(account)
+        task = create_account_task(get_output_databases_dir() / account, self.migrate_fts, account)
+        self.fts_jobs[account] = task
+        return task
+
+    async def migrate_fts(self, account):
+        account_dir = get_output_databases_dir() / account
+        state = {'account': account, 'status': 'running', 'processed': 0}
+        def check():
+            if account in self.fts_cancelled or account in self.revoked:
+                raise InferenceFailure('字面索引升级已暂停', 'cancelled')
+        def save(**changes):
+            state.update(changes, updated=time.time())
+            if account not in self.revoked:
+                self.store.put('fts_migration', state, id=account, account=account)
+        try:
+            check()
+            index = await account_to_thread(account_dir, self.index, account)
+            coverage = await account_to_thread(account_dir, index.fts_status)
+            save(coverage=coverage)
+            while not coverage['complete']:
+                check()
+                await self.yield_to_queries(check)
+                generation = (self.config(account).get('active') or {}).get('generation')
+                batch = await account_to_thread(account_dir, index.backfill_fts, generation, 500, check)
+                coverage = {key: batch[key] for key in ('complete', 'pending', 'generation')}
+                save(processed=state['processed'] + batch['processed'], coverage=coverage)
+                await asyncio.sleep(0)
+            save(status='complete')
+        except InferenceFailure as error:
+            save(status='paused' if error.category == 'cancelled' else 'error', error=str(error))
+            if error.category != 'cancelled':
+                failures.report('search.fts.migration.' + account, error)
+        except Exception as error:
+            save(status='error', error='字面索引升级失败，请恢复索引任务或重建索引', error_type=type(error).__name__)
+            failures.report('search.fts.migration.' + account, error)
 
     @observed('search.configure', id_field='task_id')
     async def configure(self, account, values):
@@ -89,6 +146,7 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         cfg['revision'] = old.get('revision', 0) + 1
         self.store.put('config', cfg, id=account, account=account)
         # 范围或设备变更后，旧任务不得继续提交过期配置。
+        migration = self.store.get('fts_migration', account) or {}
         await self.pause_account(account)
         await account_to_thread(account_dir, self.clear_message_plans, account)
         if cfg.get('active'):
@@ -104,6 +162,10 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                     'start': cfg['active']['start'], 'end': cfg['active']['end']})
             self.store.put('config', cfg, id=account, account=account)
         self.queries.clear()
+        # configure 也由后台范围更新调用，只恢复本次配置临时暂停的迁移。
+        stopped_migration = self.store.get('fts_migration', account) or {}
+        self.start_fts_migration(account, resume=migration.get('status') not in {'paused', 'error'}
+                                 and stopped_migration.get('status') != 'error')
         return cfg
 
     def update(self, job, **changes):
@@ -158,7 +220,10 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         if not self.downloads.available(cfg['model']): raise ValueError('检索模型尚未下载完成')
         for id, task in self.jobs.items():
             job = self.store.get('index_job', id)
-            if not task.done() and job and job['account'] == account: return job
+            if not task.done() and job and job['account'] == account:
+                if rebuild:
+                    self.start_fts_migration(account, resume=True)
+                return job
         end = min(cfg['end'] or int(time.time()), int(time.time()))
         start = cfg['start'] if cfg['start'] is not None else max(0, end - cfg['days'] * 86400) if cfg['days'] else 0
         active = cfg.get('active') or {}
@@ -186,27 +251,35 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
             job['coverage'] = {}
         self.update(job)
         self.jobs[job['id']] = create_account_task(account_dir, self.run, job)
+        self.start_fts_migration(account, resume=rebuild)
         return job
 
     @observed('search.resume', id_field='task_id')
-    async def resume(self, account, id):
+    async def resume(self, account, id, *, resume_migration=True):
         account_dir = get_output_databases_dir() / account
         with account_work(account_dir):
             job = self.store.get('index_job', id)
             if not job or job['account'] != account: raise ValueError('任务不存在')
             if job['config']['revision'] != self.config(account).get('revision'):
                 raise ValueError('配置已改变，请按当前范围重新建立索引')
-            if id in self.jobs and not self.jobs[id].done(): return job
+            if id in self.jobs and not self.jobs[id].done():
+                self.start_fts_migration(account, resume=resume_migration)
+                return job
             saved = self.index(account).progress(id)
             if saved: job.update(saved)
             self.cancelled.discard(id)
             job.pop('finished', None)
             self.update(job, status='queued', error='')
             self.jobs[id] = create_account_task(account_dir, self.run, job)
+            self.start_fts_migration(account, resume=resume_migration)
             return job
 
     @observed('search.pause_account', id_field='task_id')
     async def pause_account(self, account):
+        self.fts_cancelled.add(account)
+        migration = self.fts_jobs.get(account)
+        if migration and not migration.done():
+            await asyncio.gather(migration, return_exceptions=True)
         for id, task in list(self.jobs.items()):
             job = self.store.get('index_job', id)
             if job and job['account'] == account and not task.done():
@@ -302,7 +375,7 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                     spec = model_spec(cfg['model'])
                     root = model_dir(self.downloads.root, cfg['model'])
                     tokenizer = Tokenizer.from_file(str(root / 'tokenizer.json'))
-                    index = self.index(account)
+                    index = await account_to_thread(account_dir, self.index, account)
                     self.update(job, status='running', read_count=job['processed'], embedded_count=job['embedded'])
                     plan = await self.count_message_total(job, check)
                     segments = job.get('segments')
@@ -429,36 +502,51 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                         'messages': job['processed'], 'chunks': job['embedded'], 'seconds': time.time()-job['started'], **self.engine.status},id=job['id'],account=account)
 
     @observed('search.hybrid', id_field='task_id')
-    async def hybrid(self, account, keyword, q, usernames, start=None, end=None, sender=None, kinds=None, offset=0, limit=50, ticket=None):
+    async def hybrid(self, account, keyword, q, usernames, start=None, end=None, sender=None, kinds=None, offset=0, limit=50, ticket=None, strict_paging=False, paging_context=None):
         account_dir = get_output_databases_dir() / account
         with account_work(account_dir):
             cfg = self.config(account)
             active = cfg.get('active') or {}
             allowed = set(cfg['usernames']) & set(active.get('usernames', [])) & set(usernames)
-            warning = ''
-            if not cfg['enabled'] or not active or not allowed:
-                diagnostic_event('search.keyword.fallback', reason_code='disabled' if not cfg['enabled'] else 'scope_not_indexed')
-                return {**keyword, 'retrievalMode': 'keyword', 'coverage': {'message': '本地语义索引尚未覆盖所选范围，当前展示关键词结果'}}
-            key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
-            reset_search=False
+            key = (account, cfg.get('revision'), cfg['enabled'], active.get('generation'), q,
+                   tuple(sorted(usernames)), tuple(sorted(allowed)), start, end, sender,
+                   tuple(sorted(kinds or [])), paging_context)
+            reset_search = False
+            if strict_paging and offset and not ticket:
+                raise RetrievalFailure('混合检索续页缺少搜索票据，请重新开始搜索；已取得证据仍保留', 'search_ticket_required', 409)
             if offset and not ticket:
                 ticket = next((k for k,v in reversed(list(self.queries.items())) if v['key']==key and v['expires']>time.time()),None)
             if ticket:
                 cached = self.queries.get(ticket)
-                key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
                 if cached and cached['key'] == key and cached['expires'] > time.time():
                     diagnostic_event('search.ticket.hit', ticket_id=ticket, offset=offset, cached=True)
-                    return {**cached['response'], 'hits': cached['hits'][offset:offset+limit], 'hasMore': offset+limit < len(cached['hits']), 'resetSearch':False}
-                reset_search=bool(offset)
+                    return {**cached['response'], 'hits': cached['hits'][offset:offset+limit],
+                            'offset': offset, 'limit': limit,
+                            'hasMore': offset+limit < len(cached['hits']), 'resetSearch':False}
+                if strict_paging:
+                    raise RetrievalFailure('搜索票据已失效、过期或检索条件已改变，请重新开始搜索；已取得证据仍保留', 'search_ticket_invalid', 409)
+                reset_search = bool(offset)
                 diagnostic_event('search.ticket.expired', offset=offset, cached=False)
-                offset=0
+                offset = 0
+            if not cfg['enabled'] or not active or not allowed:
+                if strict_paging:
+                    raise RetrievalFailure('所选范围的本地语义索引尚未就绪，请检查索引状态', 'semantic_index_not_ready', 409)
+                diagnostic_event('search.keyword.fallback', reason_code='disabled' if not cfg['enabled'] else 'scope_not_indexed')
+                return {**keyword, 'retrievalMode': 'keyword', 'coverage': {'message': '本地语义索引尚未覆盖所选范围，当前展示关键词结果'}}
+            if strict_paging:
+                jobs = self.store.list('index_job', account, limit=1)
+                job = jobs[0] if jobs and jobs[0]['config'].get('revision') == cfg.get('revision') else None
+                if job and job['status'] == 'error':
+                    raise RetrievalFailure('本地语义索引构建失败，请检查索引任务后重试', 'semantic_index_error')
+                if (job and job['status'] in {'queued', 'running'}) or active.get('partial'):
+                    raise RetrievalFailure('本地语义索引尚在构建或尚未完成，请完成索引后重试', 'semantic_index_building', 409)
             began = time.monotonic()
             snapshot_keyword, committed_keyword_hits = keyword, []
             self.foreground_queries += 1
             try:
                 scope_start = cfg['start'] if cfg['start'] is not None else max(0, int(time.time())-cfg['days']*86400) if cfg['days'] else 0
                 query_start, query_end = max(start or 0, scope_start), min(end if end is not None else 2**53, cfg['end'] if cfg['end'] is not None else 2**53)
-                index = self.index(account)
+                index = await account_to_thread(account_dir, self.index, account)
                 def as_hit(m):
                     return {**m.get('media', {}), 'id': m['anchor'], 'anchorId': m['anchor'], 'username': m['username'],
                             'conversationName': m.get('name', m['username']), 'senderDisplayName': m['sender'],
@@ -485,9 +573,9 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                             'partial': bool(active.get('partial')) or bool(set(usernames)-allowed) or len(rows) >= 200 or len(literal) >= 200,
                             'ranges': active.get('coverage', {}), 'source': active.get('source')}
                 ticket = uuid.uuid4().hex
-                response = {**keyword, 'retrievalMode': 'hybrid', 'coverage': coverage, 'total': len(hits), 'searchTicket': ticket,
+                response = {**keyword, 'retrievalMode': 'hybrid', 'requestedRetrievalMode': 'hybrid',
+                            'offset': offset, 'limit': limit, 'coverage': coverage, 'total': len(hits), 'searchTicket': ticket,
                             'device': self.engine.status, 'status': 'success', 'resetSearch':reset_search}
-                key = (account, cfg.get('revision'), q, tuple(sorted(usernames)), start, end, sender, tuple(kinds or []))
                 self.queries = {k:v for k,v in self.queries.items() if v['expires'] > time.time()}
                 if len(self.queries) >= 32: self.queries.pop(next(iter(self.queries)))
                 self.queries[ticket] = {'key': key, 'response': response, 'hits': hits, 'expires': time.time()+600}
@@ -496,10 +584,20 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                 return {**response, 'hits': hits[offset:offset+limit], 'hasMore': offset+limit<len(hits)}
             except SnapshotRegistryError:
                 raise
+            except LiteralIndexNotReady as error:
+                migration = self.store.get('fts_migration', account) or {}
+                if migration.get('status') == 'error':
+                    raise RetrievalFailure(migration['error'], 'literal_index_error', 503, error.coverage) from error
+                if migration.get('status') == 'paused':
+                    raise RetrievalFailure('字面索引升级已暂停，请恢复索引任务继续升级', 'literal_index_paused', 409, error.coverage) from error
+                raise RetrievalFailure(str(error), error.code, 409, error.coverage) from error
             except Exception as error:
-                diagnostic_event('search.keyword.fallback', level=logging.WARNING, error=error, reason_code='semantic_failed')
+                diagnostic_event('search.retrieval.failed' if strict_paging else 'search.keyword.fallback',
+                    level=logging.ERROR if strict_paging else logging.WARNING, error=error, reason_code='semantic_failed')
                 self.store.put('local_usage',{'kind':'search','account':account,'model':active.get('model'),'status':'error',
                     'seconds':time.monotonic()-began,'error_type':type(error).__name__,**self.engine.status},account=account)
+                if strict_paging:
+                    raise RetrievalFailure('本地混合检索失败，请检查索引或模型后重试', 'semantic_search_failed') from error
                 # 旧全文结果已经按 offset 分页，不能再对它重复切片。
                 fallback_hits = fuse([*committed_keyword_hits[offset:offset+limit], *snapshot_keyword.get('hits', [])], [])
                 return {**keyword, 'hits': fallback_hits[:limit],
@@ -519,12 +617,14 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
             if not cfg['enabled']: cfg['model']=None
             self.store.put('config', cfg, id=account, account=account)
             await account_to_thread(account_dir, self.index(account).clear)
+            self.store.delete('fts_migration', account)
             await account_to_thread(account_dir, self.clear_message_plans, account)
             self.queries.clear()
 
     @observed('search.purge', id_field='task_id')
     def purge(self, account):
         self.revoked.add(account)
+        self.fts_cancelled.add(account)
         active = False
         for job in self.store.list('index_job',account):
             self.cancelled.add(job['id'])
@@ -537,12 +637,15 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
 
     @observed('search.start', id_field='task_id')
     async def start(self):
+        for cfg in self.store.list('config'):
+            migration = self.store.get('fts_migration', cfg['account']) or {}
+            self.start_fts_migration(cfg['account'], resume=bool(migration.get('resume_on_start')))
         for job in self.store.list('index_job'):
             if job['status'] in {'queued','running'} or job.get('resume_on_start'):
                 try:
                     job.pop('resume_on_start',None)
                     self.update(job,status='paused')
-                    await self.resume(job['account'],job['id'])
+                    await self.resume(job['account'], job['id'], resume_migration=False)
                 except ValueError:
                     self.update(job, status='paused', error='配置已改变，请按当前范围重新建立索引')
         for job in self.store.list('download'):
@@ -559,6 +662,7 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
                     try: self.engine.close()
                     finally: self.engine.lock.release()
                 for cfg in self.store.list('config'):
+                    self.start_fts_migration(cfg['account'])
                     if not cfg['enabled'] or not cfg['auto_update']: continue
                     # 已开启自动更新的旧配置也迁移为全账号，不必等用户首次提问。
                     # ensure_global 保留显式暂停、检查模型可用性并只发布已提交覆盖。
@@ -574,6 +678,13 @@ class LocalSearch(ProgressiveIndex, MessageTotals):
         if self.loop_task:
             self.loop_task.cancel()
             await asyncio.gather(self.loop_task, return_exceptions=True)
+        migrating = [account for account, task in self.fts_jobs.items() if not task.done()]
+        self.fts_cancelled.update(migrating)
+        await asyncio.gather(*self.fts_jobs.values(), return_exceptions=True)
+        for account in migrating:
+            migration = self.store.get('fts_migration', account)
+            if migration and migration['status'] == 'paused':
+                self.store.put('fts_migration', {**migration, 'resume_on_start': True}, id=account, account=account)
         for id,task in self.jobs.items():
             if not task.done():
                 self.cancelled.add(id)

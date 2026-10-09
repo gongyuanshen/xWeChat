@@ -2,8 +2,8 @@
   <div ref="answer" class="agent-answer">
     <div class="agent-markdown" v-html="rendered" @error.capture="hideMissingAvatar" @click="onReference" @pointerover="hoverReference" @pointerout="leaveReference" @focusin="hoverReference" @focusout="leaveReference" />
     <div v-if="selected" :key="selected.source" :id="previewId" ref="preview" popover="manual" class="agent-citation-preview" role="dialog" aria-label="消息来源预览" @pointerenter="cancelClose" @pointerleave="leaveReference" @keydown.esc.stop.prevent="closePreview(true)">
-      <header><AgentAvatar :path="selected.sender_avatar_path" :name="selected.sender" /><div><strong>{{ selected.sender }}</strong><small>{{ selected.name || selected.username }} · {{ selected.time ? new Date(selected.time * 1000).toLocaleString() : '未知时间' }}</small></div><button type="button" aria-label="关闭来源预览" @click="closePreview(true)"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
-      <p class="agent-citation-text">{{ selected.text }}</p><small v-if="selected.excerpt">此处为原文节选，可定位查看完整消息。</small>
+      <header><AgentAvatar :class="{ 'privacy-blur': privacyMode }" :path="selected.sender_avatar_path" :name="selected.sender" /><div :class="{ 'privacy-blur': privacyMode }"><strong>{{ selected.sender }}</strong><small>{{ selected.name || selected.username }} · {{ selected.time ? new Date(selected.time * 1000).toLocaleString() : '未知时间' }}</small></div><button type="button" aria-label="关闭来源预览" @click="closePreview(true)"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
+      <p class="agent-citation-text" :class="{ 'privacy-blur': privacyMode }">{{ selected.text }}</p><small v-if="selected.excerpt">此处为原文节选，可定位查看完整消息。</small>
       <p v-if="locateError" class="agent-citation-error" role="alert">{{ locateError }}</p>
       <button type="button" class="agent-citation-locate" :disabled="locating" :aria-busy="locating" :aria-label="locating ? '正在定位原消息' : locateError ? '重试定位原消息' : '定位原消息'" @click="locateSelected">
         <LoaderCircle v-if="locating" class="agent-icon-spin" :size="16" :stroke-width="1.8" aria-hidden="true" />
@@ -22,6 +22,8 @@
 </template>
 <script setup>
 import { computed, inject, nextTick, onBeforeUnmount, onDeactivated, ref, unref, useId, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { usePrivacyStore } from '~/stores/privacy'
 import { renderAgentMarkdown, referenceUrl } from '~/utils/agentMarkdown'
 import { useApiBase } from '~/composables/useApiBase'
 import { Check, ExternalLink, LoaderCircle, X } from '@lucide/vue'
@@ -30,6 +32,7 @@ import AgentAvatar from './AgentAvatar.vue'
 import ContactProfileCard from './ContactProfileCard.vue'
 const props = defineProps({ text: { type: String, default: '' }, citations: { type: Array, default: () => [] }, streaming: Boolean, references: { type: Array, default: () => [] } })
 const emit = defineEmits(['locate'])
+const { privacyMode } = storeToRefs(usePrivacyStore())
 const apiBase = useApiBase(), selectedImage = ref(null)
 const profileState = inject('chatContactProfileState', null)
 const componentId = useId()

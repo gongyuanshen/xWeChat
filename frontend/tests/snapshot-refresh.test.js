@@ -51,6 +51,25 @@ const setup = (overrides = {}, getDisplayedGeneration) => {
 }
 
 describe('聊天自动同步', () => {
+  it('用户暂停后不自动重启，手动刷新明确恢复持续同步', async () => {
+    const { api, state } = setup({ getSnapshotRefreshStatus: vi.fn(async () => status({ user_paused: true, phase: 'stopped' })) })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(api.startSnapshotRefresh).not.toHaveBeenCalled()
+    expect(state.error.value).toBe('')
+    await state.refreshOnce()
+    expect(api.startSnapshotRefresh).toHaveBeenCalledWith({ account: 'a', interval_seconds: 30, resume: true })
+  })
+
+  it('用户暂停仍在安全退场时，手动刷新提示等待，不提交新任务', async () => {
+    const { api, state } = setup({ getSnapshotRefreshStatus: vi.fn(async () => status({ user_paused: true, running: true, phase: 'stopping' })) })
+    await flushPromises()
+    await state.refreshOnce()
+    expect(api.startSnapshotRefresh).not.toHaveBeenCalled()
+    expect(api.refreshSnapshotOnce).not.toHaveBeenCalled()
+    expect(state.error.value).toContain('尚未结束')
+  })
+
   it('首连和重复推送只核对状态，实际发布和归档完成才更新内容', async () => {
     const initial = status({ enabled: true, revision: 1, generation: 'g1' })
     const { api, state, onPublished } = setup({ getSnapshotRefreshStatus: vi.fn(async () => initial) })
@@ -429,6 +448,12 @@ describe('聊天自动同步', () => {
 })
 
 describe('快照 API 禁止自动重试', () => {
+  it('显式恢复请求将 resume 传至后端且不重试', async () => {
+    const fetch = vi.fn(async () => status())
+    vi.stubGlobal('$fetch', fetch)
+    await useApi().startSnapshotRefresh({ account: 'a', interval_seconds: 30, resume: true })
+    expect(fetch.mock.calls[0][1]).toMatchObject({ retry: 0, body: { account: 'a', interval_seconds: 30, resume: true } })
+  })
   it('推送使用明确账号并在协议错误或断线时关闭自动重连', () => {
     class Source {
       constructor(url) { this.url = url; this.close = vi.fn(); this.handlers = {} }

@@ -24,7 +24,8 @@ class BranchWork(MainWork):
     title: str = Field(min_length=2, max_length=80)
     role: Literal['range-analyst', 'fact-checker', 'retrieval-analyst']
     depends_on: list[str] = Field(default_factory=list, description='仅可引用已经完成的本轮任务句柄；未完成依赖不能并行')
-    query: str = Field(default='', description='独立检索目标的固定关键词；不扩大范围，不代表全量覆盖')
+    query: str = Field(default='', description='独立检索目标的固定原词或描述；不扩大范围，不代表全量覆盖')
+    retrieval_mode: Literal['keyword', 'hybrid'] = Field(default='keyword', description='明确原词、编号、金额用 keyword；模糊描述用 hybrid')
 
 
 CHILD_SYSTEM = '''你是隔离的聊天证据分析员。只执行工作单的分支说明和交付要求，不回答总问题。
@@ -152,7 +153,7 @@ class PlannedWork:
                 raise ValueError('请选择已取得来源或固定检索目标，不能混合两种输入归属')
             if any(dep not in completed for dep in work['depends_on']):
                 raise ValueError('分支仍有未完成依赖，不能并行启动')
-            key = fingerprint({k: work[k] for k in ('scope_handle', 'source_ids', 'description', 'expected_output', 'query')})
+            key = fingerprint({k: work[k] for k in ('scope_handle', 'source_ids', 'description', 'expected_output', 'query', 'retrieval_mode')})
             if key in seen or any(j.get('work_signature') == key for j in jobs):
                 raise ValueError('相同工作已委派，不创建重复分支')
             seen.add(key)
@@ -197,7 +198,8 @@ class PlannedWork:
             raise ValueError('已有三个分支执行中；不创建等待队列')
         from .deep_tools import ChatGateway
         scope = ChatGateway(self.service, parent['id'], parent['version']).scope(branch['scope_handle'])
-        signature = fingerprint({k: branch[k] for k in ('scope_handle', 'source_ids', 'description', 'expected_output', 'query')})
+        signature = fingerprint({**{k: branch[k] for k in ('scope_handle', 'source_ids', 'description', 'expected_output', 'query')},
+            'retrieval_mode': branch.get('retrieval_mode', 'hybrid')})
         job = {'id': job_id, 'plan_version': REVISION, 'plan_id': plan['id'], 'branch_handle': branch['id'],
             'work_signature': signature, 'signature': fingerprint([parent['version'], plan['id'], parent['input_digest'], branch, scope]),
             'child_run_id': 'deep-child:' + fingerprint(job_id), 'name': branch['title'], 'role': branch['role'],
@@ -206,6 +208,8 @@ class PlannedWork:
             'time_range': {k: scope[k] for k in ('start', 'end')},
             'status': 'queued', 'stage': '准备分支资料', 'created': time.time(), 'parent_version': parent['version']}
         job['query'] = branch['query'].strip()
+        # 已保存的旧计划省略模式时仍保持原有混合检索语义。
+        job['retrieval_mode'] = branch.get('retrieval_mode', 'hybrid')
         if branch['source_ids']:
             originals = parent['evidence'].get_many(branch['source_ids'])
             core = []
@@ -231,7 +235,8 @@ class PlannedWork:
             child = self.service.create_partition_child(parent, job, scope)
             self.service.update(child['id'], subtask_plan_version=REVISION,
                 input_digest='总目标：' + job['original_goal'] + '\n分支说明：' + job['objective'] + '\n交付要求：' + job['expected_output'],
-                status='running', stage='提取局部事实', work_query=job.get('query', ''))
+                status='running', stage='提取局部事实', work_query=job.get('query', ''),
+                work_retrieval_mode=job.get('retrieval_mode', 'hybrid'))
             job.update(status='running', stage='提取局部事实')
             self.service.deep_job(parent, job)
             gateway = ChatGateway(self.service, child['id'], child['version'])
@@ -293,12 +298,20 @@ class PlannedWork:
 
     async def read_query(self, gateway, state):
         """检索分支按固定目标分页，命中以不可变正文清单交模型；分页不会创建作业。"""
+        from .deep_tools import ScopeError
         child = gateway.guard()
         parent = self.guard(self.service.run(child['parent_run_id']))
-        scan = gateway.get('work:query_cursor') or {'conversation': 0, 'offset': 0, 'done': False, 'manifest_done': True, 'warnings': []}
+        identity = fingerprint([child['id'], child['version'], child['account'], child['work_query'],
+            child.get('work_retrieval_mode', 'hybrid'), state['handle'], state['conversations'],
+            state['start'], state['end'], state['sender']])
+        scan = gateway.get('work:query_cursor')
+        if scan and scan.get('query_identity') != identity:
+            raise ScopeError('search_restart_required', '检索分支续页身份无法确认或条件已变化，请重新开始检索分支；已取得证据保留')
+        if scan is None:
+            scan = {'conversation': 0, 'offset': 0, 'done': False, 'manifest_done': True, 'warnings': [], 'query_identity': identity}
         if scan['manifest_done']:
-            username = state['conversations'][scan['conversation']]
-            result = await self.service.tools.search(child['account'], username, child['work_query'], state['start'], state['end'], scan['offset'])
+            result = await gateway.search_page(state, child['work_query'], scan['offset'], scan['conversation'],
+                child.get('work_retrieval_mode', 'hybrid'))
             gateway.guard()
             messages = [m for m in result.get('messages', []) if gateway.permits(state, m)]
             gateway.save_messages(messages, result.get('originals', messages))
@@ -317,17 +330,22 @@ class PlannedWork:
             warnings = list(dict.fromkeys([*scan['warnings'], *([result['warning']] if result.get('warning') else [])]))
             pieces.append((manifest_id, 'analysis_manifest', {'id': manifest_id, 'core': core, 'context': [], 'warnings': warnings}))
             self.service.workspace.put_pieces(parent['id'], parent['version'], pieces)
-            scan = {'conversation': conversation, 'offset': offset, 'done': conversation >= len(state['conversations']),
-                'manifest_done': False, 'manifest_id': manifest_id, 'warnings': warnings}
+            scan = {'conversation': conversation, 'offset': offset, 'done': conversation >= len(state['conversations']), 'query_identity': identity,
+                'manifest_done': False, 'manifest_id': manifest_id, 'warnings': warnings,
+                'requested_retrieval_mode': child.get('work_retrieval_mode', 'hybrid'),
+                'retrieval_mode': result.get('retrieval_mode')}
             gateway.put('work:query_cursor', 'work_query_cursor', scan)
             gateway.put('query-coverage:' + manifest_id, 'deep_search_coverage', {'query': child['work_query'], 'sources': [m['source'] for m in messages],
-                'warning': result.get('warning', ''), 'coverage': 'search_only'})
+                'warning': result.get('warning', ''), 'coverage': 'search_only',
+                'requested_retrieval_mode': scan['requested_retrieval_mode'], 'retrieval_mode': scan['retrieval_mode']})
             state = {**state, 'cursor': ''}
         self.service.update(child['id'], manifest_id=scan['manifest_id'])
         result = await self.service.read_manifest(gateway, state)
         scan['manifest_done'] = not result['has_more']
         gateway.put('work:query_cursor', 'work_query_cursor', scan)
-        result.update(has_more=not (scan['done'] and scan['manifest_done']), coverage='search_only')
+        result.update(has_more=not (scan['done'] and scan['manifest_done']), coverage='search_only',
+            requested_retrieval_mode=scan.get('requested_retrieval_mode', child.get('work_retrieval_mode', 'hybrid')),
+            retrieval_mode=scan.get('retrieval_mode'))
         saved = gateway.scope(state['handle'])
         gateway.put('scope:' + state['handle'], 'deep_scope', {**saved, 'read_complete': not result['has_more']})
         page = gateway.get(result['page_id'])
@@ -399,7 +417,8 @@ class PlannedWork:
         if job['status'] in TERMINAL and not query:
             key = 'work-result-read:' + fingerprint([task_handle, offset])
             gateway.put(key, 'work_result_read', {'task_handle': task_handle, 'offset': offset, 'count': len(result['items']), 'total': result['total']})
-        return {**result, 'task_handle': task_handle, 'status': job['status'], 'error': job.get('error', ''), 'warnings': job.get('warnings', [])}
+        return {**result, 'task_handle': task_handle, 'status': job['status'], 'error': job.get('error', ''),
+            'warnings': job.get('warnings', []), **({'coverage': 'search_only'} if job.get('query') else {})}
 
     async def wait(self, gateway, plan_handle, seen_handles):
         parent = gateway.guard()

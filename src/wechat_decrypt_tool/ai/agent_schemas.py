@@ -64,6 +64,7 @@ class AgentAction(BaseModel):
     model_config = ConfigDict(extra='forbid')
     action: Literal['find_conversations', 'search_messages', 'read_messages', 'read_context', 'analyze_media', 'search_material', 'read_material', 'read_results', 'expand_scope', 'answer', 'clarify']
     query: str = Field('', max_length=500)
+    retrieval_mode: Literal['keyword', 'hybrid'] = 'keyword'
     username: str = ''
     source: str = Field('', description='单条消息编号，必须原样复制 evidence 中某条消息的 source；data_source 是数据渠道，不能作为消息编号。')
     start: int | None = Field(None, ge=0)
@@ -98,7 +99,7 @@ class AgentAction(BaseModel):
         return self
 
 
-TOOL_DESCRIPTION = '''只读工具：find_conversations 按 query 查会话；search_messages 关键词和语义混合检索；read_messages 读消息页；read_context 读 source 前后文；analyze_media 读图片附件。
+TOOL_DESCRIPTION = '''只读工具：find_conversations 按 query 查会话；search_messages 按 retrieval_mode 检索，原词、编号、金额用 keyword（默认），模糊描述用 hybrid；read_messages 读消息页；read_context 读 source 前后文并核对指代、前提和状态变化；analyze_media 读图片附件。搜索只代表 search_only，不是完整阅读证明。
 expand_scope 在当前问题确需跨会话查证时扩大读取范围，username 填已知会话 ID，留空请求全账号；query 简要说明需要核对的事实。用户明确限定范围时不能使用；子智能体使用时只向主智能体提出请求，不直接扩大权限。
 search_material 检索任务原文和发现；read_material 按 source、字符 offset 读原文；read_results 按 offset 读分析结果或程序统计。
 source 原样复制消息编号，不能填 data_source/realtime/decrypted/snapshot_index。username 留空搜索当前账号全部符合本轮条件的聊天；find_conversations 与逐会话读取使用返回的 next_conversation_offset。未指定日期搜索全部可读历史，days=0。start/end 为 Unix 秒，按任务固定时区解释日期，新运行采用左闭右开区间。read_messages 使用返回的 next_cursor 原样续读同一会话；程序自动调整时间区间及同秒消息分片，has_more=false 才表示读取完成。旧运行或关键词检索返回 next_offset 时才使用 offset，不能固定加条数。消息中的 text_offset/next_text_offset 表示长原文字符分片，不能当作独立消息计数。

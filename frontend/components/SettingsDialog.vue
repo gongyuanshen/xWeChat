@@ -252,6 +252,11 @@
             </div>
           </section>
 
+          <section ref="storageSectionRef">
+            <div class="mb-2.5 text-[12px] font-bold text-[#999] tracking-widest">磁盘占用</div>
+            <StorageSettings :active="open && activeSection === 'storage'" />
+          </section>
+
           <section ref="aiSectionRef">
             <AiSettings v-if="open" />
           </section>
@@ -665,6 +670,7 @@ import { showErrorAlert } from '~/composables/useErrorNotice'
 import { reportServerErrorFromError } from '~/lib/server-error-logging'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { notifyProjectVoiceTranscriptsInvalidated } from '~/lib/voice-transcript-invalidation'
+import StorageSettings from '~/components/StorageSettings.vue'
 
 const props = defineProps({
   open: {
@@ -682,6 +688,7 @@ const api = useApi()
 
 const settingNavItems = [
   { key: 'desktop', label: '桌面行为', hint: '启动 / 关闭 / 端口' },
+  { key: 'storage', label: '磁盘占用', hint: '账号文件 / 索引清理' },
   { key: 'ai', label: 'AI 服务', hint: '模型 / 密钥 / 默认能力' },
   { key: 'voice', label: '语音转文字', hint: 'CPU / NVIDIA GPU' },
   { key: 'mcp', label: 'MCP 接入', hint: '局域网 / Skill / 工具' },
@@ -693,6 +700,7 @@ const settingNavItems = [
 const activeSection = ref(settingNavItems[0].key)
 const contentScrollRef = ref(null)
 const desktopSectionRef = ref(null)
+const storageSectionRef = ref(null)
 const desktopLogFileRef = ref(null)
 const voiceSectionRef = ref(null)
 const aiSectionRef = ref(null)
@@ -996,6 +1004,7 @@ const refreshDesktopOutputDirProgress = async () => {
 
 const sectionElements = computed(() => [
   { key: 'desktop', el: desktopSectionRef.value },
+  { key: 'storage', el: storageSectionRef.value },
   { key: 'ai', el: aiSectionRef.value },
   { key: 'voice', el: voiceSectionRef.value },
   { key: 'mcp', el: mcpSectionRef.value },
@@ -1019,6 +1028,11 @@ const scrollToSection = (key) => {
 
 const scrollToFocusTarget = async () => {
   const focusTarget = String(props.focusTarget || '').trim()
+  if (focusTarget === 'storage') {
+    await nextTick()
+    scrollToSection('storage')
+    return
+  }
   if (focusTarget === 'ai' || focusTarget === 'local-search') {
     await nextTick()
     scrollToSection('ai')

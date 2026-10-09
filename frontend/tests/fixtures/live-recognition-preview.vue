@@ -119,7 +119,7 @@ const toggleGroup = () => {
 const switchModel = () => { modelChoice.value = { ...modelChoice.value, model_id: modelChoice.value.model_id === 'model-a' ? 'model-b' : 'model-a' } }
 const noop = () => {}
 const state = {
-  selectedAccount: account, selectedContact: contact, messages, renderMessages: messages,
+  selectedAccount: account, selectedContact: contact, messages, renderMessages: computed(() => messages.value.map(message => ({ message, showTimeDivider: false, timeDivider: '' }))),
   recognitionState: recognition, recognitionEngine: engine, recognitionHeader: recognition.header, insightLabels: recognition.labels,
   searchContext: ref({ active: false }), messageTypeFilter: ref('all'), messageTypeFilterOptions: [{ value: 'all', label: '全部消息' }],
   privacyMode: false, isLoadingMessages: false, hasMoreMessages: false, messagesError: '', isJumpingToFirst: false, isExportCreating: false,

@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { ref } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
+import { usePrivacyStore } from '../stores/privacy'
 import AgentAnswer from '../components/chat/AgentAnswer.vue'
 import { renderAgentMarkdown, copyAgentText } from '../utils/agentMarkdown'
 import { scanExports } from 'unimport'
@@ -10,8 +12,37 @@ const source = { source: 'a'.repeat(24), username: 'group', name: '项目群', s
 const person = { id: 'b'.repeat(24), kind: 'person', username: 'b', name: '乙', sources: [source.source], avatar_path: 'https://invalid.example/avatar' }
 const picture = { id: 'c'.repeat(24), kind: 'image', source: source.source, label: '新版排期', path: '/chat/media/image?account=test&md5=1' }
 const unused = { ...picture, id: 'd'.repeat(24), label: '未引用图片' }
+beforeEach(() => { vi.stubGlobal('ref', ref); setActivePinia(createPinia()) })
+afterEach(() => vi.unstubAllGlobals())
 
 describe('独立且经过校验的引用', () => {
+  it('真实 Teleport 图片和来源身份响应隐私开关，缩放与关闭仍可用', async () => {
+    const privacy = usePrivacyStore()
+    const w = mount(AgentAnswer, { attachTo: document.body, attrs: { class: 'privacy-blur' }, props: {
+      text: `[[image:${picture.id}]]`, references: [picture], citations: [source],
+    } })
+    try {
+      await w.find('[data-image]').trigger('click'); await flushPromises()
+      const viewer = document.body.querySelector('.agent-image-viewer')
+      expect(viewer).not.toBeNull()
+      expect(w.element.contains(viewer)).toBe(false)
+      const sensitive = [...viewer.querySelectorAll('header strong, header small, .agent-image-stage img')]
+      expect(sensitive).toHaveLength(3)
+      for (const field of sensitive) expect(field.closest('.privacy-blur')).toBeNull()
+      privacy.set(true); await flushPromises()
+      for (const field of sensitive) expect(field.closest('.privacy-blur'), field.outerHTML).not.toBeNull()
+      for (const button of viewer.querySelectorAll('button')) expect(button.closest('.privacy-blur')).toBeNull()
+      const zoom = viewer.querySelector('[aria-label="放大图片"]')
+      expect(zoom.disabled).toBe(false)
+      zoom.click(); await flushPromises()
+      expect(viewer.textContent).toContain('125%')
+      privacy.set(false); await flushPromises()
+      for (const field of sensitive) expect(field.closest('.privacy-blur')).toBeNull()
+      viewer.querySelector('[aria-label="关闭图片查看器"]').click(); await flushPromises()
+      expect(document.body.querySelector('.agent-image-viewer')).toBeNull()
+    } finally { w.unmount() }
+  })
+
   it('胶囊后重复姓名只在显示和复制时合并，不截断较长编号或代码示例', () => {
     const named = { ...person, name: '330' }
     const marker = `[[person:${named.id}]]`

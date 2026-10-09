@@ -1,4 +1,8 @@
-from .snapshot_registry import resolve_account_database_dir, snapshot_cache_dir, start_snapshot_thread
+from .snapshot_registry import (
+    resolve_account_database_dir, snapshot_cache_dir, start_snapshot_thread,
+    _check_ancestors, _generation_account, _validate_generation, SnapshotRegistryError,
+)
+from contextlib import closing
 import os
 import hashlib
 import json
@@ -8,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from .account_identity import resolve_account_self_rowid
+from .account_identity import account_identity_candidates, resolve_account_self_rowid
 from .anti_revoke import (
     format_revoked_message_as_chat_item,
     get_all_revoked_messages,
@@ -331,6 +335,96 @@ def _update_build_state(account_key: str, **kwargs: Any) -> None:
         if not st:
             return
         st.update(kwargs)
+
+
+def forget_account_search_index(account_dir: Path) -> None:
+    """Clear progress after the caller exclusively quiesces and clears this account."""
+    root = Path(account_dir)
+    with _BUILD_LOCK:
+        for key in list(_BUILD_STATE):
+            if Path(key) == root or Path(key).parent == root / "_snapshot_cache":
+                del _BUILD_STATE[key]
+
+
+def _snapshot_index_sources(account_dir: Path, db_paths: list[Path], sessions: dict,
+                            anti_revoke_signature: str) -> dict | None:
+    """Reuse only verified generations, proving both captured and decrypted bytes."""
+    from .snapshot_archive import _source_files
+
+    database_dir = resolve_account_database_dir(account_dir)
+    if database_dir == account_dir:
+        return None
+    generation = database_dir.parents[1]
+    metadata = _validate_generation(account_dir, generation, _generation_account(account_dir, database_dir.name))
+    shards = {}
+    for path in db_paths:
+        files = _source_files(metadata['manifest'], path.name)
+        if not any(Path(name).name == path.name for name in files):
+            raise SnapshotRegistryError(f"Snapshot source manifest is missing {path.name}")
+        with path.open('rb') as stream:
+            before = os.fstat(stream.fileno())
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            after = os.fstat(stream.fileno())
+        if (not os.path.samestat(before, path.stat()) or before.st_size != after.st_size
+                or before.st_mtime_ns != after.st_mtime_ns):
+            raise SnapshotRegistryError(f"Snapshot database changed while preparing index: {path}")
+        shards[path.stem] = {
+            'captured': {name: {field: entry[field] for field in ('size', 'sha256')}
+                         for name, entry in files.items()},
+            'decrypted_sha256': digest,
+        }
+    return {'version': 1, 'shards': shards, 'sessions': sessions,
+            'identity': [resolve_account_username(account_dir), *account_identity_candidates(account_dir)],
+            'anti_revoke_signature': anti_revoke_signature}
+
+
+def _reuse_snapshot_index(account_dir: Path, tmp_path: Path, sources: dict | None,
+                          rebuild: bool) -> set[str]:
+    """Copy a compatible index privately; no prior generation becomes current/ready."""
+    if rebuild or sources is None:
+        return set()
+    candidates = list((account_dir / '_snapshot_cache').glob(f'generation-*/{_INDEX_DB_NAME}'))
+    candidates.sort(key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    for path in candidates:
+        _check_ancestors(path)
+        with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)) as previous:
+            previous.execute('BEGIN')
+            meta = dict(previous.execute('SELECT key,value FROM meta'))
+            if (meta.get('schema_version') != str(_SCHEMA_VERSION) or meta.get('source') != 'decrypted'
+                    or 'snapshot_sources' not in meta):
+                continue
+            old = json.loads(meta['snapshot_sources'])
+            if {k: v for k, v in old.items() if k != 'shards'} != {k: v for k, v in sources.items() if k != 'shards'}:
+                continue
+            unchanged = {name for name, value in sources['shards'].items() if old['shards'].get(name) == value}
+            if not unchanged:
+                continue
+            # A copied index must already be complete. _init_index_db creates
+            # tables for new builds and must never repair a damaged donor.
+            tables = {row[0] for row in previous.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            missing = {'message_fts', 'message_meta', 'message_token_stats'} - tables
+            if missing:
+                raise sqlite3.DatabaseError(f"Cannot reuse incomplete chat search index {path}: missing tables {sorted(missing)}")
+            try:
+                expected = int(meta['message_count'])
+                expected_tokens = int(meta['single_char_token_count'])
+            except (KeyError, ValueError) as exc:
+                raise sqlite3.DatabaseError(f"Cannot reuse incomplete chat search index {path}: invalid stored counts") from exc
+            fts_count = previous.execute('SELECT count(*) FROM message_fts').fetchone()[0]
+            meta_count = previous.execute('SELECT count(*) FROM message_meta').fetchone()[0]
+            token_count, invalid_tokens = previous.execute(
+                'SELECT count(*),count(CASE WHEN doc_count<=0 OR doc_count>? THEN 1 END) FROM message_token_stats',
+                (expected,)).fetchone()
+            if (expected < 0 or fts_count != expected or meta_count != expected
+                    or expected_tokens < 0 or token_count != expected_tokens or invalid_tokens):
+                raise sqlite3.DatabaseError(
+                    f"Cannot reuse incomplete chat search index {path}: expected={expected}, "
+                    f"fts={fts_count}, metadata={meta_count}, expected_tokens={expected_tokens}, "
+                    f"tokens={token_count}, invalid_tokens={invalid_tokens}")
+            with closing(sqlite3.connect(tmp_path)) as target:
+                previous.backup(target)
+            return unchanged
+    return set()
 
 
 def _sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -719,11 +813,7 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
 
     self_username = resolve_account_username(account_dir)
     try:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
+        tmp_path.unlink(missing_ok=True)
 
         source_norm = _normalize_index_source(source, default="decrypted")
         sessions = _load_sessions_for_index(account_dir)
@@ -735,14 +825,15 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
             raise RuntimeError("No message databases found for this account.")
 
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
+        all_revoked = get_all_revoked_messages(account_dir)
+        anti_revoke_signature = _anti_revoke_signature(all_revoked)
+        snapshot_sources = _snapshot_index_sources(account_dir, db_paths, sessions, anti_revoke_signature)
+        unchanged_shards = _reuse_snapshot_index(account_dir, tmp_path, snapshot_sources, rebuild)
         conn_fts = sqlite3.connect(str(tmp_path))
         conn_fts.isolation_level = None  # manual transaction control (prevents implicit BEGIN)
         try:
             _init_index_db(conn_fts)
-            try:
-                conn_fts.commit()
-            except Exception:
-                pass
+            conn_fts.commit()
             insert_sql = (
                 "INSERT INTO message_fts("
                 "rowid, text, username, render_type, create_time, sort_seq, local_id, server_id, local_type, "
@@ -757,48 +848,67 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
             )
 
             batch: list[tuple[Any, ...]] = []
-            token_doc_counts: dict[str, int] = {}
-            indexed = 0
+            _safe_begin(conn_fts)
+            token_doc_counts: dict[str, int] = dict(conn_fts.execute('SELECT token,doc_count FROM message_token_stats'))
+            if unchanged_shards:
+                placeholders = ','.join('?' for _ in unchanged_shards)
+                removed = f'SELECT rowid FROM message_meta WHERE db_stem NOT IN ({placeholders})'
+                removed_tokens: dict[str, int] = {}
+                for (token_text,) in conn_fts.execute(f'SELECT text FROM message_meta WHERE db_stem NOT IN ({placeholders})', sorted(unchanged_shards)):
+                    _update_single_char_token_stats(removed_tokens, token_text)
+                for token, count in removed_tokens.items():
+                    token_doc_counts[token] -= count
+                token_doc_counts = {token: count for token, count in token_doc_counts.items() if count > 0}
+                conn_fts.execute(f'DELETE FROM message_fts WHERE rowid IN ({removed})', sorted(unchanged_shards))
+                conn_fts.execute(f'DELETE FROM message_meta WHERE db_stem NOT IN ({placeholders})', sorted(unchanged_shards))
+            indexed = conn_fts.execute('SELECT count(*) FROM message_meta').fetchone()[0]
             fetched = 0
             fetch_calls = 0
             insert_batch_size = _insert_batch_size()
             last_commit_index = 0
-            next_rowid = 1
+            next_rowid = conn_fts.execute('SELECT COALESCE(MAX(rowid),0)+1 FROM message_meta').fetchone()[0]
 
-            _safe_begin(conn_fts)
             _update_build_state(
                 key,
                 totalConversations=len(sessions),
                 completedConversations=0,
                 insertBatchSize=insert_batch_size,
                 commitEveryMessages=_COMMIT_EVERY_MESSAGES,
+                buildMode='incremental' if unchanged_shards else 'full',
+                reusedMessages=indexed,
+                reusedDatabases=len(unchanged_shards),
+                updatedDatabases=len(db_paths) - len(unchanged_shards),
             )
 
-            completed_conversations: set[str] = set()
-            all_revoked = get_all_revoked_messages(account_dir)
-            anti_revoke_signature = _anti_revoke_signature(all_revoked)
+            completed_conversations: set[str] = {row[0] for row in conn_fts.execute('SELECT DISTINCT username FROM message_meta')}
             revoked_map = get_revoked_messages_map(account_dir)
             indexed_servers: set[str] = set()
             indexed_locals: set[tuple[str, int]] = set()
+            if all_revoked and unchanged_shards:
+                for username, local_id, server_id in conn_fts.execute(
+                        "SELECT username,local_id,server_id FROM message_meta WHERE local_type != 10000 AND render_type != 'system'"):
+                    if server_id:
+                        indexed_servers.add(str(server_id))
+                    elif local_id > 0:
+                        indexed_locals.add((username, local_id))
 
             for db_path in db_paths:
+                if db_path.stem in unchanged_shards:
+                    continue
                 _update_build_state(key, currentDb=str(db_path.name))
                 msg_conn = sqlite3.connect(str(db_path))
                 msg_conn.row_factory = sqlite3.Row
                 msg_conn.text_factory = bytes
                 try:
-                    try:
-                        trows = msg_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-                        lower_to_actual: dict[str, str] = {}
-                        for x in trows:
-                            if not x or x[0] is None:
-                                continue
-                            nm = _decode_sqlite_text(x[0]).strip()
-                            if not nm:
-                                continue
-                            lower_to_actual[nm.lower()] = nm
-                    except Exception:
-                        lower_to_actual = {}
+                    trows = msg_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    lower_to_actual: dict[str, str] = {}
+                    for x in trows:
+                        if not x or x[0] is None:
+                            continue
+                        nm = _decode_sqlite_text(x[0]).strip()
+                        if not nm:
+                            continue
+                        lower_to_actual[nm.lower()] = nm
 
                     my_rowid, _matched_self_username = resolve_account_self_rowid(
                         msg_conn,
@@ -843,19 +953,16 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                             cursor = msg_conn.execute(sql_no_join)
 
                         for r in cursor:
-                            try:
-                                hit = _row_to_search_hit(
-                                    r,
-                                    db_path=db_path,
-                                    table_name=table_name,
-                                    username=conv_username,
-                                    account_dir=account_dir,
-                                    is_group=is_group,
-                                    my_rowid=my_rowid,
-                                    self_username=db_self_username,
-                                )
-                            except Exception:
-                                continue
+                            hit = _row_to_search_hit(
+                                r,
+                                db_path=db_path,
+                                table_name=table_name,
+                                username=conv_username,
+                                account_dir=account_dir,
+                                is_group=is_group,
+                                my_rowid=my_rowid,
+                                self_username=db_self_username,
+                            )
 
                             sid = str(hit.get("serverIdStr") or hit.get("serverId") or "").strip()
                             lid = int(hit.get("localId") or 0)
@@ -1034,6 +1141,7 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                     uniqueSearchTokens=len(token_doc_counts),
                 )
 
+            conn_fts.execute('DELETE FROM message_token_stats')
             if token_doc_counts:
                 conn_fts.executemany(
                     "INSERT INTO message_token_stats(token, doc_count) VALUES(?, ?)",
@@ -1065,6 +1173,11 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 ("anti_revoke_signature", anti_revoke_signature),
             )
+            conn_fts.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+                             ('single_char_token_count', str(len(token_doc_counts))))
+            if snapshot_sources is not None:
+                conn_fts.execute('INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)',
+                                 ('snapshot_sources', json.dumps(snapshot_sources, ensure_ascii=False, sort_keys=True)))
             conn_fts.commit()
         finally:
             conn_fts.close()
@@ -1088,14 +1201,15 @@ def _build_worker(account_dir: Path, rebuild: bool, source: str = "decrypted") -
             currentConversation="",
             error="",
             durationSec=round(duration, 3),
+            indexedMessages=indexed,
+            completedConversations=len(completed_conversations),
         )
     except Exception as e:
         logger.exception("Failed to build chat search index")
         try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except Exception:
-            pass
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to remove incomplete chat search index: %s", tmp_path)
         _update_build_state(
             key,
             status="error",

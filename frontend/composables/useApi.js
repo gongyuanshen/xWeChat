@@ -228,9 +228,9 @@ export const useApi = () => {
     return stream
   }
 
-  const startSnapshotRefresh = async ({ account, interval_seconds, signal }) => {
+  const startSnapshotRefresh = async ({ account, interval_seconds, signal, resume }) => {
     return await request('/decrypt/snapshot-refresh/start', {
-      method: 'POST', signal, retry: 0, body: { account, interval_seconds }
+      method: 'POST', signal, retry: 0, body: { account, interval_seconds, ...(resume === undefined ? {} : { resume }) }
     })
   }
 

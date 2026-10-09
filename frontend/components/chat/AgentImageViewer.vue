@@ -1,9 +1,12 @@
 <script setup>
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { usePrivacyStore } from '~/stores/privacy'
 import { referenceUrl } from '~/utils/agentMarkdown'
 import { ChevronLeft, ChevronRight, Image, Minus, Plus, X } from '@lucide/vue'
 const props = defineProps({ images: { type: Array, default: () => [] }, selected: String, citations: { type: Array, default: () => [] }, apiBase: String, locating: Boolean, locateError: String })
 const emit = defineEmits(['close', 'locate'])
+const { privacyMode } = storeToRefs(usePrivacyStore())
 const dialog = ref(null), index = ref(0), scale = ref(1), angle = ref(0), x = ref(0), y = ref(0), failed = ref(false)
 const current = computed(() => props.images[index.value])
 const source = computed(() => props.citations.find(c => c.source === current.value?.source))
@@ -21,9 +24,9 @@ onBeforeUnmount(() => { dialog.value?.close?.(); if (trigger?.isConnected) trigg
 </script>
 <template>
   <Teleport to="body"><dialog ref="dialog" class="agent-image-viewer" aria-label="回答引用的图片" @cancel.prevent="emit('close')" @keydown.esc.stop.prevent="emit('close')" @keydown.left.prevent="move(-1)" @keydown.right.prevent="move(1)">
-    <header><div class="agent-image-heading"><Image :size="16" :stroke-width="1.8" aria-hidden="true" /><div><strong>{{ current?.label || '聊天图片' }}</strong><small v-if="source">{{ source.sender }} · {{ source.name || source.username }} · {{ new Date(source.time * 1000).toLocaleString() }}</small></div></div><button type="button" aria-label="关闭图片查看器" @click="emit('close')"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
+    <header><div class="agent-image-heading"><Image :size="16" :stroke-width="1.8" aria-hidden="true" /><div :class="{ 'privacy-blur': privacyMode }"><strong>{{ current?.label || '聊天图片' }}</strong><small v-if="source">{{ source.sender }} · {{ source.name || source.username }} · {{ new Date(source.time * 1000).toLocaleString() }}</small></div></div><button type="button" aria-label="关闭图片查看器" @click="emit('close')"><X :size="16" :stroke-width="1.8" aria-hidden="true" /></button></header>
     <div class="agent-image-stage" @dblclick="reset" @wheel.prevent="zoom($event.deltaY > 0 ? .9 : 1.1)" @pointerdown="pointerStart" @pointermove="pointerMove" @pointerup="drag = null" @pointercancel="drag = null">
-      <img v-if="url && !failed" :key="current?.id" :src="url" :alt="current?.label || '聊天图片'" draggable="false" :style="{ transform: `translate(${x}px,${y}px) rotate(${angle}deg) scale(${scale})` }" @error="failed = true" />
+      <img v-if="url && !failed" :class="{ 'privacy-blur': privacyMode }" :key="current?.id" :src="url" :alt="current?.label || '聊天图片'" draggable="false" :style="{ transform: `translate(${x}px,${y}px) rotate(${angle}deg) scale(${scale})` }" @error="failed = true" />
       <p v-else role="status">图片暂不可用，可定位原消息核对。</p>
       <small class="agent-image-hint">滚轮缩放 · 双击还原 · Esc 关闭</small>
     </div>

@@ -410,6 +410,7 @@ class ChatGateway:
                 return self.get(state['pending_page'])['result']
             if state['read_complete']:
                 return {'complete': True, 'requires_commit': False, 'messages': [], 'scope_handle': handle,
+                    **({'coverage': 'search_only'} if self.guard().get('work_query') else {}),
                     'instruction': '范围已经处理完成，没有待提交页面；直接使用已保存发现回答，不再读取或提交。'}
             run = self.guard()
             if run.get('subtask_plan_version') == REVISION and run.get('work_query'):
@@ -707,6 +708,32 @@ class ChatGateway:
         return {**page, 'has_more': following is not None,
             'next_cursor': json.dumps(following, sort_keys=True) if following is not None else None}
 
+    async def search_page(self, state, query, offset, conversation_offset=0, retrieval_mode='keyword'):
+        """主工具和固定查询分支共用范围筛选与任务内票据身份。"""
+        run = self.guard()
+        if retrieval_mode not in ('keyword', 'hybrid'):
+            raise ValueError('retrieval_mode 必须为 keyword 或 hybrid')
+        if offset < 0 or not 0 <= conversation_offset < len(state['conversations']):
+            raise ValueError(f'offset 必须非负；conversation_offset 有效范围为 0 到 {len(state["conversations"]) - 1}')
+        username = state['conversations'][conversation_offset]
+        identity = {'run_id': self.id, 'version': self.version, 'account': run['account'],
+            'scope_handle': state['handle'], 'query': query, 'retrieval_mode': retrieval_mode,
+            'conversation': username, 'start': state['start'], 'end': state['end'], 'sender': state['sender']}
+        key = 'search-ticket:' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:24]
+        ticket = None
+        if offset:
+            saved = self.get(key)
+            if not saved or saved.get('identity') != identity or (retrieval_mode == 'hybrid' and not saved.get('ticket')):
+                raise ScopeError('search_restart_required', '检索续页身份或票据缺失，请保持原查询模式并从 offset=0 重新开始；已取得证据保留')
+            ticket = saved['ticket']
+        result = await self.service.tools.search(run['account'], username, query, state['start'], state['end'], offset,
+            sender=state['sender'] or None, retrieval_mode=retrieval_mode, search_ticket=ticket, strict_paging=True)
+        self.guard()
+        if retrieval_mode == 'hybrid' and not result.get('search_ticket'):
+            raise ScopeError('search_restart_required', '混合检索没有返回分页票据，请重新开始；已取得证据保留')
+        self.put(key, 'deep_search_ticket', {'identity': identity, 'ticket': result.get('search_ticket')})
+        return result
+
     def tools(self):
         @tool
         async def select_chat_scope(conversations: list[str] | None = None, all_chats: bool = False,
@@ -719,27 +746,27 @@ class ChatGateway:
             return await self.select(conversations, all_chats, time_phrase, start, end, sender, exclude, complete, mode, reuse_previous, message_count, clear_filters)
 
         @tool
-        async def search_messages(scope_handle: str, query: Annotated[str, Field(description='具体关键词；没有关键词时请使用 read_messages')],
-            offset: Annotated[int, Field(ge=0)] = 0, conversation_offset: Annotated[int, Field(ge=0)] = 0) -> dict:
-            """在已选范围搜索。按返回的位置继续，不把索引命中视为完整覆盖；确切事实不足时读原文。"""
+        async def search_messages(scope_handle: str, query: Annotated[str, Field(description='原词、编号、金额或待查的具体描述；概览请使用 read_messages')],
+            offset: Annotated[int, Field(ge=0)] = 0, conversation_offset: Annotated[int, Field(ge=0)] = 0,
+            retrieval_mode: Annotated[Literal['keyword', 'hybrid'], Field(description='明确原词、编号、金额用 keyword；模糊描述用 hybrid。续页保持查询与模式不变')] = 'keyword') -> dict:
+            """在已选范围定位候选证据。按返回位置续页；指代、前提或状态变化用 read_context 核对。搜索不代表完整阅读。"""
             state = self.scope(scope_handle)
             if not query.strip():
                 return {'messages': [], 'requires_query': True, 'next_tool': 'read_messages',
                     'scope_handle': scope_handle, 'instruction': '搜索需要具体关键词。概览或没有关键词时直接 read_messages，不要使用空关键词搜索。'}
-            if offset < 0 or not 0 <= conversation_offset < len(state['conversations']):
-                raise ValueError(f'offset 必须非负；conversation_offset 有效范围为 0 到 {len(state["conversations"]) - 1}')
-            run = self.guard()
-            username = state['conversations'][conversation_offset]
-            result = await self.service.tools.search(run['account'], username, query, state['start'], state['end'], offset)
+            result = await self.search_page(state, query, offset, conversation_offset, retrieval_mode)
             self.guard()
+            username = state['conversations'][conversation_offset]
             messages = [m for m in result.get('messages', []) if m['username'] in state['conversations'] and state['start'] <= m['time'] < state['end']
                 and (not state['sender'] or state['sender'] == (m.get('sender_id') or m.get('sender')))]
-            key = hashlib.sha256(json.dumps([scope_handle, query, conversation_offset, offset]).encode()).hexdigest()[:24]
+            key = hashlib.sha256(json.dumps([scope_handle, query, retrieval_mode, conversation_offset, offset]).encode()).hexdigest()[:24]
             self.put('search-coverage:' + key, 'deep_search_coverage', {'scope_handle':scope_handle, 'query':query,
                 'conversation':username, 'offset':offset, 'sources':[m['source'] for m in messages],
+                'requested_retrieval_mode': retrieval_mode, 'retrieval_mode': result.get('retrieval_mode'),
                 'has_more':bool(result.get('has_more')), 'warning':result.get('warning', ''),
                 'freshness':result.get('freshness', {}), 'coverage':'search_only'})
-            return {**{k: v for k, v in result.items() if k not in ('messages', 'originals')}, 'messages': self.save_messages(messages),
+            return {**{k: v for k, v in result.items() if k not in ('messages', 'originals', 'search_ticket')},
+                'messages': self.save_messages(messages), 'coverage': 'search_only',
                 'next_conversation_offset': conversation_offset if result.get('has_more') else conversation_offset + 1 if conversation_offset + 1 < len(state['conversations']) else None}
 
 

@@ -71,7 +71,7 @@ app.router.route_class = PathFixRoute
 # Enable CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    expose_headers=['X-WCDA-AI-Trace', 'X-WCDA-AI-Diagnostic'],
+    expose_headers=['X-WCDA-AI-Trace', 'X-WCDA-AI-Diagnostic', 'Content-Disposition'],
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
@@ -96,8 +96,14 @@ from .routers.ai_insights import router as _ai_insights_router
 app.include_router(_ai_insights_router)
 from .routers.ai_agent import router as _ai_agent_router
 app.include_router(_ai_agent_router)
+from .routers.library import router as _library_router
+app.include_router(_library_router)
+from .routers.attachments import router as _attachments_router
+app.include_router(_attachments_router)
 from .routers.local_search import router as _local_search_router
 app.include_router(_local_search_router)
+from .routers.storage import router as _storage_router
+app.include_router(_storage_router)
 app.include_router(_health_router)
 app.include_router(_admin_router)
 app.include_router(_account_archive_export_router)

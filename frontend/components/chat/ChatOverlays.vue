@@ -175,7 +175,7 @@
                 ref="messageSearchInputRef"
                 v-model="messageSearchQuery"
                 type="text"
-                placeholder="输入关键词..."
+                :placeholder="messageSearchMode === 'hybrid' ? '输入关键词或描述...' : '关键词可留空，按类型浏览...'"
                 class="search-input-inline"
                 :class="{ 'privacy-blur': privacyMode }"
                 @focus="searchInputFocused = true"
@@ -214,6 +214,11 @@
               </button>
             </div>
 
+            <div class="search-filters-row">
+              <select v-model="messageSearchRenderType" class="search-filter-select w-full" aria-label="搜索消息类型">
+                <option v-for="type in messageTypeFilterOptions" :key="type.value" :value="type.value === 'all' ? '' : type.value">{{ type.label }}</option>
+              </select>
+            </div>
             <!-- 第二行：筛选条件 -->
             <div class="search-filters-row">
               <!-- 时间范围 -->
@@ -223,13 +228,14 @@
                 title="时间范围"
               >
                 <option value="">不限时间</option>
-                <option value="1">今天</option>
+                <option value="1">最近24小时</option>
                 <option value="3">最近3天</option>
                 <option value="7">最近7天</option>
                 <option value="30">最近30天</option>
                 <option value="90">最近3个月</option>
                 <option value="180">最近半年</option>
                 <option value="365">最近1年</option>
+                <option v-if="Number(messageSearchRangeDays) > 0 && !['1','3','7','30','90','180','365'].includes(messageSearchRangeDays)" :value="messageSearchRangeDays">最近{{ messageSearchRangeDays }}天</option>
                 <option value="custom">自定义...</option>
               </select>
 
@@ -373,7 +379,9 @@
           </div>
 
           <!-- 搜索历史 -->
-          <div v-if="!messageSearchQuery.trim() && searchHistory.length > 0" class="search-sidebar-history">
+          <SavedSearches :account="selectedAccount" :range-days="messageSearchRangeDays" :get-criteria="getSavedSearchCriteria" :apply-criteria="applySavedSearch" />
+          <p v-if="savedSearchFixedBounds && (savedSearchFixedBounds.start_time !== null || savedSearchFixedBounds.end_time !== null)" class="mx-3 my-1 text-xs text-[var(--app-text-secondary)]">已应用保存时的固定起止时间；修改日期后按所选日期搜索。</p>
+          <div v-if="!messageSearchHasCriteria && searchHistory.length > 0" class="search-sidebar-history">
             <div class="sidebar-section-header">
               <span class="sidebar-section-title">搜索历史</span>
               <button type="button" class="sidebar-clear-btn" @click="clearSearchHistory">清空</button>
@@ -398,7 +406,7 @@
           <!-- 搜索状态 -->
           <div class="search-sidebar-status">
             <ErrorNotice v-if="messageSearchError" :message="messageSearchError" compact class="sidebar-status-error" />
-            <div v-else-if="messageSearchQuery.trim()" class="sidebar-status-info">
+            <div v-else-if="messageSearchHasCriteria" class="sidebar-status-info">
               <div class="flex items-center justify-between gap-2">
                 <div class="min-w-0">
                   <template v-if="messageSearchBackendStatus === 'index_building'">
@@ -489,7 +497,7 @@
             </div>
 
             <!-- 索引构建中 -->
-            <div v-else-if="messageSearchQuery.trim() && !messageSearchLoading && !messageSearchError && messageSearchBackendStatus === 'index_building'" class="sidebar-empty-state">
+            <div v-else-if="messageSearchHasCriteria && !messageSearchLoading && !messageSearchError && messageSearchBackendStatus === 'index_building'" class="sidebar-empty-state">
               <svg class="sidebar-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
               </svg>
@@ -499,7 +507,7 @@
             </div>
 
             <!-- 空状态 -->
-            <div v-else-if="messageSearchQuery.trim() && !messageSearchLoading && !messageSearchError && messageSearchBackendStatus !== 'index_building' && messageSearchTotal === 0" class="sidebar-empty-state">
+            <div v-else-if="messageSearchHasCriteria && !messageSearchLoading && !messageSearchError && messageSearchBackendStatus !== 'index_building' && messageSearchTotal === 0" class="sidebar-empty-state">
               <svg class="sidebar-empty-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
               </svg>
@@ -508,11 +516,11 @@
             </div>
 
             <!-- 初始提示 -->
-            <div v-else-if="!messageSearchQuery.trim() && !searchHistory.length" class="sidebar-initial-state">
+            <div v-else-if="!messageSearchHasCriteria && !searchHistory.length" class="sidebar-initial-state">
               <svg class="sidebar-initial-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
               </svg>
-              <div class="sidebar-initial-text">输入关键词开始搜索</div>
+              <div class="sidebar-initial-text">输入关键词，或选择消息类型浏览</div>
               <div class="sidebar-initial-hint">
                 <kbd>Enter</kbd> 下一条 · <kbd>Shift+Enter</kbd> 上一条
               </div>
@@ -981,6 +989,8 @@
       >
         复制消息 JSON
       </button>
+      <button v-if="canSaveLibraryMessage(contextMenu.message)" class="chat-context-menu__item block w-full text-left px-3 py-2" type="button" @click="onSaveLibraryMessage('message')">保存原文到资料夹</button>
+      <button v-if="canSaveLibraryMessage(contextMenu.message) && ['file', 'image', 'video'].includes(contextMenu.message.renderType)" class="chat-context-menu__item block w-full text-left px-3 py-2" type="button" @click="onSaveLibraryMessage('attachment')">保存附件副本到资料夹</button>
       <button
         v-if="contextMenu.message?.renderType === 'quote' && contextMenu.message?.quoteServerId"
         class="chat-context-menu__item block w-full text-left px-3 py-2"
@@ -1010,12 +1020,16 @@
     </div>
 
 
+    <LibrarySaveDialog v-if="libraryMessageItem" :open="true" :account="libraryMessageAccount" :item="libraryMessageItem" @close="libraryMessageItem = null" @saved="libraryMessageItem = null" />
     <!-- 导出弹窗 -->
     <ChatExportDialog v-if="exportModalOpen" :state="state" />
 </template>
 
 <script>
 import { computed, defineComponent, ref, watch } from 'vue'
+import SavedSearches from '~/components/library/SavedSearches.vue'
+import LibrarySaveDialog from '~/components/library/LibrarySaveDialog.vue'
+import { buildLibraryMessageSource, canSaveLibraryMessage } from '~/composables/chat/savedSearchCriteria'
 import ChatExportDialog from '~/components/chat/ChatExportDialog.vue'
 import ChatHistoryFloatingWindows from '~/components/chat/ChatHistoryFloatingWindows.vue'
 
@@ -1036,11 +1050,20 @@ const readMaybeRef = (value) => {
 
 export default defineComponent({
   name: 'ChatOverlays',
-  components: { ChatExportDialog, ChatHistoryFloatingWindows },
+  components: { SavedSearches, LibrarySaveDialog, ChatExportDialog, ChatHistoryFloatingWindows },
   props: {
     state: { type: Object, required: true }
   },
   setup(props) {
+    const libraryMessageItem = ref(null)
+    const libraryMessageAccount = ref('')
+    const onSaveLibraryMessage = (kind) => {
+      const menu = readMaybeRef(props.state.contextMenu)
+      libraryMessageAccount.value = readMaybeRef(props.state.selectedAccount)
+      libraryMessageItem.value = {kind,source:buildLibraryMessageSource(readMaybeRef(props.state.selectedContact).username,menu.message)}
+      props.state.closeContextMenu()
+    }
+    watch(() => readMaybeRef(props.state.selectedAccount), () => {libraryMessageItem.value = null}, {flush:'sync'})
     const previewImageScale = ref(1)
     const previewImageRotation = ref(0)
 
@@ -1121,6 +1144,10 @@ export default defineComponent({
 
     return {
       ...props.state,
+      libraryMessageItem,
+      libraryMessageAccount,
+      onSaveLibraryMessage,
+      canSaveLibraryMessage,
       previewImageScale,
       previewImageRotation,
       previewImageTransformStyle,

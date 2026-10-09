@@ -289,16 +289,19 @@ class ChatTools:
         return load()
 
     @observed('agent.read.search')
-    async def search(self, account, username, query, start, end, offset, sender=None):
+    async def search(self, account, username, query, start, end, offset, sender=None, *,
+                     retrieval_mode='keyword', search_ticket=None, strict_paging=True):
         from ..routers.chat import search_chat_messages
         result = await search_chat_messages(local_request(), q=query, account=account, username=username or None, sender=sender,
                                            start_time=start, end_time=max(start, end - 1), offset=offset, limit=50, source='auto', include_hidden=True,
-                                            retrieval_mode='hybrid')
+                                           retrieval_mode=retrieval_mode, search_ticket=search_ticket,
+                                           strict_paging=strict_paging)
         messages = [normalize(account, username, x) for x in result.get('hits', [])]
         device_note = result.get('device',{}).get('reason','')
         return {'messages': [x for x in messages if x], 'has_more': result.get('hasMore', False),
                 'next_offset': offset + len(result.get('hits', [])) if result.get('hasMore') else None,
-                'retrieval_mode':result.get('retrievalMode','keyword'),'device':result.get('device'),
+                'requested_retrieval_mode': retrieval_mode, 'retrieval_mode': result['retrievalMode'],
+                'search_ticket': result.get('searchTicket'), 'device':result.get('device'),
                 'match_counts': {method: sum(method in x.get('match_methods', []) for x in messages if x)
                                  for method in ('keyword', 'semantic')},
                 'warning': '；'.join(filter(None,[result.get('coverage', {}).get('message') or '搜索索引来自本地快照；尚未解析的图片内容不在文字搜索范围内。',device_note])),

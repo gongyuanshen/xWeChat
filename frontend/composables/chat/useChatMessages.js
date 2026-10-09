@@ -388,24 +388,18 @@ export const useChatMessages = ({
       const ts = Number(message.createTime || 0)
       const show = !previousTs || (ts && Math.abs(ts - previousTs) >= 300)
       if (ts) previousTs = ts
-      const originalIsSent = !!message?.isSent
-      const imageGroupItems = Array.isArray(message?.imageGroupItems)
-        ? message.imageGroupItems.map((item) => {
-            const itemOriginalIsSent = !!item?.isSent
-            return {
-              ...item,
-              _originalIsSent: itemOriginalIsSent,
-              isSent: reverseSides ? !itemOriginalIsSent : itemOriginalIsSent
-            }
-          })
-        : null
-      return {
+      // Keep the source reference so older rows do not rerender when history is prepended.
+      const displayMessage = reverseSides ? {
         ...message,
-        _originalIsSent: originalIsSent,
-        isSent: reverseSides ? !originalIsSent : originalIsSent,
-        ...(imageGroupItems ? { imageGroupItems } : {}),
+        isSent: !message.isSent,
+        ...(Array.isArray(message.imageGroupItems) ? {
+          imageGroupItems: message.imageGroupItems.map(item => ({ ...item, isSent: !item.isSent }))
+        } : {})
+      } : message
+      return {
+        message: displayMessage,
         showTimeDivider: !!show,
-        timeDivider: formatTimeDivider(ts)
+        timeDivider: show ? formatTimeDivider(ts) : ''
       }
     })
     if (shouldLogRender) {

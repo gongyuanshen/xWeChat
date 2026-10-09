@@ -50,6 +50,7 @@ select_chat_scope 成功后必须使用 read_messages、list_files、search_mess
 查找最新文件、附件或论文先 list_files，再 analyze_media；不翻普通聊天或用图片、链接代替文件。普通读取从最新开始，证据足够即答。未指定时间的“最新”按范围内发送时间排序，不限近7天；同秒并列不能断言唯一最新。
 文件用途或主题默认用 analyze_media 的 overview；证据不足才按 next_cursor_handle 续读，明确要求全文逐图分析时才用 full。
 明确全量分析直接逐页 read_messages、commit_findings，不先穷举关键词。普通问题一次关键词搜索足够定位时回查原文；连续无结果时读取范围原文，不扩展成数十次同义词搜索。
+search_messages 明确选择 retrieval_mode：原词、编号、金额用 keyword，模糊描述用 hybrid；指代、前提或状态变化用 read_context 核对。搜索仅 search_only，不代表完整阅读；混合续页保持查询与模式，票据失效须显式重启并保留证据，错误不得当零命中或自动换模式。
 task 角色：range-analyst完整分析，fact-checker定向核查，retrieval-analyst独立检索。完整范围一次委派，由程序分片；独立目标可同时委派。汇总使用全部分片，关联须有来源支持；具体疑点最多核查两轮，仍不确定如实说明。子任务继承范围，不自行扩大或递归。
 证据充分后用简短结论和必要原文回答，不添加用户没有要求的话题。通知/报告时间只说明当时已知的状态，不能当作精确发生时间，也不能据此计算提前或延迟；原文明确给出事件时间才可这样表述。
 默认用自然、连贯的中文转述和归纳，先说明发生了什么，再补充关键细节。转述归纳与总结【绝对严禁使用任何双引号（“”或""）】。
@@ -415,6 +416,8 @@ class RuntimeEvents(AgentMiddleware):
             'analyze_media': '分析图片与附件'}.get(name, name)
         entry = self.service.timeline_item(run['id'], 'tool', label, item_id='tool:' + call['id'], status='running',
             action=name, query=args.get('query', ''), source=args.get('source', ''),
+            **({'requested_retrieval_mode': args.get('retrieval_mode', 'keyword')} if name == 'search_messages' else
+                {'requested_retrieval_mode': run.get('work_retrieval_mode', 'hybrid')} if name == 'read_messages' and run.get('work_query') else {}),
             # 成败记录均保留提交目标，供界面识别同一页的重试；不记录发现正文。
             **({key: args.get(key, '') for key in ('scope_handle', 'page_id')} if name == 'commit_findings' else {}))
         self.service.update(run['id'], stage=label, stage_started_at=time.time())
@@ -499,10 +502,21 @@ class RuntimeEvents(AgentMiddleware):
             if exc.status_code not in (404, 408, 409, 410, 422, 429, 500, 502, 503, 504):
                 raise
             message = f'资料查询暂未完成（状态 {exc.status_code}），已保存的原文和分页进度仍可使用。'
+            details = {}
+            if name == 'search_messages' or (name == 'read_messages' and run.get('work_query')):
+                # 检索错误含明确的迁移、推理或票据恢复要求，不能擦成泛化的空结果。
+                if isinstance(exc.detail, dict):
+                    message = str(exc.detail.get('message') or exc.detail)
+                    if exc.detail.get('code'):
+                        details['error_code'] = exc.detail['code']
+                    if 'coverage' in exc.detail:
+                        details['coverage'] = exc.detail['coverage']
+                else:
+                    message = str(exc.detail)
             repeated = self.record_outcome(call, message)
             self.service.timeline_item(run['id'], 'tool', label, item_id=entry, status='failed',
-                result={'error': message, 'retry_count': repeated})
-            return ToolMessage(content=json.dumps({'error': message, 'recovery': self.recovery()}, ensure_ascii=False),
+                result={'error': message, 'retry_count': repeated, **details})
+            return ToolMessage(content=json.dumps({'error': message, **details, 'recovery': self.recovery()}, ensure_ascii=False),
                 tool_call_id=call['id'], status='error')
         except ProviderFailure as exc:
             # 视觉服务失败只影响当前媒体，不能让已读文字和其他并发工具一起丢失。

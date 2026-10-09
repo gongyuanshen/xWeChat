@@ -82,9 +82,12 @@ export const useSnapshotRefresh = ({ api, selectedAccount, active, onPublished, 
         throw new Error([response.error.stage, response.error.type, response.error.message].filter(Boolean).join(' · '))
       }
       if (response.refresh_available) {
-        if (!response.enabled && !response.running) {
+        if (manual && response.user_paused && response.running) {
+          throw new Error('当前同步任务尚未结束，请稍后重试恢复。')
+        }
+        if (!response.enabled && !response.running && (!response.user_paused || manual)) {
           commandPending.value = true
-          response = await api.startSnapshotRefresh({ account, interval_seconds: 30 })
+          response = await api.startSnapshotRefresh({ account, interval_seconds: 30, ...(manual ? { resume: true } : {}) })
         } else if (manual && !response.running) {
           commandPending.value = true
           response = await api.refreshSnapshotOnce({ account })

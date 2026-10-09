@@ -372,8 +372,14 @@ class MediaService:
                     local_text.append(text[-1])
                     # 仅记录本地提取文字，独立于视觉模型输出，供离线检索复用。
                     local_id = hashlib.sha256(f"{account}:{message['username']}:{message['anchor']}".encode()).hexdigest()
-                    self.store.put('local_media_text', {'text': '\n'.join(local_text), 'username': message['username'],
-                        'anchor': message['anchor'], 'file_hash': hashlib.sha256(data).hexdigest(), 'version': 1}, id=local_id, account=account)
+                    file_hash = hashlib.sha256(data).hexdigest()
+                    with self.store.lock:
+                        previous = self.store.get('local_media_text', local_id)
+                        # Explicit extraction has already read this exact file.
+                        # Interrupted Agent progress must not replace its complete text.
+                        if not (previous is not None and previous.get('complete') is True and previous.get('file_hash') == file_hash):
+                            self.store.put('local_media_text', {'text': '\n'.join(local_text), 'username': message['username'],
+                                'anchor': message['anchor'], 'file_hash': file_hash, 'version': 1}, id=local_id, account=account)
                 diagnostic_event('media.page.finished', index=index, duration_ms=(time.monotonic()-unit_started)*1000)
                 if progress_callback:
                     progress_callback({'phase': 'extracting', 'label': label, 'completed_units': index + 1})

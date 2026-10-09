@@ -9,9 +9,9 @@
     :data-msg-id="message.id"
     :data-create-time="message.createTime"
   >
-    <div v-if="message.showTimeDivider" class="flex justify-center mb-3">
+    <div v-if="showTimeDivider" class="flex justify-center mb-3">
       <div class="message-time-divider px-2.5 py-0.5 text-xs">
-        {{ message.timeDivider }}
+        {{ timeDivider }}
       </div>
     </div>
 
@@ -111,13 +111,17 @@ export default defineComponent({
   components: { ContactProfileCard, MessageContent, MessageInsightLabel },
   props: {
     state: { type: Object, required: true },
-    message: { type: Object, required: true }
+    message: { type: Object, required: true },
+    showTimeDivider: { type: Boolean, default: false },
+    timeDivider: { type: String, default: '' }
   },
   setup(props) {
     return {
       ...props.state,
       insightLabels: toRef(props.state, 'insightLabels'),
-      message: toRef(props, 'message')
+      message: toRef(props, 'message'),
+      showTimeDivider: toRef(props, 'showTimeDivider'),
+      timeDivider: toRef(props, 'timeDivider')
     }
   }
 })

@@ -22,6 +22,11 @@ class SnapshotAccountRequest(BaseModel):
 
 class SnapshotStartRequest(SnapshotAccountRequest):
     interval_seconds: float = Field(30, ge=1, allow_inf_nan=False, strict=True)
+    resume: bool = Field(False, strict=True)
+
+
+class SnapshotStopRequest(SnapshotAccountRequest):
+    user_paused: bool = Field(False, strict=True)
 
 
 def _call(operation, *args, **kwargs):
@@ -68,12 +73,13 @@ async def snapshot_refresh_events(request: Request, account: str = Query(..., mi
 
 @router.post("/start", status_code=202)
 def start_snapshot_refresh(request: SnapshotStartRequest):
-    return _call(SNAPSHOT_REFRESH.start, request.account, interval_seconds=request.interval_seconds)
+    return _call(SNAPSHOT_REFRESH.start, request.account, interval_seconds=request.interval_seconds,
+                 resume=request.resume)
 
 
 @router.post("/stop")
-def stop_snapshot_refresh(request: SnapshotAccountRequest):
-    return _call(SNAPSHOT_REFRESH.stop, request.account)
+def stop_snapshot_refresh(request: SnapshotStopRequest):
+    return _call(SNAPSHOT_REFRESH.stop, request.account, user_paused=request.user_paused)
 
 
 @router.post("/once", status_code=202)

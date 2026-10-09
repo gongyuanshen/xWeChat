@@ -591,6 +591,16 @@ class AIService:
         ids = [t["id"] for t in self.store.list("task", account)]
         agent_ids = [r['id'] for r in self.store.list('agent_run', account)]
         self.store.purge_account(account)
+        # Saved attachment bytes are owned by the account, independently of
+        # Agent run history. Remove only after its records were purged.
+        import hashlib
+        import shutil
+        library_root = self.store.root.resolve() / 'library'
+        library_account = library_root / hashlib.sha256(account.encode()).hexdigest()
+        if not library_account.resolve().is_relative_to(self.store.root.resolve()):
+            raise ValueError('资料库附件目录越出所属数据目录')
+        if library_account.exists():
+            shutil.rmtree(library_account)
         path = self.store.root / "checkpoints.sqlite3"
         if path.exists():
             with sqlite3.connect(path, timeout=30) as db:

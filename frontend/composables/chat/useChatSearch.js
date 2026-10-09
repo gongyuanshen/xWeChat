@@ -1,3 +1,4 @@
+import { snapshotSearchCriteria, searchBoundDate } from './savedSearchCriteria'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { showErrorAlert } from '~/composables/useErrorNotice'
 import { createAnchorContextCache } from '~/utils/anchorContextCache'
@@ -122,13 +123,23 @@ return {
 const messageSearchOpen = ref(false)
 const messageSearchQuery = ref('')
 const messageSearchMode = ref('keyword')
+const messageSearchRenderType = ref('text')
+const messageSearchHasCriteria = computed(() => !!messageSearchQuery.value.trim() || !!messageSearchRenderType.value)
 const messageSearchCoverage = ref('')
 const messageSearchTicket = ref('')
+const savedSearchFixedBounds = ref(null)
+let messageSearchRequestBounds = null
+let applyingSavedSearch = false
+let applyingSavedSearchId = 0
 const localSearchSettings = useSettingsDialog()
 const localSearchApi = useAiApi()
 const openLocalSearchSettings = () => localSearchSettings.openDialog('local-search')
 const changeSearchMode = async mode => {
   if (mode === 'hybrid') {
+    if (!messageSearchQuery.value.trim()) {
+      messageSearchError.value = '智能搜索需要关键词；仅按类型筛选请使用关键词模式'
+      return
+    }
     try {
       const status = await localSearchApi.request('/local-search/status', { query: { account: selectedAccount.value } })
       if (!status.config?.enabled || !status.config?.active) {
@@ -139,7 +150,7 @@ const changeSearchMode = async mode => {
     } catch { messageSearchCoverage.value = '无法读取本地检索状态，请稍后重试'; return }
   }
   messageSearchMode.value = mode
-  if (messageSearchQuery.value.trim()) await runMessageSearch({ reset: true, source: 'retrieval-mode' })
+  if (messageSearchHasCriteria.value) await runMessageSearch({ reset: true, source: 'retrieval-mode' })
 }
 const messageSearchScope = ref('global') // conversation | global
 const messageSearchRangeDays = ref('') // empty means no time filter
@@ -162,6 +173,23 @@ const messageSearchBackendStatus = ref('')
 const messageSearchIndexInfo = ref(null)
 const messageSearchHasMore = ref(false)
 const messageSearchOffset = ref(0)
+let senderFacetRequestId = 0
+let searchFilterVersion = 0
+let savedSearchApplicationId = 0
+let messageSearchReqId = 0
+watch([selectedAccount, () => selectedContact.value?.username, messageSearchScope, messageSearchQuery,
+  messageSearchMode, messageSearchRenderType, messageSearchRangeDays, messageSearchSessionType, messageSearchSender,
+  messageSearchStartDate, messageSearchEndDate], () => {
+  ++searchFilterVersion
+  ++senderFacetRequestId
+  ++messageSearchReqId
+  messageSearchLoading.value = false
+  messageSearchHasMore.value = false
+  messageSearchRequestBounds = null
+  messageSearchSenderLoading.value = false
+  messageSearchSenderOptionsKey.value = ''
+}, { flush: 'sync' })
+watch(selectedAccount, () => { ++savedSearchApplicationId; applyingSavedSearch = false }, { flush: 'sync' })
 const messageSearchLimit = 50
 const messageSearchTotal = ref(0)
 const messageSearchSelectedIndex = ref(-1)
@@ -340,14 +368,16 @@ const range = String(messageSearchRangeDays.value || '')
 const sd = String(messageSearchStartDate.value || '')
 const ed = String(messageSearchEndDate.value || '')
 const st = scope === 'global' ? String(messageSearchSessionType.value || '').trim() : ''
-return [acc, scope, conv, q, range, sd, ed, st].join('|')
+return [acc, scope, conv, q, messageSearchRenderType.value, range, sd, ed, st].join('|')
 }
 
 const ensureMessageSearchSendersLoaded = async () => {
 const key = getMessageSearchSenderFacetKey()
 if (!key) return
 if (messageSearchSenderOptionsKey.value === key && !messageSearchSenderLoading.value) return
+const version = searchFilterVersion
 const list = await fetchMessageSearchSenders()
+if (version !== searchFilterVersion || key !== getMessageSearchSenderFacetKey()) return
 messageSearchSenderOptionsKey.value = key
 return list
 }
@@ -394,6 +424,9 @@ try {
 }
 
 const fetchMessageSearchSenders = async () => {
+const requestId = ++senderFacetRequestId
+const version = searchFilterVersion
+const current = () => requestId === senderFacetRequestId && version === searchFilterVersion
 messageSearchSenderError.value = ''
 if (!selectedAccount.value) {
   messageSearchSenderOptions.value = []
@@ -425,7 +458,7 @@ if (msgQ) {
   params.message_q = msgQ
 }
 
-params.render_types = 'text'
+if (messageSearchRenderType.value) params.render_types = messageSearchRenderType.value
 
 const range = String(messageSearchRangeDays.value || '')
 if (range === 'custom') {
@@ -449,6 +482,13 @@ if (range === 'custom') {
   }
 }
 
+if (savedSearchFixedBounds.value) {
+  delete params.start_time
+  delete params.end_time
+  if (savedSearchFixedBounds.value.start_time !== null) params.start_time = savedSearchFixedBounds.value.start_time
+  if (savedSearchFixedBounds.value.end_time !== null) params.end_time = savedSearchFixedBounds.value.end_time
+}
+
 if (scope === 'global') {
   const st = String(messageSearchSessionType.value || '').trim()
   if (st) params.session_type = st
@@ -462,6 +502,7 @@ logSearchPhase('search-senders:start', {
 })
 try {
   const resp = await api.listChatSearchSenders(params)
+  if (!current()) return []
   const status = String(resp?.status || '')
   if (status !== 'success') {
     logSearchPhase('search-senders:non-success', {
@@ -492,6 +533,7 @@ try {
   })
   return list
 } catch (e) {
+  if (!current()) return []
   messageSearchSenderError.value = e?.message || '加载发送者失败'
   messageSearchSenderOptions.value = []
   messageSearchSenderOptionsKey.value = ''
@@ -502,7 +544,7 @@ try {
   })
   return []
 } finally {
-  messageSearchSenderLoading.value = false
+  if (current()) messageSearchSenderLoading.value = false
 }
 }
 
@@ -529,7 +571,7 @@ messageSearchIndexPollTimer = setInterval(async () => {
     if (String(messageSearchScope.value || '') === 'conversation') {
       await fetchMessageSearchSenders()
     }
-    if (String(messageSearchQuery.value || '').trim()) {
+    if (messageSearchHasCriteria.value) {
       await runMessageSearch({ reset: true, source: 'index-poll-ready' })
     }
   }
@@ -995,12 +1037,10 @@ logSearchPhase('message-search:open:ready', {
 })
 await fetchMessageSearchIndexStatus()
 await fetchMessageSearchSenders()
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'toggle-open-with-query' })
 }
 }
-
-let messageSearchReqId = 0
 
 const runMessageSearch = async ({ reset, source = 'unknown' } = {}) => {
 if (!selectedAccount.value) {
@@ -1011,11 +1051,13 @@ ensureMessageSearchScopeValid()
 
 const q = String(messageSearchQuery.value || '').trim()
 logSearchPhase('runMessageSearch:start', buildRunSearchLogDetails({ source, reset }))
-if (!q) {
+if (!q && (messageSearchMode.value === 'hybrid' || !messageSearchRenderType.value)) {
+  ++messageSearchReqId
+  messageSearchLoading.value = false
   logSearchPhase('runMessageSearch:skip:empty-query', buildRunSearchLogDetails({ source, reset }))
   messageSearchResults.value = []
   messageSearchHasMore.value = false
-  messageSearchError.value = ''
+  messageSearchError.value = messageSearchMode.value === 'hybrid' ? '智能搜索需要关键词；仅按类型筛选请使用关键词模式' : '请输入关键词或选择消息类型'
   messageSearchSelectedIndex.value = -1
   messageSearchBackendStatus.value = ''
   messageSearchTotal.value = 0
@@ -1049,7 +1091,7 @@ const params = {
   offset: messageSearchOffset.value
 }
 
-params.render_types = 'text'
+if (messageSearchRenderType.value) params.render_types = messageSearchRenderType.value
 
 const range = String(messageSearchRangeDays.value || '')
 if (range === 'custom') {
@@ -1072,6 +1114,13 @@ if (range === 'custom') {
   }
 }
 
+if (savedSearchFixedBounds.value) {
+  delete params.start_time
+  delete params.end_time
+  if (savedSearchFixedBounds.value.start_time !== null) params.start_time = savedSearchFixedBounds.value.start_time
+  if (savedSearchFixedBounds.value.end_time !== null) params.end_time = savedSearchFixedBounds.value.end_time
+}
+
 if (scope === 'global') {
   const st = String(messageSearchSessionType.value || '').trim()
   if (st) params.session_type = st
@@ -1092,6 +1141,14 @@ if (scope === 'conversation') {
 }
 
 try {
+  if (reset || messageSearchRequestBounds === null) {
+    messageSearchRequestBounds = { start_time: params.start_time, end_time: params.end_time }
+  } else {
+    delete params.start_time
+    delete params.end_time
+    if (messageSearchRequestBounds.start_time !== undefined) params.start_time = messageSearchRequestBounds.start_time
+    if (messageSearchRequestBounds.end_time !== undefined) params.end_time = messageSearchRequestBounds.end_time
+  }
   params.retrieval_mode = messageSearchMode.value
   if (messageSearchTicket.value) params.search_ticket = messageSearchTicket.value
   const resp = await api.searchChatMessages(params)
@@ -1422,7 +1479,7 @@ const anchorContextCache = createAnchorContextCache(async params => {
   return response
 })
 let anchorNavigationVersion = 0
-watch(selectedAccount, () => { anchorContextCache.clear(); ++anchorNavigationVersion }, { flush: 'sync' })
+watch(selectedAccount, () => { anchorContextCache.clear(); ++anchorNavigationVersion; ++messageSearchReqId; savedSearchFixedBounds.value = null; messageSearchLoading.value = false }, { flush: 'sync' })
 onUnmounted(() => { anchorContextCache.clear(); ++anchorNavigationVersion })
 const anchorParams = (account, username, anchor) => ({ account, username, anchor_id: anchor, before: 35, after: 35, source: DEFAULT_CHAT_SOURCE })
 const prepareAnchorContext = ({ targetUsername, anchorId } = {}) => {
@@ -1864,7 +1921,7 @@ logSearchPhase('search-result-sender:click', {
   senderUsername
 })
 if (String(messageSearchSender.value || '').trim() === senderUsername) {
-  if (String(messageSearchQuery.value || '').trim()) {
+  if (messageSearchHasCriteria.value) {
     await runMessageSearch({ reset: true, source: 'result-sender-click-same' })
   }
   return
@@ -1873,8 +1930,7 @@ messageSearchSender.value = senderUsername
 }
 
 const onSearchNext = async () => {
-const q = String(messageSearchQuery.value || '').trim()
-if (!q) return
+if (!messageSearchHasCriteria.value) return
 
 if (!messageSearchResults.value.length && !messageSearchLoading.value) {
   await runMessageSearch({ reset: true, source: 'search-next-bootstrap' })
@@ -1888,8 +1944,7 @@ await locateSearchHit(messageSearchResults.value[next])
 }
 
 const onSearchPrev = async () => {
-const q = String(messageSearchQuery.value || '').trim()
-if (!q) return
+if (!messageSearchHasCriteria.value) return
 
 if (!messageSearchResults.value.length && !messageSearchLoading.value) {
   await runMessageSearch({ reset: true, source: 'search-prev-bootstrap' })
@@ -1914,6 +1969,7 @@ try {
   messageSearchInputRef.value?.focus?.()
 } catch {}
 await fetchMessageSearchIndexStatus()
+if (messageSearchHasCriteria.value) await runMessageSearch({ reset: true, source: 'open-search' })
 logSearchPhase('message-search:open:end', {
   scope: String(messageSearchScope.value || 'conversation'),
   queryLength: String(messageSearchQuery.value || '').trim().length
@@ -1926,34 +1982,44 @@ logSearchPhase('message-search-scope:change', {
   open: !!messageSearchOpen.value,
   queryLength: String(messageSearchQuery.value || '').trim().length
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 ensureMessageSearchScopeValid()
 closeMessageSearchSenderDropdown()
 messageSearchSender.value = ''
 messageSearchSenderOptions.value = []
 messageSearchSenderOptionsKey.value = ''
+const version = searchFilterVersion
 await fetchMessageSearchSenders()
+if (version !== searchFilterVersion || applyingSavedSearch || !messageSearchOpen.value) return
 messageSearchOffset.value = 0
 messageSearchResults.value = []
 messageSearchSelectedIndex.value = -1
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'scope-change' })
 }
 })
 
+watch(messageSearchRenderType, async () => {
+if (applyingSavedSearch || !messageSearchOpen.value) return
+closeMessageSearchSenderDropdown()
+messageSearchSenderOptions.value = []
+await runMessageSearch({ reset: true, source: 'message-type-change' })
+})
+
 watch(messageSearchRangeDays, async (next, prev) => {
+if (!applyingSavedSearch) savedSearchFixedBounds.value = null
 logSearchPhase('message-search-range:change', {
   previous: String(prev || '').trim(),
   next: String(next || '').trim(),
   open: !!messageSearchOpen.value,
   queryLength: String(messageSearchQuery.value || '').trim().length
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 closeMessageSearchSenderDropdown()
 messageSearchOffset.value = 0
 messageSearchResults.value = []
 messageSearchSelectedIndex.value = -1
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'range-change' })
 }
 })
@@ -1965,22 +2031,25 @@ logSearchPhase('message-search-session-type:change', {
   open: !!messageSearchOpen.value,
   queryLength: String(messageSearchQuery.value || '').trim().length
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 if (String(messageSearchScope.value || '') !== 'global') return
 closeMessageSearchSenderDropdown()
 messageSearchSender.value = ''
 messageSearchSenderOptions.value = []
 messageSearchSenderOptionsKey.value = ''
+const version = searchFilterVersion
 await fetchMessageSearchSenders()
+if (version !== searchFilterVersion || applyingSavedSearch || !messageSearchOpen.value) return
 messageSearchOffset.value = 0
 messageSearchResults.value = []
 messageSearchSelectedIndex.value = -1
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'session-type-change' })
 }
 })
 
 watch([messageSearchStartDate, messageSearchEndDate], async ([nextStart, nextEnd], [prevStart, prevEnd]) => {
+if (!applyingSavedSearch) savedSearchFixedBounds.value = null
 logSearchPhase('message-search-custom-range:change', {
   previousStart: String(prevStart || '').trim(),
   previousEnd: String(prevEnd || '').trim(),
@@ -1988,13 +2057,13 @@ logSearchPhase('message-search-custom-range:change', {
   nextEnd: String(nextEnd || '').trim(),
   open: !!messageSearchOpen.value
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 if (String(messageSearchRangeDays.value || '') !== 'custom') return
 closeMessageSearchSenderDropdown()
 messageSearchOffset.value = 0
 messageSearchResults.value = []
 messageSearchSelectedIndex.value = -1
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'custom-range-change' })
 }
 })
@@ -2006,11 +2075,11 @@ logSearchPhase('message-search-sender:change', {
   open: !!messageSearchOpen.value,
   queryLength: String(messageSearchQuery.value || '').trim().length
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 messageSearchOffset.value = 0
 messageSearchResults.value = []
 messageSearchSelectedIndex.value = -1
-if (String(messageSearchQuery.value || '').trim()) {
+if (messageSearchHasCriteria.value) {
   await runMessageSearch({ reset: true, source: 'sender-change' })
 }
 })
@@ -2021,11 +2090,17 @@ logSearchPhase('message-search-query:change', {
   nextLength: String(next || '').trim().length,
   open: !!messageSearchOpen.value
 })
-if (!messageSearchOpen.value) return
+if (applyingSavedSearch || !messageSearchOpen.value) return
 if (messageSearchDebounceTimer) clearTimeout(messageSearchDebounceTimer)
 messageSearchDebounceTimer = null
 const q = String(messageSearchQuery.value || '').trim()
-if (!q) {
+if (!messageSearchHasCriteria.value) {
+  ++messageSearchReqId
+  messageSearchResults.value = []
+  messageSearchHasMore.value = false
+  messageSearchTotal.value = 0
+  messageSearchLoading.value = false
+  stopMessageSearchIndexPolling()
   logSearchPhase('message-search-query:debounce:skip-empty', {
     queryLength: q.length
   })
@@ -2051,14 +2126,16 @@ async () => {
     scope: String(messageSearchScope.value || '').trim(),
     selectedContactUsername: String(selectedContact.value?.username || '').trim()
   })
-  if (!messageSearchOpen.value) return
+  if (applyingSavedSearch || !messageSearchOpen.value) return
   if (String(messageSearchScope.value || '') !== 'conversation') return
   closeMessageSearchSenderDropdown()
   messageSearchSender.value = ''
   messageSearchSenderOptions.value = []
   messageSearchSenderOptionsKey.value = ''
-  await fetchMessageSearchSenders()
-  if (String(messageSearchQuery.value || '').trim()) {
+  const version = searchFilterVersion
+await fetchMessageSearchSenders()
+if (version !== searchFilterVersion || applyingSavedSearch || !messageSearchOpen.value) return
+  if (messageSearchHasCriteria.value) {
     await runMessageSearch({ reset: true, source: 'selected-contact-change' })
   }
 }
@@ -2098,28 +2175,25 @@ if (!c) return
 if (timeSidebarScrollSyncRaf) return
 timeSidebarScrollSyncRaf = requestAnimationFrame(() => {
   timeSidebarScrollSyncRaf = null
-  try {
-    const containerRect = c.getBoundingClientRect()
-    const targetY = containerRect.top + 24
-    const els = c.querySelectorAll?.('[data-msg-id][data-create-time]') || []
-    if (!els || !els.length) return
+  const containerRect = c.getBoundingClientRect()
+  const targetY = containerRect.top + 24
+  const els = c.querySelectorAll?.('[data-msg-id][data-create-time]') || []
+  if (!els || !els.length) return
 
-    let chosen = null
-    for (const el of els) {
-      const r = el.getBoundingClientRect?.()
-      if (!r) continue
-      if (r.bottom >= targetY) {
-        chosen = el
-        break
-      }
-    }
-    if (!chosen) chosen = els[els.length - 1]
-    const ts = Number(chosen?.getAttribute?.('data-create-time') || 0)
-    const ds = _dateStrFromEpochSeconds(ts)
-    if (!ds) return
-    // Don't await inside rAF; keep scroll handler snappy.
-    _applyTimeSidebarSelectedDate(ds, { syncMonth: true })
-  } catch {}
+  // Rows follow document order, so find the first visible bottom with logarithmic layout reads.
+  let low = 0
+  let high = els.length - 1
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2)
+    if (els[middle].getBoundingClientRect().bottom >= targetY) high = middle
+    else low = middle + 1
+  }
+  const chosen = els[low]
+  const ts = Number(chosen?.getAttribute?.('data-create-time') || 0)
+  const ds = _dateStrFromEpochSeconds(ts)
+  if (!ds) return
+  // Don't await inside rAF; keep scroll handler snappy.
+  _applyTimeSidebarSelectedDate(ds, { syncMonth: true })
 })
 }
 
@@ -2174,6 +2248,58 @@ if (c.scrollTop <= 240 && autoLoadReady.value && hasMoreMessages.value && !isLoa
 }
 }
 
+  const getSavedSearchCriteria = ({relative = false} = {}) => snapshotSearchCriteria({
+    scope: messageSearchScope.value, username: selectedContact.value?.username || '',
+    query: messageSearchQuery.value, retrieval_mode: messageSearchMode.value, render_types: messageSearchRenderType.value, relative,
+    sender: messageSearchSender.value, session_type: messageSearchSessionType.value,
+    range: messageSearchRangeDays.value, startDate: messageSearchStartDate.value,
+    endDate: messageSearchEndDate.value, fixedBounds: savedSearchFixedBounds.value
+  })
+  const applySavedSearch = async (criteria) => {
+    const account = selectedAccount.value
+    const applicationId = ++savedSearchApplicationId
+    const current = () => applicationId === savedSearchApplicationId && selectedAccount.value === account
+    ++searchFilterVersion
+    ++senderFacetRequestId
+    messageSearchSenderLoading.value = false
+    ++messageSearchReqId
+    messageSearchLoading.value = false
+    stopMessageSearchIndexPolling()
+    applyingSavedSearch = true
+    applyingSavedSearchId = applicationId
+    if (messageSearchDebounceTimer) clearTimeout(messageSearchDebounceTimer)
+    messageSearchDebounceTimer = null
+    try {
+      if (criteria.scope === 'conversation') {
+        const contact = contacts.value.find(item => item.username === criteria.username)
+        if (!contact) throw new Error('保存搜索中的会话不在当前账号中')
+        await selectContact(contact)
+        if (!current()) return
+      }
+      messageSearchOpen.value = true
+      messageSearchScope.value = criteria.scope
+      messageSearchQuery.value = criteria.query
+      messageSearchMode.value = criteria.retrieval_mode
+      messageSearchRenderType.value = criteria.render_types
+      messageSearchSessionType.value = criteria.session_type
+      messageSearchSender.value = criteria.sender
+      messageSearchSenderOptions.value = []
+      messageSearchSenderOptionsKey.value = ''
+      messageSearchRangeDays.value = criteria.relative_days != null ? String(criteria.relative_days) : criteria.start_time !== null || criteria.end_time !== null ? 'custom' : ''
+      messageSearchStartDate.value = searchBoundDate(criteria.start_time)
+      messageSearchEndDate.value = searchBoundDate(criteria.end_time)
+      savedSearchFixedBounds.value = criteria.relative_days != null ? null : {start_time:criteria.start_time,end_time:criteria.end_time}
+      messageSearchRequestBounds = null
+      messageSearchOffset.value = 0
+      messageSearchTicket.value = ''
+      messageSearchResults.value = []
+      messageSearchHasMore.value = false
+      messageSearchSelectedIndex.value = -1
+      await nextTick()
+    } finally { if (applicationId === applyingSavedSearchId) applyingSavedSearch = false }
+    if (current()) await runMessageSearch({reset:true,source:'saved-search-apply'})
+  }
+
   const resetSearchState = () => {
     closeMessageSearch()
     closeTimeSidebar()
@@ -2210,8 +2336,13 @@ if (c.scrollTop <= 240 && autoLoadReady.value && hasMoreMessages.value && !isLoa
   })
 
   return {
+    getSavedSearchCriteria,
+    applySavedSearch,
+    savedSearchFixedBounds,
     messageSearchOpen,
     messageSearchMode,
+    messageSearchRenderType,
+    messageSearchHasCriteria,
     messageSearchCoverage,
     changeSearchMode,
     openLocalSearchSettings,

@@ -4692,8 +4692,6 @@ def _should_use_single_char_recent_probe(conn: sqlite3.Connection, token: str) -
 
 async def _search_chat_messages_via_fts(request: Request, *, q: str, account: Optional[str], username: Optional[str], sender: Optional[str], session_type: Optional[str], limit: int, offset: int, start_time: Optional[int], end_time: Optional[int], render_types: Optional[str], include_hidden: bool, include_official: bool, source: Optional[str]=None) -> dict[str, Any]:
     tokens = _make_search_tokens(q)
-    if not tokens:
-        raise HTTPException(status_code=400, detail="Missing q.")
 
     if limit <= 0:
         raise HTTPException(status_code=400, detail="Invalid limit.")
@@ -4823,7 +4821,7 @@ async def _search_chat_messages_via_fts(request: Request, *, q: str, account: Op
         }
 
     fts_query = _build_fts_query(q)
-    if not fts_query:
+    if tokens and not fts_query:
         raise HTTPException(status_code=400, detail="Missing q.")
 
     index_db_path = get_chat_search_index_db_path(account_dir)
@@ -4833,13 +4831,14 @@ async def _search_chat_messages_via_fts(request: Request, *, q: str, account: Op
     try:
         try:
             single_char_token = _single_char_recent_probe_token(q, tokens)
-            if _should_use_single_char_recent_probe(conn, single_char_token):
+            if not tokens or _should_use_single_char_recent_probe(conn, single_char_token):
+                # 无关键词的类型浏览也使用现有时间索引，避免扫描 FTS 全表再排序。
                 # 高频单字（如“奶”）在 FTS 命中后再按时间排序会把大量命中项全部取出排序。
                 # 新索引同步维护 message_meta 的时间顺序索引；对高频单字改为从最近消息向前探测，
                 # 只取 limit+1 条，避免单字搜索被全量排序拖慢。低频/旧索引仍走 FTS。
-                index_query_mode = "single_char_recent_probe"
-                where_parts: list[str] = ["instr(m.text, ?) > 0"]
-                params: list[Any] = [single_char_token]
+                index_query_mode = "single_char_recent_probe" if tokens else "type_filter"
+                where_parts: list[str] = ["instr(m.text, ?) > 0"] if tokens else []
+                params: list[Any] = [single_char_token] if tokens else []
 
                 if username:
                     where_parts.append("m.username = ?")
@@ -5297,36 +5296,53 @@ async def _search_chat_messages_via_fts(request: Request, *, q: str, account: Op
 
 
 @router.get("/api/chat/search", summary="搜索聊天记录（消息）")
-async def search_chat_messages(request: Request, q: str, account: Optional[str]=None, username: Optional[str]=None, sender: Optional[str]=None, session_type: Optional[str]=None, limit: int=50, offset: int=0, start_time: Optional[int]=None, end_time: Optional[int]=None, render_types: Optional[str]=None, include_hidden: bool=False, include_official: bool=False, source: Optional[str]=None, session_limit: int=200, per_chat_scan: int=200, scan_limit: int=20000, retrieval_mode: str='keyword', search_ticket: Optional[str]=None):
+async def search_chat_messages(request: Request, q: str, account: Optional[str]=None, username: Optional[str]=None, sender: Optional[str]=None, session_type: Optional[str]=None, limit: int=50, offset: int=0, start_time: Optional[int]=None, end_time: Optional[int]=None, render_types: Optional[str]=None, include_hidden: bool=False, include_official: bool=False, source: Optional[str]=None, session_limit: int=200, per_chat_scan: int=200, scan_limit: int=20000, retrieval_mode: str='keyword', search_ticket: Optional[str]=None, strict_paging: bool=False):
     source_requested = _normalize_chat_source(source)
 
     if retrieval_mode not in {'keyword', 'hybrid'}:
         raise HTTPException(400, '不支持的检索方式')
+    if not str(q).strip():
+        if retrieval_mode == 'hybrid':
+            raise HTTPException(400, '智能搜索需要关键词；仅按类型筛选请使用关键词模式')
+        types = {part.strip() for part in str(render_types or '').split(',') if part.strip()}
+        if not types:
+            raise HTTPException(400, '请指定关键词或消息类型')
+        if not types <= {'text', 'image', 'emoji', 'video', 'voice', 'file', 'link', 'quote',
+                         'chatHistory', 'transfer', 'redPacket', 'location', 'voip', 'system'}:
+            raise HTTPException(400, '不支持的消息类型')
+    requested_mode = retrieval_mode
+    if limit <= 0 or (strict_paging and offset < 0):
+        raise HTTPException(400, '无效的检索分页参数')
+    limit = min(limit, 200)
+    offset = max(offset, 0)
+    if strict_paging and search_ticket and retrieval_mode != 'hybrid':
+        raise HTTPException(409, {'code': 'search_ticket_invalid', 'message': '检索方式已改变，请重新开始搜索；已取得证据仍保留'})
     requested_hybrid = retrieval_mode == 'hybrid'
     if requested_hybrid:
         from ..local_search.service import get_local_search
         local_config = get_local_search().config(_resolve_account_dir(account).name)
-        if not local_config['enabled'] or not local_config.get('active'):
+        if not strict_paging and (not local_config['enabled'] or not local_config.get('active')):
             retrieval_mode = 'keyword'
 
-    response = await _search_chat_messages_via_fts(
-        request,
-        q=q,
-        account=account,
-        username=username,
-        sender=sender,
-        session_type=session_type,
-        limit=200 if retrieval_mode == 'hybrid' else limit,
-        offset=0 if retrieval_mode == 'hybrid' else offset,
-        start_time=start_time,
-        end_time=end_time,
-        render_types=render_types,
-        include_hidden=include_hidden,
-        include_official=include_official,
-        source=source_requested,
-
-    )
+    # 严格续页只使用票据候选；基础全文索引的重建不能使已取得的候选失效。
+    if strict_paging and requested_hybrid and (offset or search_ticket):
+        response = {}
+    elif retrieval_mode == 'hybrid' and _make_search_tokens(q) and not _build_fts_query(q):
+        # 基础 FTS 的查询语法不能表达纯引号；派生 FTS 保留这些字符并独立复核原文。
+        response = {'hits': [], 'total': 0, 'baseKeywordCoverage': {
+            'status': 'unsupported_query', 'message': '基础全文索引不支持该查询，字面匹配来自已升级的本地语义索引'}}
+    else:
+        response = await _search_chat_messages_via_fts(
+            request, q=q, account=account, username=username, sender=sender, session_type=session_type,
+            limit=200 if retrieval_mode == 'hybrid' else limit,
+            offset=0 if retrieval_mode == 'hybrid' else offset,
+            start_time=start_time, end_time=end_time, render_types=render_types,
+            include_hidden=include_hidden, include_official=include_official, source=source_requested)
+    if strict_paging and response.get('status') in {'index_building', 'index_error'}:
+        raise HTTPException(409 if response['status'] == 'index_building' else 503,
+                            {'code': response['status'], 'message': response['message']})
     if isinstance(response, dict):
+        response.update(requestedRetrievalMode=requested_mode, retrievalMode='keyword')
         if source_requested in {"auto", "decrypted"}:
             response.setdefault("source", "decrypted_index")
             response.setdefault(
@@ -5338,7 +5354,7 @@ async def search_chat_messages(request: Request, q: str, account: Optional[str]=
                 },
             )
     if retrieval_mode == 'hybrid':
-        from ..local_search.service import get_local_search
+        from ..local_search.service import get_local_search, RetrievalFailure
         from ..chat_export_service import get_chat_export_targets_preview
         account_dir = _resolve_account_dir(account)
         account_id = account_dir.name
@@ -5347,8 +5363,13 @@ async def search_chat_messages(request: Request, q: str, account: Optional[str]=
         usernames = [x['username'] for x in targets['targets'] if not username or x['username'] == username]
         if session_type == 'group': usernames = [u for u in usernames if u.endswith('@chatroom')]
         elif session_type == 'single': usernames = [u for u in usernames if not u.endswith('@chatroom')]
-        combined = await get_local_search().hybrid(account_id, response, q, usernames, start_time, end_time,
-            sender, render_types.split(',') if render_types else None, offset, limit, search_ticket)
+        try:
+            combined = await get_local_search().hybrid(account_id, response, q, usernames, start_time, end_time,
+                sender, render_types.split(',') if render_types else None, offset, limit, search_ticket,
+                strict_paging=strict_paging, paging_context=(source_requested, session_type, include_hidden, include_official))
+        except RetrievalFailure as error:
+            raise HTTPException(error.status_code, {'code': error.code, 'message': str(error),
+                                                    'coverage': error.coverage}) from error
         if combined.get('retrievalMode') == 'keyword':
             # 降级后恢复原关键词分页，不能在仅有 200 条的召回窗口中继续切片。
             fallback = await _search_chat_messages_via_fts(request, q=q, account=account, username=username,
@@ -5357,7 +5378,7 @@ async def search_chat_messages(request: Request, q: str, account: Optional[str]=
                 include_hidden=include_hidden, include_official=include_official,
                 source=source_requested)
             combined = {**fallback, 'retrievalMode': 'keyword', 'coverage': combined['coverage']}
-        return combined
+        return {**combined, 'requestedRetrievalMode': requested_mode}
     if requested_hybrid and isinstance(response,dict):
         response = {**response, 'retrievalMode':'keyword','coverage':{'message':'本地语义检索尚未就绪，当前展示关键词结果'}}
     return response

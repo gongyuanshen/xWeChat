@@ -59,6 +59,12 @@
         </span>
       </button>
 
+      <button type="button" class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center" title="本地资料夹" aria-label="本地资料夹" :aria-current="isLibraryRoute ? 'page' : undefined" @click="goLibrary">
+        <span :class="{ 'sidebar-rail-plate-active': isLibraryRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center"><FolderOpen class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isLibraryRoute }" :stroke-width="1.7" aria-hidden="true" /></span>
+      </button>
+      <button type="button" class="sidebar-rail-action w-full h-[var(--sidebar-rail-step)] flex items-center justify-center" title="附件中心" aria-label="附件中心" :aria-current="isAttachmentsRoute ? 'page' : undefined" @click="navigateTo('/attachments')">
+        <span :class="{ 'sidebar-rail-plate-active': isAttachmentsRoute }" class="sidebar-rail-plate w-[var(--sidebar-rail-btn)] h-[var(--sidebar-rail-btn)] rounded-[14px] flex items-center justify-center"><Paperclip class="sidebar-rail-icon w-[var(--sidebar-rail-icon)] h-[var(--sidebar-rail-icon)]" :class="{ 'sidebar-rail-icon-active': isAttachmentsRoute }" :stroke-width="1.7" aria-hidden="true" /></span>
+      </button>
       <!-- Moments -->
       <button
         type="button"
@@ -510,7 +516,7 @@
 
 <script setup>
 import { storeToRefs } from 'pinia'
-import { Bot } from '@lucide/vue'
+import { Bot, FolderOpen, Paperclip } from '@lucide/vue'
 import { buildAccountAvatarUrl } from '~/lib/account-avatar'
 import { useChatAccountsStore } from '~/stores/chatAccounts'
 import { usePrivacyStore } from '~/stores/privacy'
@@ -724,6 +730,9 @@ const selectAccountFromDialog = async (account) => {
 }
 
 const isChatRoute = computed(() => route.path?.startsWith('/chat'))
+const isLibraryRoute = computed(() => route.path === '/library')
+const isAttachmentsRoute = computed(() => route.path === '/attachments')
+const goLibrary = async () => { await navigateTo('/library') }
 const isAgentRoute = computed(() => route.path === '/agent' || route.path?.startsWith('/agent/'))
 const isSnsRoute = computed(() => route.path?.startsWith('/sns'))
 const isFavoritesRoute = computed(() => route.path?.startsWith('/favorites'))

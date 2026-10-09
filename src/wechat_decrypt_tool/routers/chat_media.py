@@ -2468,7 +2468,7 @@ async def get_chat_image(
             allowDeepScan=bool(allow_deep_scan),
             candidateCount=len(candidates),
         )
-        raise HTTPException(status_code=404, detail="Image not found.")
+        raise HTTPException(status_code=404, detail="本机找不到该图片资源。请先在电脑版微信中打开对应图片并下载原图，再返回重试；若仍未找到，请刷新当前账号数据后重试。")
 
     candidates_started_at = time.perf_counter()
     candidates.extend(await account_to_thread(account_dir, _iter_media_source_candidates, p))
@@ -2575,7 +2575,7 @@ async def get_chat_image(
 
     if not chosen:
         trace("response:error", result="decode-failed", decodeAttempts=decode_attempts)
-        raise HTTPException(status_code=422, detail="Image found but failed to decode/decrypt.")
+        raise HTTPException(status_code=422, detail="本地图片已找到，但解码或解密失败。请确认电脑版微信能正常打开此图片，再检查资源完整性和当前账号的图片解密设置。")
 
     trace(
         "decode:chosen",
@@ -3053,7 +3053,7 @@ async def get_chat_video(
         )
     if not p:
         trace("response:error", result="source-not-found", allowDeepScan=bool(allow_deep_scan))
-        raise HTTPException(status_code=404, detail="Video not found.")
+        raise HTTPException(status_code=404, detail="本机找不到该视频资源。请先在电脑版微信中打开对应视频并完整下载，再返回重试；若仍未找到，请刷新当前账号数据后重试。")
 
     # Fast path MP4??? FileResponse??? Range?
     probe_started_at = time.perf_counter()

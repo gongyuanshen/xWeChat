@@ -81,6 +81,20 @@ it('成功零结果保留结果数量和实际检索方式', () => {
   expect(view.find('.agent-tool-error').exists()).toBe(false)
 })
 
+it('关键词请求显示请求与实际模式，不误称为降级', () => {
+  const view = mount(AgentToolCall, { props: { items: [{ ...failed, status: 'completed',
+    requested_retrieval_mode: 'keyword', result: { returned: 1, retrieval_mode: 'keyword' } }], now: 0 } })
+  expect(view.text()).toContain('请求：关键词检索')
+  expect(view.text()).toContain('实际：关键词检索')
+  expect(view.text()).not.toContain('退回')
+})
+
+it('混合请求失败仍显示请求模式且不伪造执行模式', () => {
+  const view = mount(AgentToolCall, { props: { items: [{ ...failed, requested_retrieval_mode: 'hybrid' }], now: 0 } })
+  expect(view.text()).toContain('请求：混合检索')
+  expect(view.text()).toContain('未记录实际执行模式')
+})
+
 it('重试成功仍保留首次错误和部分完成状态', () => {
   const view = mount(AgentToolCall, { props: { items: [failed, { ...failed, id: 'retry', status: 'completed',
     result: { returned: 2, retrieval_mode: 'keyword' } }], now: 0 } })

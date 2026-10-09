@@ -18,9 +18,11 @@
     </div>
 
     <MessageItem
-      v-for="message in renderMessages"
-      :key="message.id"
-      :message="message"
+      v-for="row in renderMessages"
+      :key="row.message.id"
+      :message="row.message"
+      :show-time-divider="row.showTimeDivider"
+      :time-divider="row.timeDivider"
       :state="state"
     />
   </div>

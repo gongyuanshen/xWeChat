@@ -51,6 +51,26 @@ const setup = (fetchCounts = vi.fn(async () => response())) => {
   return { args, search, load, cells, fetchCounts }
 }
 
+it('finds the viewport date in a long ordered list without reading every preceding row', async () => {
+  const { args, search } = setup()
+  const container = document.createElement('div')
+  const reads = vi.fn()
+  container.getBoundingClientRect = () => ({ top: 0 })
+  for (let index = 0; index < 4096; index++) {
+    const row = document.createElement('div')
+    row.dataset.msgId = String(index)
+    row.dataset.createTime = String(new Date(2020, 1, 1 + Math.floor(index / 200)).getTime() / 1000)
+    row.getBoundingClientRect = () => { reads(); return { bottom: (index - 3000) * 50 + 24 } }
+    container.append(row)
+  }
+  args.messageContainerRef.value = container
+  search.timeSidebarOpen.value = true
+  search.syncTimeSidebarSelectedDateFromScroll()
+  await vi.advanceTimersByTimeAsync(32)
+  expect(search.timeSidebarSelectedDate.value).toBe('2020-02-16')
+  expect(reads.mock.calls.length).toBeLessThanOrEqual(13)
+})
+
 describe('月历请求与状态', () => {
   it('复用相同月份请求，完整统计后才启用有记录的日期', async () => {
     const task = deferred()

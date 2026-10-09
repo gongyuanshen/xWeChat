@@ -134,7 +134,7 @@ class SnapshotRefreshService:
             raise SnapshotRefreshError("validation", "Select the canonical account explicitly")
         current = get_current_snapshot(context.account_dir)
         state = {
-            "account": account, "enabled": False, "running": False, "phase": "disabled",
+            "account": account, "enabled": False, "running": False, "phase": "disabled", "user_paused": False,
             "interval_seconds": 30, "last_checked_at": None, "last_success_at": None,
             "probe_interval_seconds": 0.5, "last_check_trigger": None,
             "revision": 0, "generation": None, "guarantee": "stable_observation", "error": None,
@@ -200,15 +200,16 @@ class SnapshotRefreshService:
             raise SnapshotRefreshError("key", "Saved database key must contain exactly 64 hexadecimal characters")
         return context, source, key
 
-    def start(self, account: str, *, interval_seconds: float = 30) -> dict[str, Any]:
+    def start(self, account: str, *, interval_seconds: float = 30, resume: bool = False) -> dict[str, Any]:
         if isinstance(interval_seconds, bool) or not math.isfinite(interval_seconds) or interval_seconds < 1:
             raise SnapshotRefreshError("validation", "interval_seconds must be a finite number of at least 1")
-        return self._launch(account, continuous=True, interval_seconds=interval_seconds)
+        return self._launch(account, continuous=True, interval_seconds=interval_seconds, resume=resume)
 
     def once(self, account: str) -> dict[str, Any]:
         return self._launch(account, continuous=False)
 
-    def _launch(self, account: str, *, continuous: bool, interval_seconds: float | None = None) -> dict[str, Any]:
+    def _launch(self, account: str, *, continuous: bool, interval_seconds: float | None = None,
+                resume: bool = False) -> dict[str, Any]:
         account = self._validate_account(account)
         with self._lock:
             if self._closed:
@@ -220,6 +221,9 @@ class SnapshotRefreshService:
                     require_no_legacy_database_write(account_dir)
                 except SnapshotRegistryError as exc:
                     raise SnapshotRefreshError("busy", str(exc), 409) from exc
+            state = self._state(account)
+            if continuous and state["user_paused"] and not resume:
+                raise SnapshotRefreshError("paused", "用户已暂停后台同步，请主动恢复后再启动。", 409)
             if self._active is not None:
                 active_state = self._states[self._active]
                 if self._active == account and not continuous and active_state["enabled"]:
@@ -230,7 +234,6 @@ class SnapshotRefreshService:
                 raise SnapshotRefreshError("busy", f"Snapshot refresh is already active for {self._active}; stop it first", 409)
             if self._thread is not None and self._thread.is_alive():
                 raise SnapshotRefreshError("busy", "Previous snapshot refresh worker is finishing", 409)
-            state = self._state(account)
             if continuous:
                 state.update(interval_seconds=interval_seconds)
             state.update(enabled=continuous, running=True, phase="checking", error=None)
@@ -250,6 +253,8 @@ class SnapshotRefreshService:
                 self._fail(state, "worker", exc)
                 self._active = None
                 raise SnapshotRefreshError("worker", str(exc), 500) from exc
+            if continuous:
+                state["user_paused"] = False
             return self._public(state)
 
     def stop_and_join(self, account: str) -> None:
@@ -280,11 +285,13 @@ class SnapshotRefreshService:
                     self._states.pop(name)
                     self._manifests.pop(name, None)
 
-    def stop(self, account: str) -> dict[str, Any]:
+    def stop(self, account: str, *, user_paused: bool = False) -> dict[str, Any]:
         account = self._validate_account(account)
         with self._lock:
             state = self._state(account)
             state["enabled"] = False
+            if user_paused:
+                state["user_paused"] = True
             if self._active == account:
                 self._stop.set()
                 self._wake.set()

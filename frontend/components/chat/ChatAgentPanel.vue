@@ -36,7 +36,10 @@
         </template>
         <template #message="{ message }">
           <div v-if="message.role === 'user'" class="agent-user"><p>{{ message.text }}</p></div>
-          <AgentRun v-else-if="message.turn.detail" :run="message.turn.detail" :now="now" :near-bottom="nearBottom" :latest="message.turn.id === run?.id" :name-for="nameFor" :view-state="processView" @locate="locate" @choose="chooseContact" @continue="runAction('continue')" @restart="restartRun(message.turn.id)" @settings="settings.openDialog('ai')" />
+          <template v-else-if="message.turn.detail">
+            <AgentRun :run="message.turn.detail" :now="now" :near-bottom="nearBottom" :latest="message.turn.id === run?.id" :name-for="nameFor" :view-state="processView" @locate="locate" @choose="chooseContact" @continue="runAction('continue')" @restart="restartRun(message.turn.id)" @settings="settings.openDialog('ai')" />
+            <div v-if="message.turn.detail.status === 'completed' && message.turn.detail.answer" class="agent-result-actions"><button type="button" @click="reportToSave = {kind: 'report', run_id: message.turn.id}">保存报告</button></div>
+          </template>
           <section v-else class="agent-reply">
             <button v-if="pastRunLoads[pastRunKey(message.turn.id)] === 'failed'" type="button" class="agent-process-toggle" @click="loadPastRun(message.turn.id)">处理过程加载失败，点击重试</button>
             <p v-else class="agent-loading" role="status">正在加载处理过程…</p>
@@ -66,11 +69,13 @@
     </div>
     </div>
 
+    <LibrarySaveDialog v-if="reportToSave" :open="!!reportToSave" :account="account" :item="reportToSave" @close="reportToSave = null" @saved="reportToSave = null" />
   </aside>
 </template>
 
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted, nextTick, provide } from 'vue'
+import LibrarySaveDialog from '~/components/library/LibrarySaveDialog.vue'
 import AiSidebar from './AiSidebar.vue'
 import AgentAnswer from './AgentAnswer.vue'
 import AgentCopyAction from './AgentCopyAction.vue'
@@ -95,6 +100,8 @@ const api = useAiApi(), settings = useSettingsDialog()
 const saved = useState('chat-agent-ui', () => ({ selected: {}, drafts: {}, pinned: {} }))
 const mode = ref(!isPage.value && props.focusTaskId ? 'tools' : 'agent'), expanded = ref(false), thread = ref(null), run = ref(null)
 const pastRuns = ref({})
+const reportToSave = ref(null)
+watch(() => props.account, () => { reportToSave.value = null }, { flush: 'sync' })
 saved.value.process ||= {}
 saved.value.views ||= {}
 saved.value.chatScopes ||= {}

@@ -109,9 +109,9 @@ API 手动分析在一条完整标签通过结构、四字限制和出处校验�
 
 ## 开发接口
 
-新增 `/api/ai/insights/tasks` 创建/列表、任务详情与取消、分页消息标签，以及 `/api/ai/insights/members` 发言成员查询。沿用本机访问和账号所有权校验；进度复用 `/api/ai/events`，事件类型为 `insight`。结构与接口细节见 [实施计划](superpowers/plans/2026-10-02-chat-insights.md)。现有摘要、自动任务和快捷回复接口保持原有契约。
+新增 `/api/ai/insights/tasks` 创建/列表、任务详情与取消、分页消息标签，以及 `/api/ai/insights/members` 发言成员查询。沿用本机访问和账号所有权校验；进度复用 `/api/ai/events`，事件类型为 `insight`。现有摘要、自动任务和快捷回复接口保持原有契约。
 
-自动识别使用 `/api/ai/insights/live/state`、`/settings`、`/batches`，以及批次 `/{id}` 详情和 `/{id}/cancel`。客户端只提交消息身份、时间、SHA256，不提交可冒充权威原文的文本或发送者；服务端从当前账号真实消息源重新核对。SSE 类型为 `insight_live`，每条有效标签保存后发布，重连以已保存批次为准，绝不因为重连重新提交模型。具体约束见 [自动识别计划](superpowers/plans/2026-10-02-live-message-recognition.md)。
+自动识别使用 `/api/ai/insights/live/state`、`/settings`、`/batches`，以及批次 `/{id}` 详情和 `/{id}/cancel`。客户端只提交消息身份、时间、SHA256，不提交可冒充权威原文的文本或发送者；服务端从当前账号真实消息源重新核对。SSE 类型为 `insight_live`，每条有效标签保存后发布，重连以已保存批次为准，绝不因为重连重新提交模型。
 
 实现复用 AIStore、消息分页器、模型选择/预算/调度/调用审计、本地文件校验，以及已经安装的 onnxruntime、tokenizers、numpy 和 jieba。没有引入第二套数据库或桌面运行环境。六维雷达使用 SVG。
 

@@ -63,11 +63,11 @@ html[data-theme="dark"] .agent-thread-management .is-destructive, html[data-them
 /* 工具页嵌入后不沿用独立侧栏层级，保证顶部菜单始终可见、可点击。 */
 .agent-header { position:relative; z-index:2; display:flex; gap:4px; align-items:center; padding:10px 16px; min-height:54px; box-sizing:border-box; flex-shrink:0; }
 .agent-header strong { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; font-size:14px; white-space:nowrap; margin-right:4px; }
-.agent-header button { display:grid; place-items:center; width:28px; height:30px; padding:0; color:var(--ag-muted); }
+.agent-header > button, .agent-menu-anchor > button { display:grid; place-items:center; width:28px; height:30px; padding:0; color:var(--ag-muted); }
 .agent-brand { width:28px; height:28px; display:grid; place-items:center; color:#079b57; font-size:18px; flex-shrink:0; }
 .agent-menu-anchor { position:relative; }
 .agent-menu { position:absolute; top:36px; right:0; width:190px; z-index:10; padding:5px; background:var(--ag-bg); border:1px solid var(--ag-border); border-radius:9px; box-shadow:0 8px 28px #0002; }
-.agent-menu button { display:flex; gap:10px; width:100%; height:36px; padding:0 10px; text-align:left; color:inherit; font-size:13px; }
+.agent-menu button { display:flex; align-items:center; gap:10px; width:100%; height:36px; padding:0 10px; text-align:left; white-space:nowrap; color:inherit; font-size:13px; }
 .agent-menu button > :is(i,svg):last-child:not(:first-child) { margin-left:auto; color:#079b57; }
 .agent-tools-heading { display:flex; align-items:center; gap:14px; padding:5px 12px; border-bottom:1px solid var(--ag-border); font-size:12px; }
 .agent-tools-heading button { color:var(--ag-muted); }
@@ -471,7 +471,7 @@ html[data-theme=dark] .agent-input-actions .agent-send { color:#fff; background:
 .agent-panel.is-page { --ag-bg:var(--chat-page-bg,#fafaf6); --ag-soft:var(--chat-subtle-bg,#eef2ee); --ag-border:var(--chat-input-border,#dce5dd); --ag-muted:var(--chat-text-secondary,var(--app-text-secondary,#586960)); position:relative; inset:auto; width:100%; max-width:none; flex:1; border:0; box-shadow:none; z-index:0; }
 .agent-panel.is-page .agent-header { padding:14px 24px; min-height:64px; gap:8px; }
 .agent-panel.is-page .agent-header strong { font-size:15px; font-weight:600; }
-.agent-panel.is-page .agent-header button { width:32px; height:32px; }
+.agent-panel.is-page .agent-header > button, .agent-panel.is-page .agent-menu-anchor > button { width:32px; height:32px; }
 .agent-panel.is-page .agent-thread-list { position:static; inset:auto; width:232px; box-shadow:none; }
 .agent-panel.is-page .agent-reading { padding-bottom:14px; }
 .agent-panel.is-page .agent-message-list,.agent-panel.is-page .agent-composer { box-sizing:border-box; width:100%; max-width:940px; margin-inline:auto; }

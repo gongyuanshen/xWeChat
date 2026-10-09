@@ -30,7 +30,7 @@
         <p v-else-if="item.action === 'commit_findings' && item.status === 'completed'">{{ saveSummary(item) }}</p>
         <p v-else-if="returned(item) !== null">{{ item.cached ? '复用已读结果 · ' : '' }}{{ item.result.returned }} 条结果{{ item.result.has_more ? ' · 还有更多' : '' }}</p>
         <p v-if="item.result?.error" class="agent-tool-error">{{ item.result.error }}</p>
-        <p v-if="item.action === 'search_messages' && (item.status !== 'failed' || item.result?.retrieval_mode || item.result?.data_source)" class="agent-retrieval-label">{{ retrievalLabel(item) }}</p>
+        <p v-if="item.requested_retrieval_mode || item.result?.requested_retrieval_mode || (item.action === 'search_messages' && (item.status !== 'failed' || item.result?.retrieval_mode || item.result?.data_source))" class="agent-retrieval-label">{{ retrievalLabel(item) }}</p>
         <p v-if="item.result?.match_counts">本页关键词命中 {{ item.result.match_counts.keyword }} 条 · 语义命中 {{ item.result.match_counts.semantic }} 条（同一消息可同时命中）</p>
         <p v-if="item.result?.realtime_coverage">实时回查：本机已检查 {{ item.result.realtime_coverage.scanned }} 条，匹配 {{ item.result.realtime_coverage.matched }} 条；已查 {{ item.result.realtime_coverage.conversations_completed }} / {{ item.result.realtime_coverage.conversations }} 个会话。{{ item.result.realtime_coverage.recent_gap_complete ? '本次实时缺口已查完，不代表全部历史完整覆盖。' : '仍有实时消息待查。' }}</p>
         <p v-if="item.result?.warning" class="agent-coverage">{{ item.result.warning }}</p>
@@ -112,6 +112,7 @@ const hasInspectionDetails = item => Boolean(
   || (item.action === 'compact_context' && item.result?.saved)
   || item.result?.error || item.result?.warning || item.result?.note
   || item.result?.match_counts || item.result?.realtime_coverage
+  || item.requested_retrieval_mode || item.result?.requested_retrieval_mode
   || (item.action === 'search_messages' && (item.result?.retrieval_mode || item.result?.data_source))
   || (!grouped.value && item.action?.includes('search') && returned(item) !== null)
   || ['failed', 'paused', 'superseded'].includes(item.status)
@@ -140,7 +141,12 @@ const summary = computed(() => {
   return [fresh.length ? `${fresh.reduce((sum, item) => sum + returned(item), 0)} 条消息` : '', reused ? `含 ${reused} 次复用` : ''].filter(Boolean).join(' · ')
 })
 const date = value => value != null ? new Date(value * 1000).toLocaleString() : '不限'
-const retrievalLabel = item => item.result?.data_source === 'realtime_keyword' ? '实时关键词回查 · 无关原文仅在本机过滤' : item.result?.retrieval_mode === 'hybrid' ? '智能检索：关键词＋语义（按意思查找）' : item.result?.retrieval_mode === 'keyword' ? '已退回关键词检索 · 展开查看原因' : item.status === 'running' ? '正在确认检索方式' : '此步骤未记录实际检索方式'
+const retrievalName = mode => mode === 'hybrid' ? '混合检索（关键词＋语义）' : mode === 'keyword' ? '关键词检索' : ''
+const retrievalLabel = item => {
+  const requested = retrievalName(item.requested_retrieval_mode || item.result?.requested_retrieval_mode)
+  const actual = item.result?.data_source === 'realtime_keyword' ? '实时关键词回查' : retrievalName(item.result?.retrieval_mode)
+  return [requested ? `请求：${requested}` : '', actual ? `实际：${actual}` : item.status === 'running' ? '等待执行结果' : '未记录实际执行模式'].filter(Boolean).join(' · ')
+}
 </script>
 
 <style scoped>

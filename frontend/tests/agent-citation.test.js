@@ -1,5 +1,8 @@
 import { mount, flushPromises } from '@vue/test-utils'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ref } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
+import { usePrivacyStore } from '../stores/privacy'
 import AgentAnswer from '../components/chat/AgentAnswer.vue'
 import { createAnchorContextCache } from '../utils/anchorContextCache'
 
@@ -11,9 +14,30 @@ const mountAnswer = navigation => {
   return wrapper
 }
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve=yes; reject=no }); return { promise, resolve, reject } }
-afterEach(() => { wrapper?.unmount(); wrapper=null; vi.restoreAllMocks() })
+beforeEach(() => { vi.stubGlobal('ref', ref); setActivePinia(createPinia()) })
+afterEach(() => { wrapper?.unmount(); wrapper=null; vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 describe('引用预览交互', () => {
+  it('真实引用浮层的头像、身份和原文独立响应隐私开关，定位与关闭仍可用', async () => {
+    const privacy = usePrivacyStore(), view = mountAnswer({})
+    await view.find('.agent-ref').trigger('click'); await flushPromises()
+    const preview = view.find('.agent-citation-preview')
+    const sensitive = () => [preview.find('.agent-avatar'), preview.find('header strong'), preview.find('.agent-citation-text')]
+    for (const field of sensitive()) expect(field.element.closest('.privacy-blur')).toBeNull()
+    privacy.set(true); await flushPromises()
+    for (const field of sensitive()) {
+      const boundary = field.element.closest('.privacy-blur')
+      expect(boundary, field.element.outerHTML).not.toBeNull()
+      expect(preview.element.contains(boundary)).toBe(true)
+    }
+    for (const button of preview.findAll('button')) {
+      expect(button.element.closest('.privacy-blur')).toBeNull()
+      expect(button.attributes('disabled')).toBeUndefined()
+    }
+    privacy.set(false); await flushPromises()
+    for (const field of sensitive()) expect(field.element.closest('.privacy-blur')).toBeNull()
+  })
+
   it('人物打开实际来源序号，未在正文编号的关联原文不冒充来源 1', async () => {
     const id = 'c'.repeat(24), inspect = vi.fn(() => true)
     wrapper = mount(AgentAnswer, {attachTo:document.body, props:{
